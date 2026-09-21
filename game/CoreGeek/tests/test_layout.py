@@ -76,11 +76,12 @@ class TestLayout(unittest.TestCase):
         self.assertIsNotNone(layout)
         self.assertNotIn(Pos(12, 24), layout.turret_cells)
 
-    def test_wall_priority_near_cp(self):
+    def test_wall_priority_front_first(self):
+        """建造优先级：正面（迎敌侧=离 CP 最远）优先（实战复盘修正）。"""
         turn = make_turn((10, 24))
-        layout = compute_layout(turn, "E")
+        layout = compute_layout(turn, "W")
         dists = [distance(w, layout.control_point) for w in layout.wall_cells]
-        self.assertEqual(dists, sorted(dists))
+        self.assertEqual(dists, sorted(dists, reverse=True))
 
 
 if __name__ == "__main__":

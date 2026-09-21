@@ -69,6 +69,36 @@ class TestThreatLevels(unittest.TestCase):
         self.assertLess(trace["threat"]["breach_rounds"], trace["threat"]["kill_rounds"])
 
 
+class TestBigWaveNight1(unittest.TestCase):
+    def test_survive_70_robot_wave(self):
+        """复刻 TeamB 实战：Day1 夜潮 60小+10中，正面墙优先+贴脸开火 → 基地零伤。"""
+        import random
+
+        sim = SimWorld(station_pos=(30, 10), mines={(35, 13): "stone", (35, 15): "copper", (18, 3): "stone"})
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        # 正面（西/迎敌侧）墙优先
+        west = [w for w in sim.walls() if w["pos"]["x"] <= 28]
+        self.assertGreaterEqual(len(west), 4)
+        random.seed(7)
+        rid = 30000
+        for _ in range(60):
+            sim.spawn_robot(random.randint(18, 22), random.randint(6, 14), "smallRobot", hp=40, rid=rid)
+            rid += 1
+        for _ in range(10):
+            sim.spawn_robot(random.randint(19, 23), random.randint(7, 13), "middleRobot", hp=60, rid=rid)
+            rid += 1
+        attacks = 0
+        for _ in range(60):
+            response, trace = brain.decide(sim.payload())
+            attacks += sum(1 for c in response["roleCommandMap"].values() if c.get("action") == "attack")
+            sim.apply(response)
+            sim.advance()
+        self.assertTrue(sim.base_alive)
+        self.assertGreaterEqual(sim.role(10013)["health"], 1400)  # 几乎零伤
+        self.assertGreaterEqual(attacks, 40)  # 火力全开（实战仅 17 次的反面）
+
+
 class TestWorkerRecall(unittest.TestCase):
     def test_recall_on_critical(self):
         """CRITICAL 夜：工人进入 CRITICAL_DEFENSE 并回撤到基地邻域。"""
@@ -107,6 +137,22 @@ class TestEvade(unittest.TestCase):
         self.assertEqual(cmd.get("action"), "move")
         target = Pos(cmd["targetPos"][0]["x"], cmd["targetPos"][0]["y"])
         self.assertGreater(distance(target, Pos(mx + 2, my)), distance(Pos(mx, my), Pos(mx + 2, my)))
+
+
+class TestFireAdjacentRobot(unittest.TestCase):
+    def test_fire_at_robot_next_to_building(self):
+        """机器人贴脸己方建筑时也必须开火（实战复盘：原友伤惩罚导致全面哑火）。"""
+        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        # 机器人直接贴到基地旁（模拟破墙后贴脸）
+        sim.spawn_robot(11, 22, "smallRobot", hp=40, rid=30901)
+        response, trace = brain.decide(sim.payload())
+        attacks = [
+            c for c in response["roleCommandMap"].values() if c.get("action") == "attack"
+        ]
+        self.assertTrue(attacks, "贴脸机器人必须开火")
+        self.assertNotEqual(trace.get("fire", {}).get("reason"), "no_valuable_target")
 
 
 class TestControlExclusion(unittest.TestCase):

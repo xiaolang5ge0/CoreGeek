@@ -230,13 +230,14 @@ class Brain:
             stones = worker.backpack.count("stone")
             if not walls_missing or stones < 1 or (stones < STONE_BATCH and not urgent):
                 continue
-            cell = min(
-                (c for c in walls_missing if c not in assigned),
-                key=lambda c: distance(worker.pos, c),
-                default=None,
+            # 按布局优先级派单（正面迎敌侧优先），不按离工人远近
+            cell = next(
+                (c for c in layout.wall_cells if c in walls_missing and c not in assigned),
+                None,
             )
             if cell is not None:
                 fsm.build = (cell, WALL)
+                assigned.add(cell)
                 busy.add(worker.unit_id)
 
         # 升级任务分配：派给空闲工人（武器>墙>基地，券费已含预算保留；同一建筑不重复派单）

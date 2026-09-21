@@ -17,7 +17,8 @@ SPLASH_DAMAGE = 10
 LETHAL_BONUS = 15      # 能杀死的优先（最快降低敌方 DPS）
 APPROACH_RADIUS = 12   # 距基地锚点 12 格内开始加权
 SELF_TEAM_BONUS = 5    # 以我方基地为目标的机器人优先（两批机器人分攻双方）
-FRIENDLY_PENALTY = 1000
+# U10 已由实战证据关闭：紧邻己方建筑的机器人必须能打（墙聚怪+火箭隔山打牛是核心玩法），
+# 不再扣友伤惩罚（2026-09-21 TeamB 实战：惩罚导致基地被啃时全面哑火）。
 MIN_SCORE = CENTER_DAMAGE
 
 
@@ -63,7 +64,6 @@ class JointFirePlanner:
         ]
         if not robots:
             return (), 0
-        own_cells = turn.occupied_cells()
         station = turn.station()
         anchor = station.pos if station is not None else weapon.pos
         scored: list[tuple[int, int, int, int, int, Pos]] = []
@@ -86,8 +86,6 @@ class JointFirePlanner:
                 + max(0, APPROACH_RADIUS - distance(cell, anchor))
                 + (SELF_TEAM_BONUS if robot.target_team == turn.team_type else 0)
             )
-            if any(distance(cell, own) <= 1 for own in own_cells):
-                score -= FRIENDLY_PENALTY
             scored.append((score, -robot.health, -distance(weapon.pos, cell), cell.x, cell.y, cell))
         scored.sort(reverse=True)
         n_targets = max(1, weapon.level)

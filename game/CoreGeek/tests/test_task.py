@@ -150,6 +150,65 @@ class TestApiTask(unittest.TestCase):
         self.assertTrue(sim.submissions)
 
 
+class TestWsRealSpecFormat(unittest.TestCase):
+    def test_real_spec_format(self):
+        """真实 spec 格式：'- logs/alpha/ 必须存在，权限为 755' + '第 3 行：`port 8080`'。"""
+        def handler(cmd):
+            if "__FILE" in cmd:
+                return WS_LOCATE_RESULT
+            if "find . -maxdepth" in cmd:
+                return (
+                    "[exitCode:0]\n.\n./check\n./spec.md\n__SPEC__\n"
+                    "# 规范 alpha\n- logs/alpha/ 必须存在，权限为 755\n"
+                    "## 配置文件 config/alpha.conf\n- 第 3 行：`port 8080`\n"
+                    "__CHECK__\n[FAIL] 3/6\n"
+                )
+            if "mkdir" in cmd or "sed -i" in cmd:
+                return "[exitCode:0]\n[ OK ] 全部通过 (6/6)\nTOKEN: fc1e78eb2a5a"
+            return "[exitCode:0]\n"
+
+        sim = make_sim(tasks=[TASK], cmd_handler=handler, expected_answer="fc1e78eb2a5a")
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        self.assertGreaterEqual(sim.score, 50)
+        self.assertEqual(sim.prompts_seen, [])  # 确定性修复零 LLM
+        fix_cmds = [c for c in sim.cmds_seen if "mkdir" in c or "sed" in c]
+        self.assertTrue(any("logs/alpha" in c for c in fix_cmds))
+
+
+class TestApiAuthRetry(unittest.TestCase):
+    def test_bearer_retry(self):
+        """服务端要 Authorization: Bearer → 规划器确定性重发（不靠 LLM 试错）。"""
+        def handler(cmd):
+            if "__FILE" in cmd:
+                return API_LOCATE_RESULT
+            if "python3 -c" in cmd or "python -c" in cmd:
+                return "[exitCode:0]\n__API status=FAIL base=http://localhost:8899 paths=2 keys=2"
+            if "curl" in cmd and "X-API-Key" in cmd:
+                return (
+                    '[exitCode:0]\n{"status":"error","message":'
+                    '"Authentication failed: Missing \'Authorization\' header. Expected format: Bearer"}'
+                )
+            if "Authorization: Bearer" in cmd:
+                return '[exitCode:0]\n[{"city":"北京","weather":"晴"}]'
+            return "[exitCode:0]\n"
+
+        sim = make_sim(
+            tasks=[TASK],
+            llm_script=[
+                'CMD: curl -s -H "X-API-Key: heritage-api-key-2024" "http://localhost:8899/api/v1/heritage/search?city=北京"',
+                'ANSWER: {"city": "北京", "weather": "晴"}',
+            ],
+            cmd_handler=handler,
+            expected_answer="北京",
+        )
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        bearer_cmds = [c for c in sim.cmds_seen if "Authorization: Bearer" in c]
+        self.assertTrue(bearer_cmds, "应确定性重发 Bearer 请求")
+        self.assertIn("heritage-api-key-2024", bearer_cmds[0])
+
+
 class TestAcceptFailNoRetry(unittest.TestCase):
     def test_accept_fail_never_retry(self):
         """acceptTask FAIL（errorCode 4 红线）→ 立即放弃，绝不再试。"""

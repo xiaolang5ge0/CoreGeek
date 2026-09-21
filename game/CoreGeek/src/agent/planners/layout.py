@@ -166,5 +166,6 @@ def compute_layout(
         return None
 
     walls = [p for p in (to_abs(c) for c in CANONICAL_WALLS) if usable(p, "wall")]
-    walls.sort(key=lambda p: (distance(p, cp), p.x, p.y))
+    # 建造优先级：正面（迎敌侧，离 CP 最远）优先，再到侧面（实战复盘：正面必须先封）
+    walls.sort(key=lambda p: (-distance(p, cp), p.x, p.y))
     return BaseLayout(front, tuple(turrets), cp, tuple(walls))

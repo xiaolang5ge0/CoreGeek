@@ -36,7 +36,7 @@ HARVEST_PY = r'''
 import json, re, glob, urllib.request, urllib.error
 
 docs = " ".join(open(f, encoding="utf-8", errors="ignore").read() for f in glob.glob("**/*.md", recursive=True) + glob.glob("*.md"))
-m = re.search(r"(https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s\)\"']*)", docs)
+m = re.search(r"(https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[A-Za-z0-9_\-/\.]*)", docs)
 base = m.group(1).rstrip("/") if m else ""
 paths = [p for p in dict.fromkeys(re.findall(r"(/[a-zA-Z0-9_\-/]{2,40})", docs)) if "{" not in p][:8]
 keys = re.findall(r"(?:api[-_]?key|token|secret|key)\s*[:=：]\s*[\"']?([A-Za-z0-9_\-]{6,40})", docs, re.I)
@@ -129,6 +129,7 @@ class TaskSession:
     soft_fails: int = 0
     ws_fix_count: int = 0
     quiet_rounds: int = 0
+    auth_retried: bool = False
 
     def reset(self) -> None:
         self.__init__()
@@ -197,7 +198,14 @@ class TaskPlanner:
             out.submit = self._submit(session)
             return out
 
-        # 4. 阶段推进
+        # 4. 认证纠错：服务端要 Authorization: Bearer 而上轮用了别的头 → 确定性重试（不耗 LLM）
+        retry = self._auth_retry_cmd(session)
+        if retry is not None:
+            out.execute_cmd = retry
+            session.pending_cmd = retry
+            return out
+
+        # 5. 阶段推进
         session.quiet_rounds += 1
         if session.stage == "LOCATE":
             out.execute_cmd = LOCATE_CMD
@@ -281,6 +289,32 @@ class TaskPlanner:
             session.task_kind = "llm"
             session.stage = "LLM"  # 定位失败/其他 → LLM 兜底
 
+    def _auth_retry_cmd(self, session: TaskSession) -> str | None:
+        """服务端报 Missing 'Authorization' header → 用 Bearer 重发上次的请求（实战教训）。"""
+        if session.auth_retried:
+            return None
+        # 证据需含命令本身（密钥与 URL 在命令里，错误在输出里）
+        text = "\n".join(c + "\n" + r for c, r in session.evidence[-3:])
+        if "Missing 'Authorization' header" not in text and "Expected format" not in text:
+            return None
+        key = None
+        for pat in (
+            r"(?:api[-_]?key|token|secret|key)\s*[:=：]\s*[\"']?([A-Za-z0-9_\-]{6,40})",
+            r"X-API-Key:\s*([A-Za-z0-9_\-]{6,40})",
+            r"Bearer\s+([A-Za-z0-9_\-]{6,40})",
+        ):
+            m = re.search(pat, session.task_desc + "\n" + text, re.I)
+            if m:
+                key = m.group(1)
+                break
+        if key is None:
+            return None
+        urls = re.findall(r'"(https?://[^"]+)"', text)
+        if not urls:
+            return None
+        session.auth_retried = True
+        return f'curl -s -H "Authorization: Bearer {key}" "{urls[-1]}"'
+
     # ---- 工程修复类 ----
     def _ws_fix_cmd(self, session: TaskSession) -> str | None:
         if session.ws_fix_count >= 2:
@@ -302,6 +336,13 @@ class TaskPlanner:
             fixes.append(f"sed -i '{m.group(2)}s/.*/{m.group(3)}/' {m.group(1)}")
         for m in re.finditer(r"(?:目录|文件)\s*[：: ]*\s*([/\w.\-]+)[^\n]*?(?:权限|mode)\s*[:： ]?\s*(\d{3})", text):
             fixes.append(f'mkdir -p "{m.group(1)}" && chmod {m.group(2)} "{m.group(1)}"')
+        # 实战格式："- logs/alpha/ 必须存在，权限为 755"
+        for m in re.finditer(r"-\s*([/\w.\-]+/)\s*必须存在[，,]?\s*权限为\s*(\d{3})", text):
+            fixes.append(f'mkdir -p "{m.group(1)}" && chmod {m.group(2)} "{m.group(1)}"')
+        for m in re.finditer(r"第\s*(\d+)\s*行[：:]\s*`([^`]+)`", text):
+            target = re.search(r"([\w.\-]+\.(?:conf|cfg|ini|txt|yaml|yml|json))", text)
+            fname = target.group(1) if target else "config.conf"
+            fixes.append(f"sed -i '{m.group(1)}s/.*/{m.group(2)}/' {fname}")
         for m in re.finditer(r"第\s*(\d+)\s*行[^\n]*?(?:改为|应为|->)\s*[`'\"]?([^\n`'\"]+)", text):
             target = re.search(r"([\w.\-]+\.(?:conf|cfg|ini|txt|yaml|yml|json))", text)
             fname = target.group(1) if target else "config.conf"
