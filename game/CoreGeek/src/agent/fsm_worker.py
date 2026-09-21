@@ -103,12 +103,14 @@ class WorkerFSM:
         return cmd
 
     def _decide(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        # 修墙岗（夜间固定 ID 最小工人）：职责是留在墙内修墙，豁免群体/危险召回
+        is_repair = turn.is_night and getattr(ctx, "repair_worker", None) == self.unit_id
         # 0a. 夜间个体危险召回：仅当机器人逼近该工人时召回，并锁定在家到天亮（消除群体召回震荡）。
         #     夜1 有升级火箭基本无风险 → 工人应全力采集，不做群体 CRITICAL 召回。
         in_danger = self.unit_id in getattr(ctx, "danger_workers", ())
-        if turn.is_night and in_danger:
+        if turn.is_night and in_danger and not is_repair:
             self.night_home = True
-        if turn.is_night and self.night_home:
+        if turn.is_night and self.night_home and not is_repair:
             cell = ctx.recall_cell(self.unit_id) or getattr(ctx, "safe_anchor", None)
             if cell is not None and unit.pos != cell:
                 self.mine = None
@@ -120,28 +122,28 @@ class WorkerFSM:
                     return self._move(step, ctx)
             self.state = STATE_CRITICAL
             return None  # 在家待命，当晚不再外出
-        # 0b. 近身机器人闪避（安全 > 矿锁；逃向墙后内圈而非 CP 开口侧）
+        # 0b. 近身机器人闪避（安全 > 矿锁；修墙岗用更紧阈值——墙已破贴脸才逃）
         home = getattr(ctx, "safe_anchor", None) or getattr(ctx, "home_anchor", None)
-        if home is not None and distance(unit.pos, home) > EVADE_DIST:
+        evade_dist = 1 if is_repair else EVADE_DIST
+        if home is not None and distance(unit.pos, home) > evade_dist:
             close_robot = any(
                 r.alive and not r.dizzy
                 and r.target_team in ("", turn.team_type)
-                and distance(r.pos, unit.pos) <= EVADE_DIST
+                and distance(r.pos, unit.pos) <= evade_dist
                 for r in turn.robots
             )
             if close_robot:
                 self.mine = None
                 self.sell_vendor = None
                 self.state = STATE_EVADE
-                # 逃向 CP 邻域（CP 本身被开拓者占用，目标为其邻接格）
+                # 逃向内圈安全位（墙后），而非 CP 开口侧
                 step = step_toward(turn, unit, home, ctx.reserved)
                 if step is not None:
                     return self._move(step, ctx)
-        # 0c. 夜间修墙岗（Day3+ BOSS 夜/墙受损）：修复包/升级券就地维护，不外出
-        if turn.is_night and getattr(ctx, "repair_worker", None) == self.unit_id and not in_danger:
+        # 0c. 夜间修墙岗：修复包/升级券就地维护围墙，不外出（无物料也在墙内待命）
+        if is_repair:
             cmd = self._repair_cmd(turn, unit, ctx)
-            if cmd is not None:
-                return cmd
+            return cmd  # 可能为 None（墙内待命）
         # 1. 建造任务（白天，优先级最高）
         if self.build is not None:
             if turn.is_night:
