@@ -175,7 +175,7 @@ Request JSON
 | 语言/版本 | Python ≥ 3.11 | Demo `pyproject.toml` requires-python=">=3.11" |
 | 依赖 | **仅用标准库**（http.server/json/logging/heapq/dataclasses…），零第三方包 | Demo dependencies 为空；对战沙盒无法保证 pip 环境 |
 | 代码位置 | 开发统一在 `game/CoreGeek/` 下 | 用户明确 |
-| 打包产物 | `dist/CoreGeek.tar.gz`，**tar 根层直接含 `main3.py`、`run.sh`、`src/`**（平台扫描得到入口） | 用户明确：平台上传 tar.gz 直接加载 |
+| 打包产物 | `dist/CoreGeek.tar.gz`，**tar 内以顶层目录 `CoreGeek/` 包裹**（`CoreGeek/main3.py`、`CoreGeek/run.sh`、`CoreGeek/src/`） | 实战报错证实：平台在父目录解包后运行 `<root>/CoreGeek/main3.py` |
 | 打包排除 | `tests/`、`logs/`、`dist/`、`__pycache__`、`*.pyc`、`.idea/` | 减小体积、避免无关文件 |
 | 打包方式 | `python tools/build_package.py` 一键产出，P0 阶段先行验证打包-解包-启动链路 | 防止临赛打包翻车 |
 | 日志 | 遥测 JSONL 写相对路径 `logs/`，写失败静默降级 | 平台只读文件系统风险兜底 |
