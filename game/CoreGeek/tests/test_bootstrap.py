@@ -52,7 +52,7 @@ class TestDay1Bootstrap(unittest.TestCase):
 
     def test_layout_front_and_log(self):
         response, trace = run_rounds(self.brain, self.sim, 1)
-        self.assertEqual(self.brain.front, "E")  # 左上基地朝图心
+        self.assertEqual(self.brain.front, "W")  # 左上基地开口朝西（背向来敌）
         self.assertIn("layout", trace)
 
     def test_night1_fire_rotation(self):

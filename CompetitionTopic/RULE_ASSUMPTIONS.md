@@ -158,6 +158,11 @@
 | 日期/场次 | 验证项 | 观察到的证据 | 结论（状态变更） |
 |---|---|---|---|
 | 2026-09-21 首场 | 打包结构 | `python3: can't open file '/home/docker/CoreGeek/main3.py'` + 连续异常 | **平台在父目录解包、运行 `<root>/CoreGeek/main3.py`** → tar 必须含顶层 `CoreGeek/` 目录（已修复并复验） |
+| 2026-09-21 实战 | 墙向 | 机器人从图心方向来（challenger 左上→右方；defender 右下→左方） | **墙环必须朝来敌方向，开口/炮台在背侧**（此前建反，已修复） |
+| 2026-09-21 实战 | 日志 | 平台只见 stdout，文件日志取不到 | 遥测改为**每回合 stdout 打印完整 Request+Response** |
+| 2026-09-21 经验（《自进化策略.md》） | acceptTask 失败 | FAIL 计 errorCode 4（指令错误） | **acceptTask FAIL 立即放弃+终身回避该任务点，绝不重试**（5 次封号红线） |
+| 同上 | 任务预算 | timeout 通常 10-15 回合 | 任务求解必须快（定位2+执行2+提交1），LLM 严格单行 CMD:/ANSWER: |
+| 同上 | 任务类型 | 工程修复类（ws_N/ + ./check）/ API 类（localhost http）/ 通用 | 确定性修复优先于 LLM：sed/mkdir 解析 + harvest 探测，零 LLM 可完成工程类 |
 
 ### 实战必查清单（首场 PK 逐项核对）
 

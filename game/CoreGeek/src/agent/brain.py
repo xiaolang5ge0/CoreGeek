@@ -265,6 +265,8 @@ class Brain:
 
         for worker in workers:
             cmd = self._worker_fsm(worker).decide(turn, worker, ctx)
+            if cmd is None:
+                cmd = self._vacate_layout_cell(turn, worker, ctx)
             if cmd:
                 commands[worker.unit_id] = cmd
             ctx.reserve_from(cmd)
@@ -272,10 +274,14 @@ class Brain:
         pioneer = turn.pioneer()
         if pioneer is not None:
             ctx.home_anchor = layout.control_point
+            prev_state = self.pioneer_fsm.state
             cmd = self.pioneer_fsm.day_cmd(turn, pioneer, layout.control_point, ctx)
             if cmd:
                 commands[pioneer.unit_id] = cmd
                 ctx.reserve_from(cmd)
+            # 新任务确认 → 重置求解会话（同文本任务重复接取也必须全新开始）
+            if self.pioneer_fsm.state == STATE_TASK_WORK and prev_state != STATE_TASK_WORK:
+                self.task_session.reset()
             # 任务求解：仅驻留任务点且任务进行中（submit 不覆盖走位指令）
             if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
                 out = self.task_planner.work(turn, self.task_session)
@@ -328,6 +334,26 @@ class Brain:
             ctx.reserve_from(cmd)
         self._maybe_medicine(turn, commands)
 
+    def _vacate_layout_cell(self, turn: Turn, worker, ctx: _Ctx) -> dict[str, Any] | None:
+        """空闲工人站在炮台/控制点上时主动让位（否则该格永远无法建造/归位）。"""
+        if self.layout is None:
+            return None
+        hot = set(self.layout.turret_cells) | {self.layout.control_point}
+        if worker.pos not in hot:
+            return None
+        blocked = turn.blocked(worker)
+        cands = [
+            pos for pos in worker.pos.neighbours()
+            if pos not in hot and turn.land(pos) and pos not in blocked and pos not in ctx.reserved
+        ]
+        if not cands:
+            return None
+        station = turn.station()
+        anchor = station.pos if station is not None else worker.pos
+        cands.sort(key=lambda p: (distance(p, anchor), p.x, p.y))
+        ctx.note(worker.unit_id, "vacate_layout_cell")
+        return move_command(cands[0])
+
     # ---- 机器人出生点遥测（FRONT 修正证据，RULE_ASSUMPTIONS U2）----
     def _observe_spawns(self, turn: Turn, ctx: _Ctx) -> None:
         if turn.round_in_day != 70 or not turn.robots:  # 每夜第1回合
@@ -337,16 +363,18 @@ class Brain:
             return
         spawns = [(r.pos.x, r.pos.y) for r in turn.robots]
         self.robot_spawn_log.append({"day": turn.day_index, "spawns": spawns})
-        # 主来向：相对基地的 dominant axis（累计所有夜晚）
+        # 主来向：相对基地的 dominant axis（累计所有夜晚）；墙环应朝向来向（开口=其反向）
         sx = sum(x for day in self.robot_spawn_log for x, _ in day["spawns"])
         sy = sum(y for day in self.robot_spawn_log for _, y in day["spawns"])
         n = sum(len(day["spawns"]) for day in self.robot_spawn_log)
         cx, cy = station.pos.x + 0.5, station.pos.y - 0.5
         dx, dy = sx / n - cx, sy / n - cy
         observed = ("E" if dx > 0 else "W") if abs(dx) >= abs(dy) else ("N" if dy > 0 else "S")
-        ctx.trace["front_observed"] = observed
-        if self.front is not None and observed != self.front:
-            ctx.trace["front_recommendation"] = observed  # P4 仅记录，重建走证据驱动变更
+        opposite = {"W": "E", "E": "W", "N": "S", "S": "N"}
+        ctx.trace["robot_approach"] = observed
+        walls_facing = opposite[self.front] if self.front else None
+        if walls_facing is not None and observed != walls_facing:
+            ctx.trace["front_recommendation"] = opposite[observed]  # 重建走证据驱动变更
 
     # ---- 召回与自救 ----
     def _assign_recall_cells(self, turn: Turn) -> dict[int, Any]:

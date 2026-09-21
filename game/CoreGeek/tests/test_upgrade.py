@@ -88,6 +88,7 @@ class TestMineBlacklist(unittest.TestCase):
     def test_collect_failure_blacklists_mine(self):
         """新闻封矿：采集失败后该矿被拉黑，工人改选/闲置而不再重复采。"""
         sim = SimWorld(station_pos=(10, 24), mines={(8, 20): "copper"})
+        sim.add_mine((8, 20), "copper", remaining=30)  # 矿量充足，聚焦封矿逻辑
         brain = Brain()
         # 先让工人锁定铜矿
         run_rounds(brain, sim, 15)

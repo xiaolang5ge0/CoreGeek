@@ -252,6 +252,9 @@ class WorkerFSM:
             kind = turn.zones.get(pos)
             if self.ore_role == ORE_STONE and kind != "stone":
                 continue
+            # 墙未建完时石料岗专供石矿，经济岗不抢（防石料工无矿可采死锁）
+            if self.ore_role == ORE_MONEY and kind == "stone" and ctx.walls_missing:
+                continue
             dist = distance(unit.pos, pos)
             if self.ore_role == ORE_STONE:
                 key = (dist, pos.x, pos.y)

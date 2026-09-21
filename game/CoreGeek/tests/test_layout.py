@@ -13,13 +13,26 @@ def make_turn(station=(10, 24), mines=None):
 
 
 class TestChooseFront(unittest.TestCase):
-    def test_topleft_base_faces_east(self):
+    def test_topleft_base_opens_west(self):
+        """challenger 左上：机器人从右(东)来 → 开口朝西，墙在 右/上/下。"""
         turn = make_turn((10, 24))
+        self.assertEqual(choose_front(turn), "W")
+
+    def test_bottomright_base_opens_east(self):
+        """defender 右下：机器人从左(西)来 → 开口朝东，墙在 左/上/下。"""
+        turn = make_turn((30, 7))
         self.assertEqual(choose_front(turn), "E")
 
-    def test_bottomright_base_faces_west(self):
-        turn = make_turn((30, 7))
-        self.assertEqual(choose_front(turn), "W")
+    def test_wall_side_faces_robots(self):
+        """FRONT=W：墙环含东侧（来敌侧）列、不含西侧（开口侧）列。"""
+        turn = make_turn((10, 24))
+        layout = compute_layout(turn, "W")
+        walls = set(layout.wall_cells)
+        self.assertIn(Pos(13, 23), walls)      # 东侧列（距基地2格，x=xmax+2）
+        self.assertNotIn(Pos(8, 23), walls)    # 西侧列开口
+        # 炮台在西侧（背向来敌），与 CP 两两相邻
+        for turret in layout.turret_cells:
+            self.assertLessEqual(turret.x, 10)
 
 
 class TestLayout(unittest.TestCase):

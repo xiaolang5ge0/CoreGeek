@@ -43,21 +43,18 @@ class Telemetry:
             "trace": trace,
         }
         try:
-            if self._file is not None:
-                self._file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            line = json.dumps(record, ensure_ascii=False)
+        except Exception:
+            line = None
+        try:
+            if self._file is not None and line is not None:
+                self._file.write(line + "\n")
                 self._file.flush()
         except Exception:
             pass  # 静默降级
+        # 平台只暴露 stdout：每回合结构化打印完整 Request+Response（用户硬性要求）
         try:
-            commands = (response or {}).get("roleCommandMap") or {}
-            LOGGER.info(
-                "round=%s day=%s isDay=%s gold=%s cmds=%s",
-                round_no,
-                trace.get("day", "?"),
-                trace.get("is_day", "?"),
-                trace.get("gold", "?"),
-                {rid: c.get("action") for rid, c in commands.items()},
-            )
+            LOGGER.info("round_record %s", line if line is not None else "<unserializable>")
         except Exception:
             pass
 

@@ -8,8 +8,12 @@
     |空白|炮台|炮台|空白|空白|围墙|
     |空白|围墙|围墙|围墙|围墙|围墙|
 - 基地 2×2；墙在距基地切比雪夫距离 2 的三侧成环（≈14 格，开口侧不建）。
-- 3 炮台与控制点(CP)两两相邻，开拓者一站控三炮。
-- FRONT 动态判定（默认朝地图中心 dominant axis），坐标全部由变换生成，零硬编码。
+- **FRONT = 开口/炮台/通道侧，背向机器人来向；墙环朝向来敌**：
+  challenger 左上基地 → 机器人从右(东)来 → 墙在 右/上/下，FRONT=西；
+  defender 右下基地 → 机器人从左(西)来 → 墙在 左/上/下，FRONT=东。
+  （实战反馈纠正：此前 FRONT 朝向来敌，炮塔直接挨打，方向建反。）
+- 3 炮台与控制点(CP)两两相邻，开拓者一站控三炮；火箭无视阻挡跨墙输出。
+- 坐标全部由变换生成，零硬编码。
 """
 from __future__ import annotations
 
@@ -49,7 +53,11 @@ CANONICAL_WALLS = tuple(_canonical_walls())
 
 
 def choose_front(turn: Turn) -> str:
-    """FRONT 默认朝向：基地→地图中心的 dominant axis（Night1 后由遥测修正，P4）。"""
+    """FRONT（开口侧）默认朝向：**背向**地图中心的 dominant axis。
+
+    机器人出生点全局唯一且每晚固定（已确认），实战证实来自图心方向：
+    开口/炮台置于背侧（角落方向），墙环朝图心迎敌。
+    """
     station = turn.station()
     if station is None:
         return "S"
@@ -58,8 +66,8 @@ def choose_front(turn: Turn) -> str:
     dx = (turn.width - 1) / 2 - cx
     dy = (turn.height - 1) / 2 - cy
     if abs(dx) >= abs(dy):
-        return "E" if dx > 0 else "W"
-    return "N" if dy > 0 else "S"
+        return "W" if dx > 0 else "E"  # 中心在东侧 → 开口朝西（背向）
+    return "S" if dy > 0 else "N"
 
 
 @dataclass(frozen=True, slots=True)

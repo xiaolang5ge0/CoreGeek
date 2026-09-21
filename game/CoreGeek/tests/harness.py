@@ -71,6 +71,7 @@ class SimWorld:
         llm_script=None,
         cmd_handler=None,
         expected_answer=None,
+        accept_fails=False,
     ):
         """mines: {(x,y): kind}，每矿 10 次；illegal_builds: {(x,y)} 建造必失败。
         tasks: [{"pos": (x,y), "text": str, "scoreReward": 50, "goldReward": 30, "timeoutRounds": 60}]
@@ -115,6 +116,8 @@ class SimWorld:
         self.expected_answer = expected_answer
         self.phase_task = ""
         self.task_active = None  # {"point": dict, "accept_round": int}
+        self.accept_fails = accept_fails
+        self.accept_count = 0
         self.pending_llm_resp = ""
         self.pending_cmd_result = ""
         self.next_errors = []
@@ -307,6 +310,9 @@ class SimWorld:
         self.last_results = results
 
     def _apply_accept_task(self, rid):
+        self.accept_count += 1
+        if self.accept_fails:
+            return False
         pioneer = self.role(rid)
         for point in self.task_points:
             px, py = point["pos"]

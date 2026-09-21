@@ -1,60 +1,134 @@
-"""L3 TaskPlanner：自进化任务求解器（LLM/沙盒异步 + Multi Submit + Task Memory）。
+"""L3 TaskPlanner：自进化任务求解器 v2（参照《自进化策略.md》实战版重构）。
 
-机制依据（接口文档/任务书）：
-- prompt → 下回合 llmResp；executeCmd → 下回合 lastCmdResult（仅任务期间可用）
-- 任务期间 LLM 调用不计入每日 3 次限制
-- 超时按历史最高通过率结算 → 边做边交（Multi Submit），出错再修正
-求解循环：ANALYZE(LLM出计划) → RUN_COMMANDS(沙盒探索) → SUBMIT → 错误则 REFINE 再交
+核心原则（来自真实 PK 经验）：
+1. acceptTask FAIL 立即放弃不重试（FAIL 计 errorCode 4，5 次异常封号）——由 PioneerFSM 执行
+2. 确定性 LOCATE 优先于 LLM：find 任务文档 + cat 全部 .md（__FILE/__DIR/__DOC 标记）
+3. 任务分类处理：工程修复类（_ws 确定性修复）/ API 类（harvest 探测）/ 通用 LLM
+4. LLM 严格单行协议：CMD: <命令> 或 ANSWER: <答案>
+5. 防振荡（LLM 循环≥4 提交保底）、命令失败计数、Multi Submit
+6. 跨任务经验：persisted_api_facts（认证头/参数名）
 """
 from __future__ import annotations
 
+import base64
 import json
+import re
 from dataclasses import dataclass, field
-from typing import Any
 
 from ..protocol import Turn, submit_answer_command
 
-ANALYZE_PROMPT = (
-    "你在生存塔防比赛中完成探索任务。只输出 JSON，不要输出其他内容。\n"
-    "任务原文：\n{task}\n"
-    "输出格式：{\"analysis\":\"...\",\"commands\":[\"要执行的shell命令\"],"
-    "\"answer\":{\"字段名\":\"值\"},\"done\":true或false}\n"
-    "信息不足时 commands 给探索命令、done=false；能作答时 done=true 且 answer 完整。"
+# ---- 确定性命令模板 ----
+LOCATE_CMD = (
+    'f=$(ls task_*.md 2>/dev/null | head -1); '
+    '[ -z "$f" ] && f=$(find /tmp /home /workspace /root /data -maxdepth 5 -name "task_*.md" 2>/dev/null | head -1); '
+    'd=$(dirname "$f"); echo "__FILE:$f"; echo "__DIR:$d"; '
+    'for x in "$d"/*.md; do echo "__DOC:$x"; cat "$x"; done; echo "__END"'
 )
 
-COMPILE_PROMPT = (
-    "你在生存塔防比赛中完成探索任务。只输出 JSON，不要输出其他内容。\n"
+WS_PROBE_CMD = (
+    'cd "{dir}" && find . -maxdepth 2 | head -40; '
+    'echo "__SPEC__"; cat spec.md 2>/dev/null; echo "__CHECK__"; '
+    "sed -i 's/\\r$//' check 2>/dev/null; chmod +x check 2>/dev/null; ./check"
+)
+
+# API 收割脚本（探测认证/路径，输出 __API 事实行 + __ANSWER_CANDIDATE）
+HARVEST_PY = r'''
+import json, re, glob, urllib.request, urllib.error
+
+docs = " ".join(open(f, encoding="utf-8", errors="ignore").read() for f in glob.glob("**/*.md", recursive=True) + glob.glob("*.md"))
+m = re.search(r"(https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s\)\"']*)", docs)
+base = m.group(1).rstrip("/") if m else ""
+paths = [p for p in dict.fromkeys(re.findall(r"(/[a-zA-Z0-9_\-/]{2,40})", docs)) if "{" not in p][:8]
+keys = re.findall(r"(?:api[-_]?key|token|secret|key)\s*[:=：]\s*[\"']?([A-Za-z0-9_\-]{6,40})", docs, re.I)
+
+def fetch(url, headers):
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=4) as r:
+            return r.status, r.read().decode("utf-8", "ignore")
+    except urllib.error.HTTPError as e:
+        return e.code, ""
+    except Exception:
+        return -1, ""
+
+done = False
+for path in paths or ["/"]:
+    for auth_name, headers in [("none", {}), ("bearer", {"Authorization": "Bearer %s" % (keys[0] if keys else "token")}), ("x-api-key", {"X-API-Key": keys[0] if keys else "token"})]:
+        status, text = fetch(base + path, headers)
+        if status == 200 and text.strip():
+            recs, total = [], 0
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    for v in data.values():
+                        if isinstance(v, list):
+                            recs = v
+                            break
+                    total = data.get("total") or data.get("total_count") or data.get("count") or len(recs)
+                elif isinstance(data, list):
+                    recs, total = data, len(data)
+            except Exception:
+                pass
+            print("__API status=OK base=%s path=%s auth=%s records=%d total=%s" % (base, path, auth_name, len(recs), total))
+            if recs and isinstance(recs[0], dict):
+                print("__API_KEYS %s" % json.dumps(sorted(recs[0].keys()), ensure_ascii=False))
+            if recs:
+                print("__ANSWER_CANDIDATE %s" % json.dumps(recs[:50], ensure_ascii=False))
+            done = True
+            break
+    if done:
+        break
+if not done:
+    print("__API status=FAIL base=%s paths=%d keys=%d" % (base, len(paths), len(keys)))
+'''
+
+# LLM prompt（严格单行协议）
+LLM_PROMPT = (
+    "你在生存塔防比赛中用沙盒完成探索任务，每回合只能给一条指令。\n"
     "任务原文：\n{task}\n"
-    "已执行命令与输出：\n{history}\n"
-    "请据输出组装最终答案：{\"analysis\":\"...\",\"commands\":[],"
-    "\"answer\":{...},\"done\":true}"
+    "已读取的任务文档：\n{desc}\n"
+    "沙盒证据（命令+输出）：\n{evidence}\n"
+    "{sop}"
+    "规则：只输出一行，二选一：\n"
+    "CMD: <单行shell命令>   （还需要探索时）\n"
+    "ANSWER: <JSON答案>     （能作答时，字段完整，不要多余文字）\n"
+    "禁止输出 cat 已读过的文档；命令不超过 300 字符；无把握就给最佳猜测 ANSWER。"
 )
 
 REFINE_PROMPT = (
-    "你在生存塔防比赛中完成探索任务。只输出 JSON，不要输出其他内容。\n"
+    "你在生存塔防比赛中完成探索任务。只输出一行：CMD: <命令> 或 ANSWER: <JSON答案>。\n"
     "任务原文：\n{task}\n"
-    "已提交的答案被判错或不完全正确。历史命令与输出：\n{history}\n"
-    "上次答案：{last_answer}\n错误反馈：{error}\n"
-    "请修正并输出完整 JSON：{\"analysis\":\"...\",\"commands\":[],"
-    "\"answer\":{...},\"done\":true或false}"
+    "上次提交被判错：{last_answer}\n错误反馈：{error}\n"
+    "沙盒证据：\n{evidence}\n"
+    "请修正后输出完整 ANSWER。"
 )
+
+MAX_LLM_LOOPS = 4       # 振荡降级阈值
+MAX_CMD_FAILS = 4       # 连续命令失败上限
+EVIDENCE_LIMIT = 30000
 
 
 @dataclass
 class TaskSession:
-    """Task Memory：单任务会话的全部上下文。"""
+    """Task Memory：单任务会话全部上下文。"""
 
     task_text: str = ""
-    started_round: int = 0
-    plan: dict | None = None
-    commands_queue: list = field(default_factory=list)
-    commands_run: list = field(default_factory=list)  # [(cmd, result)]
-    answer: dict | None = None
-    llm_pending: bool = False
+    stage: str = "LOCATE"          # LOCATE / WS_PROBE / WS_FIX / API_HARVEST / LLM / SUBMITTED
+    task_dir: str = ""
+    task_desc: str = ""
+    task_kind: str = ""            # ws / api / llm
+    evidence: list = field(default_factory=list)   # [(cmd, result)]
     pending_cmd: str | None = None
+    pending_llm_cmd: str | None = None
+    llm_pending: bool = False
+    best_answer: dict | None = None
     submitted: bool = False
     need_refine: bool = False
-    idle_rounds: int = 0
+    llm_loops: int = 0
+    cmd_fails: int = 0
+    soft_fails: int = 0
+    ws_fix_count: int = 0
+    quiet_rounds: int = 0
 
     def reset(self) -> None:
         self.__init__()
@@ -67,28 +141,27 @@ class PlannerOutput:
     submit: dict | None = None
 
 
-def parse_plan(text: str) -> dict | None:
-    """从 LLM 响应中防御性提取第一个 JSON 对象。"""
-    if not text:
-        return None
+def _clip(text: str, n: int) -> str:
+    return (text or "")[:n]
+
+
+def _extract_json(text: str) -> dict | None:
     start = text.find("{")
     end = text.rfind("}")
     if start < 0 or end <= start:
         return None
     try:
-        plan = json.loads(text[start:end + 1])
+        data = json.loads(text[start:end + 1])
     except (json.JSONDecodeError, ValueError):
         return None
-    return plan if isinstance(plan, dict) else None
-
-
-def _history(session: TaskSession, limit: int = 6, chars: int = 2000) -> str:
-    items = session.commands_run[-limit:]
-    text = "\n".join(f"$ {cmd}\n{(result or '')[:300]}" for cmd, result in items)
-    return text[:chars]
+    return data if isinstance(data, dict) else None
 
 
 class TaskPlanner:
+    def __init__(self) -> None:
+        self.api_facts: dict[str, str] = {}  # 跨任务复用：认证方式/参数名等
+
+    # ---- 主入口 ----
     def work(self, turn: Turn, session: TaskSession) -> PlannerOutput:
         out = PlannerOutput()
         if not turn.phase_task:
@@ -97,60 +170,191 @@ class TaskPlanner:
         if turn.phase_task != session.task_text:  # 新任务 → 重置会话
             session.reset()
             session.task_text = turn.phase_task
-            session.started_round = turn.round_no
 
         # 1. 回收异步结果
         if session.pending_cmd is not None:
-            session.commands_run.append((session.pending_cmd, turn.last_cmd_result))
+            result = turn.last_cmd_result or ""
+            session.evidence.append((session.pending_cmd, _clip(result, 3000)))
+            self._on_cmd_result(session, session.pending_cmd, result)
             session.pending_cmd = None
         if session.llm_pending:
-            plan = parse_plan(turn.llm_resp)
-            if plan is not None:
-                session.plan = plan
-                session.commands_queue = [str(c) for c in (plan.get("commands") or [])]
-                if isinstance(plan.get("answer"), dict) and plan["answer"]:
-                    session.answer = plan["answer"]
+            self._on_llm_result(session, turn.llm_resp or "")
             session.llm_pending = False
         if any(code == 2 for code, _ in turn.errors):
             session.need_refine = True
             session.submitted = False
 
-        # 2. 推进求解循环
-        if session.plan is None:
-            out.prompt = ANALYZE_PROMPT.replace("{task}", session.task_text)
-            session.llm_pending = True
-        elif session.commands_queue:
-            cmd = session.commands_queue.pop(0)
+        # 2. LLM 刚给的命令优先下发
+        if session.pending_llm_cmd is not None:
+            cmd = session.pending_llm_cmd
+            session.pending_llm_cmd = None
             out.execute_cmd = cmd
             session.pending_cmd = cmd
-        elif session.need_refine:
-            out.prompt = (
-                REFINE_PROMPT.replace("{task}", session.task_text)
-                .replace("{history}", _history(session))
-                .replace(
-                    "{last_answer}",
-                    json.dumps(session.answer or {}, ensure_ascii=False),
-                )
-                .replace("{error}", ";".join(d for c, d in turn.errors if c == 2))
-            )
-            session.llm_pending = True
-            session.need_refine = False
-        elif session.answer and not session.submitted:
-            out.submit = submit_answer_command(
-                json.dumps(session.answer, ensure_ascii=False)
-            )
-            session.submitted = True
-        elif session.answer is None:
-            out.prompt = COMPILE_PROMPT.replace("{task}", session.task_text).replace(
-                "{history}", _history(session)
-            )
-            session.llm_pending = True
-        else:
-            session.idle_rounds += 1
-            if session.idle_rounds >= 4:  # 静默多轮后让 LLM 复查是否可提升通过率
-                out.prompt = COMPILE_PROMPT.replace("{task}", session.task_text).replace(
-                    "{history}", _history(session)
-                )
-                session.llm_pending = True
-                session.idle_rounds = 0
+            return out
+
+        # 3. 有可提交答案（TOKEN / LLM ANSWER / 振荡降级保底）
+        if session.best_answer and not session.submitted:
+            out.submit = self._submit(session)
+            return out
+
+        # 4. 阶段推进
+        session.quiet_rounds += 1
+        if session.stage == "LOCATE":
+            out.execute_cmd = LOCATE_CMD
+            session.pending_cmd = LOCATE_CMD
+        elif session.stage == "WS_PROBE":
+            cmd = WS_PROBE_CMD.replace("{dir}", session.task_dir or ".")
+            out.execute_cmd = cmd
+            session.pending_cmd = cmd
+        elif session.stage == "WS_FIX":
+            cmd = self._ws_fix_cmd(session)
+            if cmd is None:
+                session.stage = "LLM"
+            else:
+                out.execute_cmd = cmd
+                session.pending_cmd = cmd
+        elif session.stage == "API_HARVEST":
+            cmd = self._harvest_cmd(session)
+            out.execute_cmd = cmd
+            session.pending_cmd = cmd
+        elif session.stage == "LLM":
+            if session.llm_loops >= MAX_LLM_LOOPS:
+                return out  # 振荡降级：无保底答案，放弃本任务（PioneerFSM 会带我回家）
+            self._llm_prompt(turn, session, out, refine=session.need_refine)
+        elif session.stage == "SUBMITTED":
+            if session.need_refine:
+                session.stage = "LLM"
+                session.llm_loops = 0
+                self._llm_prompt(turn, session, out, refine=True)
+            elif session.quiet_rounds >= MAX_LLM_LOOPS:
+                # 部分正确等待中：继续让 LLM 提升通过率
+                session.stage = "LLM"
+                session.llm_loops = 1
+                self._llm_prompt(turn, session, out, refine=False)
         return out
+
+    # ---- 命令结果处理 ----
+    def _on_cmd_result(self, session: TaskSession, cmd: str, result: str) -> None:
+        session.quiet_rounds = 0
+        if cmd == LOCATE_CMD:
+            self._classify(session, result)
+            return
+        if "[exitCode:0]" in result:
+            session.cmd_fails = 0
+        else:
+            session.cmd_fails += 1
+        if "[FAIL]" in result:
+            session.soft_fails += 1
+        token = re.search(r"TOKEN[:\s]+([A-Za-z0-9_\-]{4,64})", result)
+        if token and session.best_answer is None:
+            session.best_answer = {"token": token.group(1)}
+        for line in result.splitlines():
+            if line.startswith("__API "):
+                session.evidence.append(("__api_fact__", line[:300]))
+                m = re.search(r"auth=(\S+)", line)
+                if m and m.group(1) != "none":
+                    self.api_facts["auth"] = m.group(1)
+            elif line.startswith("__ANSWER_CANDIDATE "):
+                session.evidence.append(("__candidate__", line[:800]))
+        # WS 流程推进：probe 完 → 尝试确定性修复
+        if session.stage == "WS_PROBE":
+            session.stage = "WS_FIX"
+        elif session.stage == "API_HARVEST":
+            session.stage = "LLM"  # 收割完交给 LLM 组答
+        if session.cmd_fails >= MAX_CMD_FAILS:
+            session.stage = "LLM"
+
+    def _classify(self, session: TaskSession, result: str) -> None:
+        m = re.search(r"__DIR:(\S+)", result)
+        if m:
+            session.task_dir = m.group(1)
+        body = result[:8000]
+        session.task_desc = _clip(body, 2000)
+        docs = re.findall(r"__DOC:(\S+)", result)
+        if ("ws_" in body and "./check" in body) or ("ws_" in session.task_text and "check" in session.task_text):
+            session.task_kind = "ws"
+            session.stage = "WS_PROBE"
+        elif "localhost" in body or "http://" in body or "https://" in body:
+            session.task_kind = "api"
+            session.stage = "API_HARVEST"
+        else:
+            session.task_kind = "llm"
+            session.stage = "LLM"  # 定位失败/其他 → LLM 兜底
+
+    # ---- 工程修复类 ----
+    def _ws_fix_cmd(self, session: TaskSession) -> str | None:
+        if session.ws_fix_count >= 2:
+            return None  # 超过 2 次修复尝试 → 交 LLM
+        fixes = self._spec_fixes(session)
+        if not fixes:
+            return None
+        session.ws_fix_count += 1
+        body = " && ".join(fixes + ["./check"])
+        return f'cd {session.task_dir or "."} && {body}'
+
+    def _spec_fixes(self, session: TaskSession) -> list[str]:
+        """从 spec/check 输出解析确定性修复指令（mkdir/chmod/sed 行替换）。"""
+        text = session.task_desc + "\n" + "\n".join(r for _, r in session.evidence[-3:])
+        fixes: list[str] = []
+        for m in re.finditer(r"\[FAIL\]\s*DIR\s*([/\w.\-]+)[^\d]*(\d{3})", text):
+            fixes.append(f'mkdir -p "{m.group(1)}" && chmod {m.group(2)} "{m.group(1)}"')
+        for m in re.finditer(r"\[FAIL\]\s*LINE\s*([\w.\-]+):(\d+)\s*期望\s*([^\s]+)", text):
+            fixes.append(f"sed -i '{m.group(2)}s/.*/{m.group(3)}/' {m.group(1)}")
+        for m in re.finditer(r"(?:目录|文件)\s*[：: ]*\s*([/\w.\-]+)[^\n]*?(?:权限|mode)\s*[:： ]?\s*(\d{3})", text):
+            fixes.append(f'mkdir -p "{m.group(1)}" && chmod {m.group(2)} "{m.group(1)}"')
+        for m in re.finditer(r"第\s*(\d+)\s*行[^\n]*?(?:改为|应为|->)\s*[`'\"]?([^\n`'\"]+)", text):
+            target = re.search(r"([\w.\-]+\.(?:conf|cfg|ini|txt|yaml|yml|json))", text)
+            fname = target.group(1) if target else "config.conf"
+            fixes.append(f"sed -i '{m.group(1)}s/.*/{m.group(2).strip()}/' {fname}")
+        return list(dict.fromkeys(fixes))
+
+    # ---- API 类 ----
+    def _harvest_cmd(self, session: TaskSession) -> str:
+        encoded = base64.b64encode(HARVEST_PY.encode()).decode()
+        return (
+            f"cd {session.task_dir or '.'} 2>/dev/null; "
+            f"python3 -c \"import base64;exec(base64.b64decode('{encoded}').decode())\" "
+            f"|| python -c \"import base64;exec(base64.b64decode('{encoded}').decode())\""
+        )
+
+    # ---- LLM 循环 ----
+    def _llm_prompt(self, turn: Turn, session: TaskSession, out: PlannerOutput, *, refine: bool) -> None:
+        evidence = "\n".join(f"$ {c}\n{r}" for c, r in session.evidence[-6:])[:4000]
+        if refine:
+            out.prompt = (
+                REFINE_PROMPT.replace("{task}", _clip(session.task_text, 1500))
+                .replace("{last_answer}", json.dumps(session.best_answer or {}, ensure_ascii=False))
+                .replace("{error}", ";".join(d for c, d in turn.errors if c == 2))
+                .replace("{evidence}", evidence)
+            )
+            session.need_refine = False
+        else:
+            sop = ""
+            if self.api_facts:
+                sop = "已知 API 经验：" + json.dumps(self.api_facts, ensure_ascii=False) + "\n"
+            out.prompt = (
+                LLM_PROMPT.replace("{task}", _clip(session.task_text, 1500))
+                .replace("{desc}", _clip(session.task_desc, 2000))
+                .replace("{evidence}", evidence)
+                .replace("{sop}", sop)
+            )
+        session.llm_pending = True
+        session.llm_loops += 1
+
+    def _on_llm_result(self, session: TaskSession, text: str) -> None:
+        session.quiet_rounds = 0
+        line = text.strip().splitlines()[0] if text.strip() else ""
+        if line.startswith("ANSWER:"):
+            answer = _extract_json(line[7:])
+            if answer:
+                session.best_answer = answer
+        elif line.startswith("CMD:"):
+            cmd = line[4:].strip()
+            if cmd and not cmd.startswith("cat "):  # 冗余 cat 检测
+                session.pending_llm_cmd = cmd
+
+    # ---- 提交 ----
+    def _submit(self, session: TaskSession) -> dict:
+        session.submitted = True
+        session.stage = "SUBMITTED"
+        return submit_answer_command(json.dumps(session.best_answer, ensure_ascii=False))

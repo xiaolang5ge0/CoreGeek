@@ -16,6 +16,7 @@ from .protocol import Pos, Turn, Unit, accept_task_command, distance, move_comma
 STATE_GUARD = "GUARD"
 STATE_TASK_TRAVEL = "TASK_TRAVEL"
 STATE_TASK_ACCEPT = "TASK_ACCEPT"
+STATE_TASK_WAIT_ACCEPT = "TASK_WAIT_ACCEPT"
 STATE_TASK_WORK = "TASK_WORK"
 STATE_RETURN_HOME = "RETURN_HOME"
 
@@ -26,6 +27,8 @@ class PioneerFSM:
     def __init__(self) -> None:
         self.state = STATE_GUARD
         self.task_point: Pos | None = None
+        self.accept_retries = 0
+        self.failed_task_points: set = set()  # accept FAIL 的任务点终身回避（防封号循环）
 
     # 夜间走位（P1 起沿用）
     def move_to_guard(self, turn: Turn, pioneer: Unit, cp: Pos, ctx) -> dict[str, Any] | None:
@@ -61,6 +64,13 @@ class PioneerFSM:
             self.task_point = target
             self.state = STATE_TASK_TRAVEL
         if self.state == STATE_TASK_TRAVEL:
+            # 移动中每回合校验任务点有效性（《自进化策略》MOVING）
+            task = next((t for t in turn.tasks if t.pos == self.task_point), None)
+            if task is None or not task.is_valid or task.cooldown_rounds > 0:
+                ctx.note_pioneer("task_point_invalid_abort")
+                self.state = STATE_GUARD
+                self.task_point = None
+                return None
             if distance(pioneer.pos, self.task_point) <= 1:
                 self.state = STATE_TASK_ACCEPT
             else:
@@ -72,8 +82,28 @@ class PioneerFSM:
                     return None
                 return move_command(step)
         if self.state == STATE_TASK_ACCEPT:
-            self.state = STATE_TASK_WORK
+            self.state = STATE_TASK_WAIT_ACCEPT
+            self.accept_retries = 0
             return accept_task_command()
+        if self.state == STATE_TASK_WAIT_ACCEPT:
+            if turn.phase_task:
+                self.state = STATE_TASK_WORK
+                return None
+            # acceptTask FAIL 计 errorCode 4（指令错误），5 次封号 → 立即放弃并终身回避该点
+            if turn.last_action_results.get(pioneer.unit_id, True) is False:
+                ctx.note_pioneer("accept_fail_no_retry")
+                self.failed_task_points.add(self.task_point)
+                self.state = STATE_GUARD
+                self.task_point = None
+                return None
+            self.accept_retries += 1
+            if self.accept_retries > 1:
+                ctx.note_pioneer("accept_no_confirm_abort")
+                self.failed_task_points.add(self.task_point)
+                self.state = STATE_GUARD
+                self.task_point = None
+                return None
+            return accept_task_command()  # 无 FAIL 但未确认 → 最多重试 1 次
         if self.state == STATE_TASK_WORK:
             if not turn.phase_task:
                 ctx.note_pioneer("task_end")
@@ -98,7 +128,10 @@ class PioneerFSM:
         return distance(pioneer.pos, cp)
 
     def _choose_task_point(self, turn: Turn, pioneer: Unit) -> Pos | None:
-        cands = [t for t in turn.tasks if t.is_valid and t.cooldown_rounds == 0]
+        cands = [
+            t for t in turn.tasks
+            if t.is_valid and t.cooldown_rounds == 0 and t.pos not in self.failed_task_points
+        ]
         if not cands:
             return None
         cands.sort(key=lambda t: (distance(pioneer.pos, t.pos), -t.score_reward))

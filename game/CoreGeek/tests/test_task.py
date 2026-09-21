@@ -1,5 +1,10 @@
-"""P5 验收：任务流 —— Day1 接任务、LLM/沙盒异步、Multi Submit、黄昏返程。"""
-import json
+"""P5 验收 v2：任务流 —— 接任务/LOCATE/三类任务处理器/黄昏返程/accept FAIL 不重试。
+
+协议参照《自进化策略.md》：
+- LOCATE 确定性定位（__FILE/__DIR/__DOC）→ 分类（工程修复/API/通用LLM）
+- LLM 严格单行：CMD: <命令> 或 ANSWER: <JSON>
+- acceptTask FAIL 立即放弃不重试（errorCode 4 封号红线）
+"""
 import unittest
 
 import _bootstrap  # noqa: F401
@@ -19,12 +24,22 @@ TASK = {
     "timeoutRounds": 60,
 }
 
+GENERIC_LOCATE_RESULT = (
+    "[exitCode:0]\n__FILE:/data/task_1.md\n__DIR:/data\n"
+    "__DOC:/data/task_1.md\n任务：查询北京今日天气\n__END"
+)
 
-def plan_json(commands=None, answer=None, done=False):
-    return json.dumps(
-        {"analysis": "...", "commands": commands or [], "answer": answer, "done": done},
-        ensure_ascii=False,
-    )
+WS_LOCATE_RESULT = (
+    "[exitCode:0]\n__FILE:/tmp/selfEvolutionTask/ws_3/task_ws3.md\n"
+    "__DIR:/tmp/selfEvolutionTask/ws_3\n"
+    "__DOC:/tmp/selfEvolutionTask/ws_3/task_ws3.md\n"
+    "任务：修复 ws_3 工程，通过 ./check\n__END"
+)
+
+API_LOCATE_RESULT = (
+    "[exitCode:0]\n__FILE:/data/task_api.md\n__DIR:/data\n"
+    "__DOC:/data/task_api.md\nAPI 文档：http://localhost:8080/weather 查询天气\n__END"
+)
 
 
 def run_rounds(brain, sim, n):
@@ -41,74 +56,130 @@ def cmd_of(response, rid):
     return (response["roleCommandMap"] or {}).get(str(rid))
 
 
-class TestTaskAcceptAndComplete(unittest.TestCase):
+def make_sim(**kw):
+    base = dict(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
+    base.update(kw)
+    return SimWorld(**base)
+
+
+class TestGenericLLMTask(unittest.TestCase):
     def test_day1_task_completed(self):
-        """Day1 接任务 → LLM 一次出答案 → 提交成功拿奖励 → 黄昏前回 CP。"""
-        llm = [plan_json(answer={"city": "北京", "weather": "晴"}, done=True)]
-        sim = SimWorld(
-            station_pos=(10, 24),
-            mines={(6, 22): "stone", (8, 20): "copper"},
+        """通用任务：LOCATE → LLM 一次出 ANSWER → 提交成功 → 黄昏前回 CP。"""
+        sim = make_sim(
             tasks=[TASK],
-            llm_script=llm,
+            llm_script=['ANSWER: {"city": "北京", "weather": "晴"}'],
+            cmd_handler=lambda cmd: GENERIC_LOCATE_RESULT if "__FILE" in cmd else "[exitCode:0]\n",
             expected_answer="北京",
         )
         brain = Brain()
         run_rounds(brain, sim, DAY1)
-        # 任务完成：金币奖励到账、任务点进入冷却
         self.assertGreaterEqual(sim.gold, 30)
         self.assertGreaterEqual(sim.score, 50)
-        self.assertTrue(sim.submissions)  # 有过提交
-        self.assertTrue(sim.prompts_seen)  # 任务期间用了 LLM（免费额度）
-        # 开拓者已归位 CP 守夜
+        self.assertTrue(sim.submissions)
         cp = brain.layout.control_point
         pos = sim.role(PIONEER)["pos"]
         self.assertEqual(Pos(pos["x"], pos["y"]), cp)
 
-
-class TestSandboxFlow(unittest.TestCase):
     def test_explore_then_answer(self):
-        """LLM 计划带沙盒命令：executeCmd 逐条下发 → 汇编答案 → 提交。"""
-        llm = [
-            plan_json(commands=["ls /data", "cat /data/api.txt"], answer=None),
-            plan_json(answer={"city": "北京"}, done=True),
-        ]
-        sim = SimWorld(
-            station_pos=(10, 24),
-            mines={(6, 22): "stone", (8, 20): "copper"},
+        """LLM 给 CMD → 沙盒执行 → 再给 ANSWER → 提交。"""
+        sim = make_sim(
             tasks=[TASK],
-            llm_script=llm,
-            cmd_handler=lambda cmd: "[exitCode:0]\n北京 晴 25C",
+            llm_script=["CMD: ls /data", 'ANSWER: {"city": "北京"}'],
+            cmd_handler=lambda cmd: (
+                GENERIC_LOCATE_RESULT if "__FILE" in cmd else "[exitCode:0]\n北京 晴 25C"
+            ),
             expected_answer="北京",
         )
         brain = Brain()
         run_rounds(brain, sim, DAY1)
-        self.assertEqual(len(sim.cmds_seen), 2)  # 两条探索命令都执行了
+        self.assertIn("ls /data", sim.cmds_seen)
         self.assertTrue(sim.submissions)
         self.assertGreaterEqual(sim.score, 50)
+
+
+class TestWsTask(unittest.TestCase):
+    def test_ws_fix_zero_llm(self):
+        """工程修复类：LOCATE → 探测 → 确定性 sed/mkdir 修复 → TOKEN → 提交，全程零 LLM。"""
+        def ws_handler(cmd):
+            if "__FILE" in cmd:
+                return WS_LOCATE_RESULT
+            if "find . -maxdepth" in cmd:
+                return (
+                    "[exitCode:0]\n.\n./check\n./spec.md\n__SPEC__\n目录 data 权限 755\n"
+                    "__CHECK__\n[FAIL] DIR data — 期望 exists,755"
+                )
+            if "mkdir" in cmd:
+                return "[exitCode:0]\n[PASS] all checks passed\nTOKEN: abc123token"
+            return "[exitCode:0]\n"
+
+        sim = make_sim(
+            tasks=[TASK],
+            cmd_handler=ws_handler,
+            expected_answer="abc123token",
+        )
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        self.assertGreaterEqual(sim.score, 50)
+        self.assertTrue(any("abc123token" in s for s in sim.submissions))
+        self.assertEqual(sim.prompts_seen, [])  # 确定性修复零 LLM
+
+
+class TestApiTask(unittest.TestCase):
+    def test_api_harvest_then_answer(self):
+        """API 类：LOCATE → harvest 探测 → LLM 组答 → 提交。"""
+        def api_handler(cmd):
+            if "__FILE" in cmd:
+                return API_LOCATE_RESULT
+            if "python3 -c" in cmd or "python -c" in cmd:
+                return (
+                    "[exitCode:0]\n__API status=OK base=http://localhost:8080 path=/weather "
+                    "auth=none records=3 total=3\n"
+                    '__ANSWER_CANDIDATE [{"city":"北京","weather":"晴"}]'
+                )
+            return "[exitCode:0]\n"
+
+        sim = make_sim(
+            tasks=[TASK],
+            llm_script=['ANSWER: {"city": "北京", "weather": "晴"}'],
+            cmd_handler=api_handler,
+            expected_answer="北京",
+        )
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        self.assertGreaterEqual(sim.score, 50)
+        self.assertTrue(sim.submissions)
+
+
+class TestAcceptFailNoRetry(unittest.TestCase):
+    def test_accept_fail_never_retry(self):
+        """acceptTask FAIL（errorCode 4 红线）→ 立即放弃，绝不再试。"""
+        sim = make_sim(tasks=[TASK], accept_fails=True)
+        brain = Brain()
+        run_rounds(brain, sim, 30)
+        self.assertEqual(sim.accept_count, 1)  # 只尝试过一次
 
 
 class TestDuskReturn(unittest.TestCase):
     def test_abort_task_before_night(self):
         """任务做不完也必须入夜前回家（离开任务点=任务结束）。"""
-        never_done = [plan_json(commands=[], answer=None, done=False)] * 100
-        sim = SimWorld(
-            station_pos=(10, 24),
-            mines={(6, 22): "stone", (8, 20): "copper"},
+        sim = make_sim(
             tasks=[TASK],
-            llm_script=never_done,
+            llm_script=["CMD: true"] * 100,  # 永远探索不完
+            cmd_handler=lambda cmd: (
+                GENERIC_LOCATE_RESULT if "__FILE" in cmd else "[exitCode:0]\n"
+            ),
         )
         brain = Brain()
         run_rounds(brain, sim, DAY1)
         cp = brain.layout.control_point
         pos = sim.role(PIONEER)["pos"]
-        self.assertEqual(Pos(pos["x"], pos["y"]), cp)  # 入夜前已归位
-        self.assertEqual(sim.phase_task, "")  # 任务因离开而结束
+        self.assertEqual(Pos(pos["x"], pos["y"]), cp)
+        self.assertEqual(sim.phase_task, "")
 
 
 class TestNoTaskFallback(unittest.TestCase):
     def test_no_tasks_keeps_guard(self):
-        """无任务点：开拓者白天守家（P1 行为不回退）。"""
-        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone"})
+        sim = make_sim()
         brain = Brain()
         run_rounds(brain, sim, 20)
         cp = brain.layout.control_point

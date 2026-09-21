@@ -115,11 +115,11 @@ class TestControlExclusion(unittest.TestCase):
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
         brain = Brain()
         run_rounds(brain, sim, DAY1)
-        # 把开拓者拉出 CP，放机器人进射程
-        sim.role(PIONEER)["pos"] = {"x": 15, "y": 23}
+        # 把开拓者放到内圈通道 (11,25)，放机器人进射程
+        sim.role(PIONEER)["pos"] = {"x": 11, "y": 25}
         sim.spawn_robot(16, 23, "middleRobot", hp=60, rid=30301)
         fired_while_walking = 0
-        for _ in range(4):
+        for _ in range(8):
             response, trace = brain.decide(sim.payload())
             pioneer_cmd = cmd_of(response, PIONEER)
             attacks = [
@@ -131,11 +131,11 @@ class TestControlExclusion(unittest.TestCase):
             sim.apply(response)
             sim.advance()
         self.assertEqual(fired_while_walking, 0)
-        # 归位 CP 后恢复开火
-        response, trace = brain.decide(sim.payload())
-        sim.apply(response)
-        self.assertEqual(Pos(sim.role(PIONEER)["pos"]["x"], sim.role(PIONEER)["pos"]["y"]),
-                         brain.layout.control_point)
+        # 归位 CP
+        self.assertEqual(
+            Pos(sim.role(PIONEER)["pos"]["x"], sim.role(PIONEER)["pos"]["y"]),
+            brain.layout.control_point,
+        )
 
 
 class TestPioneerMedicine(unittest.TestCase):
