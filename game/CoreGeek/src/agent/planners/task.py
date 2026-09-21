@@ -31,55 +31,91 @@ WS_PROBE_CMD = (
     "sed -i 's/\\r$//' check 2>/dev/null; chmod +x check 2>/dev/null; ./check"
 )
 
-# API 收割脚本（探测认证/路径，输出 __API 事实行 + __ANSWER_CANDIDATE）
+# API 收割脚本 v2（探测 认证×路径×参数名×城市；400 错误信息作为事实输出）
+# 实战教训：服务端要 Authorization: Bearer + 参数名是 location 而非 city；
+# 中文城市名从任务原文（TASK_B64）与文档中提取候选，逐一实测。
 HARVEST_PY = r'''
-import json, re, glob, urllib.request, urllib.error
+import base64, json, re, glob, urllib.request, urllib.error, urllib.parse
 
+TASK_TEXT = base64.b64decode("__TASK_B64__").decode("utf-8", "ignore")
 docs = " ".join(open(f, encoding="utf-8", errors="ignore").read() for f in glob.glob("**/*.md", recursive=True) + glob.glob("*.md"))
 m = re.search(r"(https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[A-Za-z0-9_\-/\.]*)", docs)
 base = m.group(1).rstrip("/") if m else ""
-paths = [p for p in dict.fromkeys(re.findall(r"(/[a-zA-Z0-9_\-/]{2,40})", docs)) if "{" not in p][:8]
+paths = [p for p in dict.fromkeys(re.findall(r"(/[a-zA-Z0-9_\-/]{2,40})", docs)) if "{" not in p][:6]
 keys = re.findall(r"(?:api[-_]?key|token|secret|key)\s*[:=：]\s*[\"']?([A-Za-z0-9_\-]{6,40})", docs, re.I)
+STOP = "查询 今天 明日 天气 数据 接口 返回 任务 城市 所有 全部 相关 统计 列出 给出 需要 通过 调用 结果 数量 类型 名称 今日 本地 获取 搜索 帮我 请问".split()
+cities = []
+for src in (TASK_TEXT, docs):
+    cleaned = src
+    for w in STOP:
+        cleaned = cleaned.replace(w, " ")
+    for c in re.findall(r"[\u4e00-\u9fa5]{2,3}", cleaned):
+        if c not in cities:
+            cities.append(c)
+cities = cities[:6]
 
 def fetch(url, headers):
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=4) as r:
+        with urllib.request.urlopen(req, timeout=3) as r:
             return r.status, r.read().decode("utf-8", "ignore")
     except urllib.error.HTTPError as e:
-        return e.code, ""
+        try:
+            return e.code, e.read().decode("utf-8", "ignore")[:300]
+        except Exception:
+            return e.code, ""
     except Exception:
         return -1, ""
 
-done = False
+def auths():
+    k = keys[0] if keys else "token"
+    yield "none", {}
+    yield "bearer", {"Authorization": "Bearer " + k}
+    yield "x-api-key", {"X-API-Key": k}
+
+hints = set()
+best = None
 for path in paths or ["/"]:
-    for auth_name, headers in [("none", {}), ("bearer", {"Authorization": "Bearer %s" % (keys[0] if keys else "token")}), ("x-api-key", {"X-API-Key": keys[0] if keys else "token"})]:
-        status, text = fetch(base + path, headers)
-        if status == 200 and text.strip():
-            recs, total = [], 0
-            try:
-                data = json.loads(text)
-                if isinstance(data, dict):
-                    for v in data.values():
-                        if isinstance(v, list):
-                            recs = v
-                            break
-                    total = data.get("total") or data.get("total_count") or data.get("count") or len(recs)
-                elif isinstance(data, list):
-                    recs, total = data, len(data)
-            except Exception:
-                pass
-            print("__API status=OK base=%s path=%s auth=%s records=%d total=%s" % (base, path, auth_name, len(recs), total))
-            if recs and isinstance(recs[0], dict):
-                print("__API_KEYS %s" % json.dumps(sorted(recs[0].keys()), ensure_ascii=False))
-            if recs:
-                print("__ANSWER_CANDIDATE %s" % json.dumps(recs[:50], ensure_ascii=False))
-            done = True
-            break
-    if done:
-        break
-if not done:
-    print("__API status=FAIL base=%s paths=%d keys=%d" % (base, len(paths), len(keys)))
+    for auth_name, headers in auths():
+        for param in ("", "city", "location", "cityName", "q", "name"):
+            for city in ([""] if not param else cities or [""]):
+                url = base + path
+                if param:
+                    url += "?" + param + "=" + urllib.parse.quote(city)
+                status, text = fetch(url, headers)
+                if status in (400, 401, 403) and text:
+                    hm = re.search(r"(Missing required parameter[^\"]{0,60}|Authentication failed[^\"]{0,60}|Expected format[^\"]{0,60})", text)
+                    if hm:
+                        hints.add(hm.group(1)[:90])
+                if status == 200 and text.strip():
+                    recs, total = [], 0
+                    try:
+                        data = json.loads(text)
+                        if isinstance(data, dict):
+                            for v in data.values():
+                                if isinstance(v, list):
+                                    recs = v
+                                    break
+                            total = data.get("total") or data.get("total_count") or data.get("count") or len(recs)
+                        elif isinstance(data, list):
+                            recs, total = data, len(data)
+                    except Exception:
+                        continue
+                    if recs or (isinstance(total, int) and total > 0):
+                        print("__API status=OK base=%s path=%s auth=%s param=%s city=%s records=%d total=%s" % (base, path, auth_name, param, city, len(recs), total))
+                        if recs and isinstance(recs[0], dict):
+                            print("__API_KEYS %s" % json.dumps(sorted(recs[0].keys()), ensure_ascii=False))
+                        if recs:
+                            print("__ANSWER_CANDIDATE %s" % json.dumps(recs[:60], ensure_ascii=False))
+                        best = True
+                        break
+            if best: break
+        if best: break
+    if best: break
+for h in list(hints)[:4]:
+    print("__API_HINT %s" % h)
+if not best:
+    print("__API status=FAIL base=%s paths=%d keys=%d cities=%s" % (base, len(paths), len(keys), ",".join(cities)))
 '''
 
 # LLM prompt（严格单行协议）
@@ -130,6 +166,9 @@ class TaskSession:
     ws_fix_count: int = 0
     quiet_rounds: int = 0
     auth_retried: bool = False
+    param_fixes: int = 0
+    tried_params: set = field(default_factory=set)
+    timeout_rounds: int = 0  # 由 brain 从 PlayerTask.timeoutRounds 注入
 
     def reset(self) -> None:
         self.__init__()
@@ -198,12 +237,20 @@ class TaskPlanner:
             out.submit = self._submit(session)
             return out
 
-        # 4. 认证纠错：服务端要 Authorization: Bearer 而上轮用了别的头 → 确定性重试（不耗 LLM）
-        retry = self._auth_retry_cmd(session)
+        # 4. 认证/参数纠错：确定性重试优先于 LLM（实战：Bearer 头 + location 参数）
+        retry = self._auth_retry_cmd(session) or self._param_fix_cmd(session)
         if retry is not None:
             out.execute_cmd = retry
             session.pending_cmd = retry
             return out
+
+        # 4b. 超时预算：任务 timeout（实战=15 回合）逼近 → 强制交保底/停止浪费
+        if session.timeout_rounds > 0:
+            deadline = session.started_round + session.timeout_rounds
+            if turn.round_no >= deadline - 2:
+                if session.best_answer and not session.submitted:
+                    out.submit = self._submit(session)
+                return out
 
         # 5. 阶段推进
         session.quiet_rounds += 1
@@ -351,12 +398,65 @@ class TaskPlanner:
 
     # ---- API 类 ----
     def _harvest_cmd(self, session: TaskSession) -> str:
-        encoded = base64.b64encode(HARVEST_PY.encode()).decode()
+        task_b64 = base64.b64encode(session.task_text.encode("utf-8")).decode()
+        script = HARVEST_PY.replace("__TASK_B64__", task_b64)
+        encoded = base64.b64encode(script.encode()).decode()
         return (
             f"cd {session.task_dir or '.'} 2>/dev/null; "
             f"python3 -c \"import base64;exec(base64.b64decode('{encoded}').decode())\" "
             f"|| python -c \"import base64;exec(base64.b64decode('{encoded}').decode())\""
         )
+
+    def _param_fix_cmd(self, session: TaskSession) -> str | None:
+        """'Missing required parameter: X' → 用任务原文里的城市名确定性重试（不耗 LLM）。"""
+        if session.param_fixes >= 2:
+            return None
+        text = "\n".join(c + "\n" + r for c, r in session.evidence[-2:])
+        m = re.search(r"Missing required parameter[:\s'\"]*([A-Za-z_]\w{0,20})", text)
+        if not m:
+            return None
+        param = m.group(1)
+        if param in session.tried_params:
+            return None
+        city = self._extract_city(session.task_text)
+        if not city:
+            return None
+        url = None
+        urls = re.findall(r'"(https?://[^"]+)"', text)
+        if urls:
+            url = urls[-1].split("?")[0]
+        if url is None:
+            m2 = re.search(r"base=(\S+)", text)
+            if m2:
+                url = m2.group(1)
+        if url is None:
+            return None
+        key = None
+        for pat in (
+            r"Bearer\s+([A-Za-z0-9_\-]{6,40})",
+            r"(?:api[-_]?key|token|secret|key)\s*[:=：]\s*[\"']?([A-Za-z0-9_\-]{6,40})",
+        ):
+            km = re.search(pat, session.task_desc + "\n" + text, re.I)
+            if km:
+                key = km.group(1)
+                break
+        session.tried_params.add(param)
+        session.param_fixes += 1
+        auth = f'-H "Authorization: Bearer {key}" ' if key else ""
+        return f'curl -s {auth}"{url}?{param}={city}"'
+
+    @staticmethod
+    def _extract_city(task_text: str) -> str | None:
+        stop = ("查询", "今天", "明日", "天气", "数据", "接口", "返回", "任务",
+                "城市", "所有", "全部", "相关", "统计", "列出", "给出", "需要",
+                "通过", "调用", "结果", "数量", "类型", "名称", "今日", "本地",
+                "获取", "搜索", "帮我", "请问")
+        text = task_text or ""
+        for w in stop:  # 先剔除停用词，再取剩余中文 token（防"查询南京"→"查询南"）
+            text = text.replace(w, " ")
+        for cand in re.findall(r"[\u4e00-\u9fa5]{2,3}", text):
+            return cand
+        return None
 
     # ---- LLM 循环 ----
     def _llm_prompt(self, turn: Turn, session: TaskSession, out: PlannerOutput, *, refine: bool) -> None:
@@ -391,7 +491,13 @@ class TaskPlanner:
                 session.best_answer = answer
         elif line.startswith("CMD:"):
             cmd = line[4:].strip()
-            if cmd and not cmd.startswith("cat "):  # 冗余 cat 检测
+            # 命令消毒：多行/引号不配对会在沙盒 bash 里爆炸（实战 EOF 报错），直接拒收
+            if (
+                cmd
+                and "\n" not in cmd
+                and cmd.count('"') % 2 == 0
+                and not cmd.startswith("cat ")
+            ):
                 session.pending_llm_cmd = cmd
 
     # ---- 提交 ----

@@ -58,13 +58,15 @@ class TestUpgradePriority(unittest.TestCase):
         self.assertEqual(missions[0].kind, "weapon")
 
     def test_reserve_kept(self):
-        """预算保留：金 100 不足以覆盖 武器券100+保留30 → 无任务。"""
+        """预算保留：金 100（保留 30）买不起武器券 100 → 无武器任务（廉价墙任务允许）。"""
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone"})
         brain = Brain()
         build_day1(brain, sim)
         sim.gold = 100
         planner = UpgradePlanner()
-        self.assertEqual(planner.plan(Turn.load(sim.payload())), [])
+        missions = planner.plan(Turn.load(sim.payload()))
+        self.assertFalse(any(m.kind == "weapon" for m in missions))
+        self.assertTrue(all(m.cost <= 100 - 30 for m in missions))
 
 
 class TestWallRepairViaUpgrade(unittest.TestCase):

@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from .path import next_step, step_toward
-from .planners.upgrade import voucher_for
+from .planners.upgrade import WALL_MAX_HP, voucher_for
 from .protocol import (
     MINE_TYPES,
     Pos,
@@ -39,6 +39,7 @@ STATE_SELL = "SELL"
 STATE_CRITICAL = "CRITICAL_DEFENSE"
 STATE_EVADE = "EVADE"
 STATE_UPGRADE = "UPGRADE"
+STATE_REPAIR = "NIGHT_REPAIR"
 
 EVADE_DIST = 2  # 非眩晕机器人贴近此距离即撤离
 
@@ -53,6 +54,7 @@ SELL_RICH_MIN_VALUE = 25    # 值得专程跑一趟的货值
 SELL_RICH_MAX_DIST = 15     # 专程跑的最大距离
 
 STUCK_LIMIT = 5             # 连续移动意图但位置未变的上限
+STUCK_COLLECT_LIMIT = 3     # 连续 collect 但背包不涨 → 矿已空/封矿，解锁拉黑
 
 
 class WorkerFSM:
@@ -65,13 +67,18 @@ class WorkerFSM:
         self.sell_vendor: Pos | None = None
         self.upgrade: tuple[Pos, str] | None = None  # (目标建筑格, 种类)
         self._stuck_moves = 0
+        self._stuck_collects = 0
         self._last_pos: Pos | None = None
+        self._last_bag = -1
 
     # ---- 主入口 ----
     def decide(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
         if unit.pos != self._last_pos:
             self._stuck_moves = 0
+        if len(unit.backpack) != self._last_bag:
+            self._stuck_collects = 0
         self._last_pos = unit.pos
+        self._last_bag = len(unit.backpack)
         cmd = self._decide(turn, unit, ctx)
         ctx.trace["workers"][str(self.unit_id)] = {
             "state": self.state,
@@ -85,8 +92,11 @@ class WorkerFSM:
         return cmd
 
     def _decide(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        # 0a. 夜间 CRITICAL_DEFENSE 召回（最高优先，可抢占一切经济行为）
-        if turn.is_night and getattr(ctx, "threat_level", "SAFE") == "CRITICAL":
+        # 0a. 夜间召回：CRITICAL 威胁，或工人已进机器人危险圈（实战教训：夜采/夜卖被兵潮打死）
+        in_danger = self.unit_id in getattr(ctx, "danger_workers", ())
+        if turn.is_night and (
+            getattr(ctx, "threat_level", "SAFE") == "CRITICAL" or in_danger
+        ):
             cell = ctx.recall_cell(self.unit_id)
             if cell is not None and unit.pos != cell:
                 self.mine = None
@@ -97,8 +107,8 @@ class WorkerFSM:
                 if step is not None:
                     return self._move(step, ctx)
             return None  # 到位待命
-        # 0b. 近身机器人闪避（安全 > 矿锁）
-        home = getattr(ctx, "home_anchor", None)
+        # 0b. 近身机器人闪避（安全 > 矿锁；逃向墙后内圈而非 CP 开口侧）
+        home = getattr(ctx, "safe_anchor", None) or getattr(ctx, "home_anchor", None)
         if home is not None and distance(unit.pos, home) > EVADE_DIST:
             close_robot = any(
                 r.alive and not r.dizzy
@@ -114,6 +124,11 @@ class WorkerFSM:
                 step = step_toward(turn, unit, home, ctx.reserved)
                 if step is not None:
                     return self._move(step, ctx)
+        # 0c. 夜间修墙岗（Day3+ BOSS 夜/墙受损）：修复包/升级券就地维护，不外出
+        if turn.is_night and getattr(ctx, "repair_worker", None) == self.unit_id and not in_danger:
+            cmd = self._repair_cmd(turn, unit, ctx)
+            if cmd is not None:
+                return cmd
         # 1. 建造任务（白天，优先级最高）
         if self.build is not None:
             if turn.is_night:
@@ -176,6 +191,28 @@ class WorkerFSM:
     # ---- 升级任务链：走到商店买券 → 走到目标建筑用券 ----
     def _upgrade_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
         target, kind = self.upgrade
+        if kind == "stock":
+            # 备货任务：买到手即完成（WallFixer 等，供夜间修墙岗使用）
+            item = target if isinstance(target, str) else "WallFixer"
+            if item in unit.backpack:
+                self.upgrade = None
+                self.state = STATE_FREE
+                return None
+            shop = self._nearest_shop(turn, unit)
+            if shop is None or turn.gold < 10:
+                self.upgrade = None
+                self.state = STATE_FREE
+                return None
+            if unit.pos != shop and distance(unit.pos, shop) <= 1:
+                self.upgrade = None
+                self.state = STATE_FREE
+                return buy_command(item)
+            step = step_toward(turn, unit, shop, ctx.reserved)
+            if step is None:
+                self.upgrade = None
+                self.state = STATE_FREE
+                return None
+            return self._move(step, ctx)
         building = next(
             (u for u in turn.ours if u.pos == target and u.kind in (*TOWER_TYPES, WALL, STATION)),
             None,
@@ -231,23 +268,76 @@ class WorkerFSM:
             return None
         return min(shops, key=lambda s: (distance(unit.pos, s), s.x, s.y))
 
+    # ---- 夜间修墙岗 ----
+    def _repair_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        self.state = STATE_REPAIR
+        walls = list(turn.walls())
+        item = target = None
+        if walls:
+            def ratio(w):
+                return w.health / WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
+            hurt = [w for w in walls if ratio(w) < 0.999]
+            if hurt:
+                hurt.sort(key=ratio)
+                target = hurt[0].pos
+                lv = hurt[0].level
+                voucher = f"WallUpgradeVoucher{lv}"
+                if lv <= 2 and voucher in unit.backpack:
+                    item = voucher
+                elif "WallFixer" in unit.backpack:
+                    item = "WallFixer"
+        if item is not None and target is not None:
+            if unit.pos != target and distance(unit.pos, target) <= 1:
+                return use_command(item, target)
+            step = step_toward(turn, unit, target, ctx.reserved)
+            if step is not None:
+                return self._move(step, ctx)
+            return None
+        # 无修复物品 → 内圈安全位待命（不外出送死）
+        anchor = getattr(ctx, "safe_anchor", None)
+        if anchor is not None and unit.pos != anchor:
+            step = next_step(turn, unit, anchor, ctx.reserved)
+            if step is not None:
+                return self._move(step, ctx)
+        return None
+
     # ---- 采矿 ----
     def _mine_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        # 锁定矿进入机器人危险圈 → 放弃（夜间尤其致命）
+        if turn.is_night and ctx.mine_unsafe(self.mine):
+            ctx.note(self.unit_id, "mine_unsafe_release")
+            self.mine = None
+            self.state = STATE_FREE
+            return None
         if unit.pos != self.mine and distance(unit.pos, self.mine) <= 1:
-            return collect_command(self.mine)
+            cmd = collect_command(self.mine)
+            # 采集死循环看门狗：连续 collect 但背包不涨（矿已空/封矿）→ 解锁+拉黑
+            self._stuck_collects += 1
+            if self._stuck_collects >= STUCK_COLLECT_LIMIT:
+                self._stuck_collects = 0
+                ctx.note(self.unit_id, "collect_stuck_release")
+                ctx.block_mine(self.mine, turn.round_no + 20)
+                self.mine = None
+                self.state = STATE_FREE
+                return None
+            return cmd
+        self._stuck_collects = 0
         step = step_toward(turn, unit, self.mine, ctx.reserved)
         if step is None:
             return None
         return self._move(step, ctx)
 
     def _select_mine(self, turn: Turn, unit: Unit, ctx) -> Pos | None:
-        other_locks = ctx.other_mine_locks(self.unit_id)
+        other_locks = () if ctx.share_mines else ctx.other_mine_locks(self.unit_id)
         best: Pos | None = None
         best_key = None
         for pos in turn.mines():
             if pos in other_locks:
                 continue
             if ctx.is_mine_blocked(pos, turn.round_no):
+                continue
+            # 夜间安全选矿：机器人在附近的矿一律不碰（实战教训：夜采被兵潮打死）
+            if turn.is_night and ctx.mine_unsafe(pos):
                 continue
             kind = turn.zones.get(pos)
             if self.ore_role == ORE_STONE and kind != "stone":
@@ -313,11 +403,14 @@ class WorkerFSM:
         value = self._sellable_value(turn, unit, ctx)
         if value <= 0:
             return False
-        if ctx.need_gold:
-            return True  # 急用金（重建武器等）
         vendor = self._nearest_vendor(turn, unit)
         if vendor is None:
             return False
+        # 夜间卖货安全：小贩在机器人危险圈内则不去（小贩居地图心=兵潮走廊）
+        if turn.is_night and ctx.mine_unsafe(vendor):
+            return False
+        if ctx.need_gold:
+            return True  # 急用金（重建武器等）
         dist = distance(unit.pos, vendor)
         if dist <= SELL_NEAR_VENDOR_DIST and value >= SELL_NEAR_MIN_VALUE:
             return True  # 顺路

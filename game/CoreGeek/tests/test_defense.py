@@ -131,12 +131,24 @@ class TestEvade(unittest.TestCase):
         miner = sim.role(W2)
         mx, my = miner["pos"]["x"], miner["pos"]["y"]
         sim.spawn_robot(mx + 2, my, "middleRobot", hp=60, rid=30201)
-        response, trace = brain.decide(sim.payload())
-        cmd = cmd_of(response, W2)
-        self.assertIsNotNone(cmd)
-        self.assertEqual(cmd.get("action"), "move")
-        target = Pos(cmd["targetPos"][0]["x"], cmd["targetPos"][0]["y"])
-        self.assertGreater(distance(target, Pos(mx + 2, my)), distance(Pos(mx, my), Pos(mx + 2, my)))
+        # 核心行为：机器人逼近期间工人停止采集（不再送死），进入防御态
+        collects = 0
+        states = set()
+        for _ in range(8):
+            response, trace = brain.decide(sim.payload())
+            cmd = cmd_of(response, W2) or {}
+            if cmd.get("action") == "collect":
+                collects += 1
+            info = (trace.get("workers") or {}).get(str(W2)) or {}
+            if info.get("state"):
+                states.add(info["state"])
+            sim.apply(response)
+            sim.advance()
+        self.assertEqual(collects, 0, "危险圈内不得继续采集")
+        self.assertTrue(
+            states & {"CRITICAL_DEFENSE", "EVADE", "NIGHT_REPAIR"},
+            f"工人应进入防御态，实际 {states}",
+        )
 
 
 class TestFireAdjacentRobot(unittest.TestCase):
@@ -177,10 +189,13 @@ class TestControlExclusion(unittest.TestCase):
             sim.apply(response)
             sim.advance()
         self.assertEqual(fired_while_walking, 0)
-        # 归位 CP
-        self.assertEqual(
-            Pos(sim.role(PIONEER)["pos"]["x"], sim.role(PIONEER)["pos"]["y"]),
-            brain.layout.control_point,
+        # 归位 CP 或（机器人逼近时）撤往内圈——两者都合法，关键是不在移动回合开火
+        pos = Pos(sim.role(PIONEER)["pos"]["x"], sim.role(PIONEER)["pos"]["y"])
+        robot = Pos(16, 23)
+        from agent.protocol import distance as _d
+        self.assertTrue(
+            pos == brain.layout.control_point or _d(pos, robot) > 3,
+            f"pioneer {pos} 应归位 CP 或远离机器人",
         )
 
 

@@ -17,7 +17,7 @@ from .path import next_step
 from .phases import PhaseManager
 from .planners.layout import BaseLayout, choose_front, compute_layout
 from .planners.task import TaskPlanner, TaskSession
-from .planners.upgrade import UpgradePlanner
+from .planners.upgrade import WALL_MAX_HP, UpgradePlanner
 from .protocol import (
     ROCKET,
     Turn,
@@ -33,6 +33,12 @@ from .protocol import (
 )
 from .rules import LegalityGuard
 from .threat import SAFE, ThreatEstimator
+
+NIGHT_SAFE_DIST = 10        # 夜间矿/小贩安全半径（机器人距离）
+WORKER_DANGER_DIST = 8      # 工人召回半径
+DAY1_RUSH_DEADLINE = 50     # Day1 双工人建墙冲刺截止回合（预留收尾）
+DAY1_WALL_TARGET = 12       # Day1 目标墙数
+PIONEER_FLEE_DIST = 1       # 机器人贴到 CP 才撤离（过早撤离=整夜哑火，实战权衡）
 
 
 class _Ctx:
@@ -52,9 +58,24 @@ class _Ctx:
         return self._recall_cells.get(unit_id)
 
     def is_mine_blocked(self, pos, round_no: int) -> bool:
-        """矿黑名单（新闻封矿/采集失败）：解封回合前回避。"""
+        """矿黑名单（新闻封矿/采集失败/采集死循环）：解封回合前回避。"""
         release = self.mine_blacklist.get(pos)
         return release is not None and round_no < release
+
+    def block_mine(self, pos, release_round: int) -> None:
+        self.mine_blacklist[pos] = release_round
+
+    # 以下由 brain 每回合注入
+    danger_workers: set = set()
+    safe_anchor = None
+    repair_worker: int | None = None
+    share_mines: bool = False
+    robot_cells: tuple = ()
+
+    def mine_unsafe(self, pos) -> bool:
+        """位置处于机器人危险圈（NIGHT_SAFE_DIST 内有活机器人）。"""
+        from .protocol import distance as _d
+        return any(_d(pos, rc) <= NIGHT_SAFE_DIST for rc in self.robot_cells)
 
     def note(self, unit_id: int, msg: str) -> None:
         self.trace["workers"].setdefault(str(unit_id), {}).setdefault("notes", []).append(msg)
@@ -196,10 +217,21 @@ class Brain:
         ctx.walls_missing = bool(walls_missing)
         ctx.need_gold = bool(turrets_missing) and turn.gold < WEAPON_BUILD_COST
 
-        # 岗位：墙没建完时 1 号工人负责石料，其余经济矿（动态调度，不绑定 ID）
+        # 岗位：Day1 冲刺——墙未达标且未到截止回合时，双工人全力石料+建墙（可共享同一矿）
+        # 无石矿时冲刺无意义，回退常规分工（防两人都饿死在石料岗）
+        day1_rush = (
+            turn.day_index == 1
+            and walls_missing
+            and turn.round_in_day < DAY1_RUSH_DEADLINE
+            and bool(turn.mines("stone"))
+        )
+        ctx.share_mines = day1_rush
         for index, worker in enumerate(workers):
             fsm = self._worker_fsm(worker)
-            fsm.ore_role = ORE_STONE if (index == 0 and walls_missing) else ORE_MONEY
+            if day1_rush:
+                fsm.ore_role = ORE_STONE
+            else:
+                fsm.ore_role = ORE_STONE if (index == 0 and walls_missing) else ORE_MONEY
 
         # 建造分配：武器优先于墙；已被认领的格/工人不重复分配
         assigned = {
@@ -244,10 +276,11 @@ class Brain:
         free_workers = [w for w in workers if w.unit_id not in busy]
         if free_workers:
             taken_targets = {
-                fsm.upgrade[0] for fsm in self.worker_fsms.values() if fsm.upgrade
+                fsm.upgrade[0] for fsm in self.worker_fsms.values()
+                if fsm.upgrade and fsm.upgrade[0] is not None
             }
             for mission in self.upgrades.plan(turn):
-                if mission.target in taken_targets:
+                if mission.target is not None and mission.target in taken_targets:
                     continue
                 candidates = [
                     w for w in free_workers
@@ -256,9 +289,17 @@ class Brain:
                 ]
                 if not candidates:
                     break
-                worker = min(candidates, key=lambda w: distance(w.pos, mission.target))
-                self._worker_fsm(worker).upgrade = (mission.target, mission.kind)
-                taken_targets.add(mission.target)
+                if mission.kind == "stock":
+                    shops = turn.shop_positions()
+                    worker = min(
+                        candidates,
+                        key=lambda w: distance(w.pos, shops[0]) if shops else 0,
+                    )
+                    self._worker_fsm(worker).upgrade = (mission.voucher, "stock")
+                else:
+                    worker = min(candidates, key=lambda w: distance(w.pos, mission.target))
+                    self._worker_fsm(worker).upgrade = (mission.target, mission.kind)
+                    taken_targets.add(mission.target)
                 ctx.trace.setdefault("upgrade_assigned", []).append(
                     {"worker": worker.unit_id, "kind": mission.kind,
                      "target": mission.target.dump(), "voucher": mission.voucher}
@@ -283,6 +324,10 @@ class Brain:
             # 新任务确认 → 重置求解会话（同文本任务重复接取也必须全新开始）
             if self.pioneer_fsm.state == STATE_TASK_WORK and prev_state != STATE_TASK_WORK:
                 self.task_session.reset()
+                tp = self.pioneer_fsm.task_point
+                task = next((t for t in turn.tasks if t.pos == tp), None)
+                if task is not None:
+                    self.task_session.timeout_rounds = task.timeout_rounds
             # 任务求解：仅驻留任务点且任务进行中（submit 不覆盖走位指令）
             if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
                 out = self.task_planner.work(turn, self.task_session)
@@ -302,8 +347,29 @@ class Brain:
         ctx.trace["threat"] = report.dump()
         if self.layout is not None:
             ctx.home_anchor = self.layout.control_point
-        if report.level == "CRITICAL":
-            ctx._recall_cells = self._assign_recall_cells(turn)
+        # 机器人危险圈 + 内圈安全锚点（实战教训：夜采/夜卖被兵潮打死）
+        ctx.robot_cells = tuple(r.pos for r in turn.robots if r.alive)
+        interior = self._interior_cells(turn)
+        ctx.safe_anchor = interior[0] if interior else ctx.home_anchor
+        ctx.danger_workers = {
+            w.unit_id for w in turn.workers()
+            if any(distance(w.pos, rc) <= WORKER_DANGER_DIST for rc in ctx.robot_cells)
+        }
+        # Day3+（大怪/BOSS 夜）或墙受损 → 固定一名工人为夜间修墙岗
+        walls_hurt = any(
+            w.health < WALL_MAX_HP[min(max(w.level, 1), 3) - 1] for w in turn.walls()
+        )
+        if turn.day_index >= 3 or walls_hurt:
+            safe_workers = [
+                w for w in turn.workers() if w.unit_id not in ctx.danger_workers
+            ]
+            if safe_workers:
+                ctx.repair_worker = safe_workers[0].unit_id
+        if report.level == "CRITICAL" or ctx.danger_workers:
+            ctx._recall_cells = {
+                w.unit_id: cell
+                for w, cell in zip(turn.workers(), interior)
+            }
         if self.layout is not None:
             existing_walls = {w.pos for w in turn.walls()}
             existing_weapons = {w.pos for w in turn.weapons()}
@@ -319,9 +385,13 @@ class Brain:
             ctx.need_gold = False
         pioneer = turn.pioneer()
         if pioneer is not None and self.layout is not None:
-            cmd = self.pioneer_fsm.move_to_guard(
-                turn, pioneer, self.layout.control_point, ctx
+            cp = self.layout.control_point
+            # 机器人突入 CP 3 格内 → 开拓者撤往内圈保命（活人 > 多打一炮）
+            cp_danger = any(
+                distance(rc, cp) <= PIONEER_FLEE_DIST for rc in ctx.robot_cells
             )
+            goal = ctx.safe_anchor if (cp_danger and ctx.safe_anchor) else cp
+            cmd = self.pioneer_fsm.move_to_guard(turn, pioneer, goal, ctx)
             if cmd:
                 commands[pioneer.unit_id] = cmd
                 ctx.reserve_from(cmd)
@@ -378,11 +448,11 @@ class Brain:
             ctx.trace["front_recommendation"] = opposite[observed]  # 重建走证据驱动变更
 
     # ---- 召回与自救 ----
-    def _assign_recall_cells(self, turn: Turn) -> dict[int, Any]:
-        """CRITICAL 时工人的回防站位：基地邻域内、离前线 CP 最远的空格。"""
+    def _interior_cells(self, turn: Turn) -> list:
+        """基地邻域内圈格（离前线 CP 最远优先）——召回站位/安全锚点。"""
         station = turn.station()
         if station is None or self.layout is None:
-            return {}
+            return []
         base = set(station_footprint(station.pos))
         occupied = turn.occupied_cells()
         cp = self.layout.control_point
@@ -397,10 +467,14 @@ class Brain:
                 ):
                     cands.append(pos)
         cands.sort(key=lambda p: (-distance(p, cp), p.x, p.y))
+        return cands
+
+    def _assign_recall_cells(self, turn: Turn) -> dict[int, Any]:
+        interior = self._interior_cells(turn)
         return {
-            worker.unit_id: cands[index]
+            worker.unit_id: interior[index]
             for index, worker in enumerate(turn.workers())
-            if index < len(cands)
+            if index < len(interior)
         }
 
     def _maybe_medicine(self, turn: Turn, commands: dict[int, dict[str, Any]]) -> None:

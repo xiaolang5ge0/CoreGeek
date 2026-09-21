@@ -161,6 +161,12 @@
 | 2026-09-21 实战 | 墙向 | 机器人从图心方向来（challenger 左上→右方；defender 右下→左方） | **墙环必须朝来敌方向，开口/炮台在背侧**（此前建反，已修复） |
 | 2026-09-21 实战 | 日志 | 平台只见 stdout，文件日志取不到 | 遥测改为**每回合 stdout 打印完整 Request+Response** |
 | 2026-09-21 经验（《自进化策略.md》） | acceptTask 失败 | FAIL 计 errorCode 4（指令错误） | **acceptTask FAIL 立即放弃+终身回避该任务点，绝不重试**（5 次封号红线） |
+| 2026-09-21 三场实战 | 任务超时 | playerTasks.timeoutRounds=**15**，reward 80分/80金 | 任务预算极紧：确定性流程≤8回合，deadline-2 强制交保底 |
+| 同上 | API 任务 | 服务端要 `Authorization: Bearer <key>` + 参数名 `location`（非 city）；错误信息会明说缺什么参数 | harvest v2 自动探测 认证×参数名×城市；`Missing required parameter: X` 触发确定性重试 |
+| 同上 | 沙盒命令 | LLM 多行 python -c 命令导致 bash `unexpected EOF` | CMD 消毒：含换行/引号不配对一律拒收 |
+| 同上 | 夜潮规模 | Day1 夜 67 只、Day2 夜 90 只、Day3 夜 92 只（含大怪） | 墙必须升级（L2=1500血）；Day3+ 夜间设修墙岗 |
+| 同上 | 工人死亡 | 夜采/夜卖工人被兵潮打死（r78 DEATH） | 夜间矿/小贩安全半径 10 格；危险圈 8 格强制召回内圈 |
+| 同上 | check 脚本 | `./check: /bin/sh^M: bad interpreter`（CRLF） | 探测命令内置 `sed -i 's/\r$//' check` |
 | 同上 | 任务预算 | timeout 通常 10-15 回合 | 任务求解必须快（定位2+执行2+提交1），LLM 严格单行 CMD:/ANSWER: |
 | 同上 | 任务类型 | 工程修复类（ws_N/ + ./check）/ API 类（localhost http）/ 通用 | 确定性修复优先于 LLM：sed/mkdir 解析 + harvest 探测，零 LLM 可完成工程类 |
 
