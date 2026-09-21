@@ -15,6 +15,7 @@ from ..protocol import Turn
 RESERVE_GOLD = 30      # 应急金（炸弹/修墙包）
 RICH_GOLD = 250        # 基地升级门槛
 WALL_DAMAGE_RATIO = 0.6
+CRITICAL_WALL_RATIO = 0.3  # 武器未到 L2 时，仅临界受损墙才修（其余攒钱升塔）
 
 WALL_MAX_HP = (1000, 1500, 2000)
 WEAPON_MAX_HP = (1000, 1500, 2000)
@@ -75,21 +76,26 @@ class UpgradePlanner:
         weapons = sorted(turn.weapons(), key=lambda w: (w.level, w.unit_id))
         all_walls = list(turn.walls())
         any_l1_wall = any(w.level == 1 for w in all_walls)
+        # 优先升级防御塔：仍有武器没到 L2 时，为武器券(100金)攒钱，暂停"健康墙"升级（受损墙修复除外）
+        weapons_need_l2 = any(w.level < 2 for w in weapons)
 
-        # 1. 武器全部 L2
+        # 1. 武器全部 L2（最高优先，金币向它倾斜）
         for w in weapons:
             if w.level == 1:
                 v, c = voucher_for("weapon", 1)
                 add(v, c, w.pos, "weapon", 10)
-        # 2. 受损墙（升级=回血）FRONT 优先
+        # 2. 受损墙（升级=回血，生存刚需）FRONT 优先
+        #    武器未到 L2 时为武器券攒钱：仅修临界受损墙（ratio<0.3，生存兜底），轻度受损暂缓
+        wall_repair_ratio = WALL_DAMAGE_RATIO if not weapons_need_l2 else CRITICAL_WALL_RATIO
         for wall in front_first([w for w in all_walls if 1 <= w.level <= 2]):
-            if wall.health / WALL_MAX_HP[wall.level - 1] < WALL_DAMAGE_RATIO:
+            if wall.health / WALL_MAX_HP[wall.level - 1] < wall_repair_ratio:
                 v, c = voucher_for("wall", wall.level)
                 add(v, c, wall.pos, "wall", 20)
-        # 3. 健康墙 L1→L2（廉价大收益）FRONT 优先
-        for wall in front_first([w for w in all_walls if w.level == 1]):
-            v, c = voucher_for("wall", 1)
-            add(v, c, wall.pos, "wall", 25)
+        # 3. 健康墙 L1→L2（廉价大收益）FRONT 优先——**仅在所有武器到 L2 后**（否则金币留给武器）
+        if not weapons_need_l2:
+            for wall in front_first([w for w in all_walls if w.level == 1]):
+                v, c = voucher_for("wall", 1)
+                add(v, c, wall.pos, "wall", 25)
         # 4. 武器 L3
         for w in weapons:
             if w.level == 2:

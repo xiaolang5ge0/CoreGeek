@@ -219,5 +219,30 @@ class TestNightMiningNotRecalled(unittest.TestCase):
         self.assertLess(crit_rounds, 5, "不得群体召回震荡")
 
 
+class TestStockMissionNoCrash(unittest.TestCase):
+    def test_stock_mission_trace_serializable(self):
+        """Day3+ 备货 WallFixer 的 stock 任务：target 为 None/券名为 str，trace 不得崩溃（异常=封号红线）。"""
+        import json as _json
+        sim = make_sim()
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        # 推进到 Day3、给足金币、清空 WallFixer → 触发 stock 备货任务
+        sim.round_no = 271
+        sim.gold = 300
+        for rid in (W1, W2):
+            sim.role(rid)["backpack"] = [b for b in sim.role(rid)["backpack"] if b != "WallFixer"]
+        crashed = False
+        for _ in range(15):
+            try:
+                response, trace = brain.decide(sim.payload())
+                _json.dumps(trace, ensure_ascii=False)  # trace 必须可序列化（遥测前提）
+            except Exception:
+                crashed = True
+                break
+            sim.apply(response)
+            sim.advance()
+        self.assertFalse(crashed, "stock 任务不得让 decide/trace 崩溃")
+
+
 if __name__ == "__main__":
     unittest.main()

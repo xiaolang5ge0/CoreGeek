@@ -84,13 +84,20 @@ class WorkerFSM:
         self._last_pos = unit.pos
         self._last_bag = len(unit.backpack)
         cmd = self._decide(turn, unit, ctx)
+        # upgrade 目标可能是 Pos（建筑升级）或 str（stock 备货券名），分别序列化
+        if self.upgrade:
+            up_target = self.upgrade[0]
+            up_dump = up_target.dump() if hasattr(up_target, "dump") else up_target
+            up_repr = [up_dump, self.upgrade[1]]
+        else:
+            up_repr = None
         ctx.trace["workers"][str(self.unit_id)] = {
             "state": self.state,
             "ore_role": self.ore_role,
             "mine": self.mine.dump() if self.mine else None,
             "build": [self.build[0].dump(), self.build[1]] if self.build else None,
             "sell": self.sell_vendor.dump() if self.sell_vendor else None,
-            "upgrade": [self.upgrade[0].dump(), self.upgrade[1]] if self.upgrade else None,
+            "upgrade": up_repr,
             "cmd": cmd.get("action") if cmd else None,
         }
         return cmd

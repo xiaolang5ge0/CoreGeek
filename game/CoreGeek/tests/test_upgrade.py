@@ -82,8 +82,10 @@ class TestWallRepairViaUpgrade(unittest.TestCase):
         wall["health"] = 400  # L1 比例 0.4
         sim.gold = 60
         run_rounds(brain, sim, 130 - DAY1 + 40)
-        self.assertEqual(wall["level"], 2)
-        self.assertEqual(wall["health"], 1500)
+        # 受损墙被升级（≥L2）且回满血；经济改善后可一路升到 L3
+        self.assertGreaterEqual(wall["level"], 2)
+        from agent.planners.upgrade import WALL_MAX_HP
+        self.assertEqual(wall["health"], WALL_MAX_HP[wall["level"] - 1])
 
 
 class TestMineBlacklist(unittest.TestCase):

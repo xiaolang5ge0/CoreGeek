@@ -229,21 +229,26 @@ class Brain:
         ctx.walls_missing = bool(walls_missing)
         ctx.need_gold = bool(turrets_missing) and turn.gold < WEAPON_BUILD_COST
 
-        # 岗位：Day1 冲刺——墙未达标且未到截止回合时，双工人全力石料+建墙（可共享同一矿）
-        # 无石矿时冲刺无意义，回退常规分工（防两人都饿死在石料岗）
+        # 岗位：Day1——1 号工人专职石料+建墙，2 号工人全力经济（挖矿卖钱供升级）；
+        # 仅当"墙按当前进度来不及在入夜前建完"时，2 号工人才临时转石料帮建（可调度）。
+        walls_left = len(walls_missing)
+        stone_finishable = walls_left <= max(0, turn.rounds_until_night - BUILD_TRAVEL_BUFFER)
         day1_rush = (
             turn.day_index == 1
             and walls_missing
+            and not stone_finishable        # 来不及才双开
             and turn.round_in_day < DAY1_RUSH_DEADLINE
             and bool(turn.mines("stone"))
         )
         ctx.share_mines = day1_rush
         for index, worker in enumerate(workers):
             fsm = self._worker_fsm(worker)
-            if day1_rush:
-                fsm.ore_role = ORE_STONE
+            if index == 0 and walls_missing:
+                fsm.ore_role = ORE_STONE          # 1 号：石料岗（墙建完自动转经济）
+            elif day1_rush:
+                fsm.ore_role = ORE_STONE          # 墙来不及：2 号临时帮建
             else:
-                fsm.ore_role = ORE_STONE if (index == 0 and walls_missing) else ORE_MONEY
+                fsm.ore_role = ORE_MONEY          # 2 号：经济岗（挖矿卖钱）
 
         # 建造分配：武器优先于墙；已被认领的格/工人不重复分配
         assigned = {
@@ -329,7 +334,8 @@ class Brain:
                     taken_targets.add(mission.target)
                 ctx.trace.setdefault("upgrade_assigned", []).append(
                     {"worker": worker.unit_id, "kind": mission.kind,
-                     "target": mission.target.dump(), "voucher": mission.voucher}
+                     "target": mission.target.dump() if mission.target is not None else None,
+                     "voucher": mission.voucher}
                 )
 
         for worker in workers:
