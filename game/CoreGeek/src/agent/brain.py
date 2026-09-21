@@ -19,6 +19,7 @@ from .planners.layout import BaseLayout, choose_front, compute_layout
 from .planners.task import TaskPlanner, TaskSession
 from .planners.upgrade import WALL_MAX_HP, UpgradePlanner
 from .protocol import (
+    Pos,
     ROCKET,
     Turn,
     WALL,
@@ -35,7 +36,9 @@ from .rules import LegalityGuard
 from .threat import SAFE, ThreatEstimator
 
 NIGHT_SAFE_DIST = 10        # 夜间矿/小贩安全半径（机器人距离）
+SPAWN_AVOID_DIST = 8        # 历史出生点走廊避让半径
 WORKER_DANGER_DIST = 8      # 工人召回半径
+BUILD_TRAVEL_BUFFER = 6     # 建墙预留回程缓冲（预留回合 = 待建墙数 + 缓冲）
 DAY1_RUSH_DEADLINE = 50     # Day1 双工人建墙冲刺截止回合（预留收尾）
 DAY1_WALL_TARGET = 12       # Day1 目标墙数
 PIONEER_FLEE_DIST = 1       # 机器人贴到 CP 才撤离（过早撤离=整夜哑火，实战权衡）
@@ -71,11 +74,14 @@ class _Ctx:
     repair_worker: int | None = None
     share_mines: bool = False
     robot_cells: tuple = ()
+    spawn_cells: tuple = ()   # 历史夜间出生点（全局固定，首夜起累积）
 
     def mine_unsafe(self, pos) -> bool:
-        """位置处于机器人危险圈（NIGHT_SAFE_DIST 内有活机器人）。"""
+        """位置处于机器人危险圈：当前活机器人或历史出生走廊 SPAWN_AVOID_DIST 内。"""
         from .protocol import distance as _d
-        return any(_d(pos, rc) <= NIGHT_SAFE_DIST for rc in self.robot_cells)
+        if any(_d(pos, rc) <= NIGHT_SAFE_DIST for rc in self.robot_cells):
+            return True
+        return any(_d(pos, sc) <= SPAWN_AVOID_DIST for sc in self.spawn_cells)
 
     def note(self, unit_id: int, msg: str) -> None:
         self.trace["workers"].setdefault(str(unit_id), {}).setdefault("notes", []).append(msg)
@@ -109,6 +115,7 @@ class Brain:
         self.task_session = TaskSession()
         self.mine_blacklist: dict = {}
         self.robot_spawn_log: list = []
+        self.news_log: list = []  # 每回合 worldNews 存档（宝藏推断用）
         self.worker_fsms: dict[int, WorkerFSM] = {}
         self.layout: BaseLayout | None = None
         self.front: str | None = None
@@ -145,6 +152,11 @@ class Brain:
         ctx.fsms = self.worker_fsms
         ctx.reserved = {u.pos for u in turn.controllable()}
         ctx.mine_blacklist = self.mine_blacklist
+        # 历史出生走廊（首夜起累积，全局固定）→ 夜间选矿/卖货避让
+        ctx.spawn_cells = tuple(
+            Pos(x, y) for entry in self.robot_spawn_log for (x, y) in entry["spawns"]
+        )
+        self._record_news(turn, trace)
         ctx.prompt = ""
         ctx.execute_cmd = ""
         if turn.is_day:
@@ -252,7 +264,9 @@ class Brain:
             self._worker_fsm(worker).build = (cell, ROCKET)
             busy.add(worker.unit_id)
             gold_left -= WEAPON_BUILD_COST
-        urgent = 0 < turn.rounds_until_night <= DUSK_URGENT_ROUNDS
+        walls_left = len(walls_missing)
+        # 预留回合：入夜前剩余 ≤ 待建墙数 + 回程缓冲 → 必须立刻开建
+        urgent = 0 < turn.rounds_until_night <= walls_left + BUILD_TRAVEL_BUFFER
         for worker in workers:
             if worker.unit_id in busy:
                 continue
@@ -260,7 +274,13 @@ class Brain:
             if fsm.build is not None:
                 continue
             stones = worker.backpack.count("stone")
-            if not walls_missing or stones < 1 or (stones < STONE_BATCH and not urgent):
+            # 批量建造：采够一批进入 build_phase 后连续建完该批（不采一个建一个）
+            if stones >= STONE_BATCH:
+                fsm.build_phase = True
+            if stones == 0:
+                fsm.build_phase = False
+            can_build = stones >= 1 and (fsm.build_phase or urgent)
+            if not walls_missing or not can_build:
                 continue
             # 按布局优先级派单（正面迎敌侧优先），不按离工人远近
             cell = next(
@@ -273,13 +293,15 @@ class Brain:
                 busy.add(worker.unit_id)
 
         # 升级任务分配：派给空闲工人（武器>墙>基地，券费已含预算保留；同一建筑不重复派单）
+        # 墙升级/备货优先派给"固定修墙工"（ID 最小），使其背包自持修复物料供夜间使用
+        repair_id = min((w.unit_id for w in workers), default=None)
         free_workers = [w for w in workers if w.unit_id not in busy]
         if free_workers:
             taken_targets = {
                 fsm.upgrade[0] for fsm in self.worker_fsms.values()
                 if fsm.upgrade and fsm.upgrade[0] is not None
             }
-            for mission in self.upgrades.plan(turn):
+            for mission in self.upgrades.plan(turn, cp=layout.control_point):
                 if mission.target is not None and mission.target in taken_targets:
                     continue
                 candidates = [
@@ -289,15 +311,20 @@ class Brain:
                 ]
                 if not candidates:
                     break
-                if mission.kind == "stock":
+                wall_side = mission.kind in ("wall", "stock")
+                if wall_side and any(w.unit_id == repair_id for w in candidates):
+                    worker = next(w for w in candidates if w.unit_id == repair_id)
+                elif mission.kind == "stock":
                     shops = turn.shop_positions()
                     worker = min(
                         candidates,
                         key=lambda w: distance(w.pos, shops[0]) if shops else 0,
                     )
-                    self._worker_fsm(worker).upgrade = (mission.voucher, "stock")
                 else:
                     worker = min(candidates, key=lambda w: distance(w.pos, mission.target))
+                if mission.kind == "stock":
+                    self._worker_fsm(worker).upgrade = (mission.voucher, "stock")
+                else:
                     self._worker_fsm(worker).upgrade = (mission.target, mission.kind)
                     taken_targets.add(mission.target)
                 ctx.trace.setdefault("upgrade_assigned", []).append(
@@ -355,20 +382,19 @@ class Brain:
             w.unit_id for w in turn.workers()
             if any(distance(w.pos, rc) <= WORKER_DANGER_DIST for rc in ctx.robot_cells)
         }
-        # Day3+（大怪/BOSS 夜）或墙受损 → 固定一名工人为夜间修墙岗
+        # Day4+（BOSS 夜）或墙受损 → 固定 ID 最小的工人为夜间修墙岗（背包不共享，需自购券/修复包）
         walls_hurt = any(
             w.health < WALL_MAX_HP[min(max(w.level, 1), 3) - 1] for w in turn.walls()
         )
-        if turn.day_index >= 3 or walls_hurt:
-            safe_workers = [
-                w for w in turn.workers() if w.unit_id not in ctx.danger_workers
-            ]
-            if safe_workers:
-                ctx.repair_worker = safe_workers[0].unit_id
-        if report.level == "CRITICAL" or ctx.danger_workers:
+        if turn.day_index >= 4 or walls_hurt:
+            workers_sorted = sorted(turn.workers(), key=lambda w: w.unit_id)
+            if workers_sorted:
+                ctx.repair_worker = workers_sorted[0].unit_id
+        # 仅对处于危险圈的工人分配召回格（不再群体召回）
+        if ctx.danger_workers:
+            danger_list = [w for w in turn.workers() if w.unit_id in ctx.danger_workers]
             ctx._recall_cells = {
-                w.unit_id: cell
-                for w, cell in zip(turn.workers(), interior)
+                w.unit_id: cell for w, cell in zip(danger_list, interior)
             }
         if self.layout is not None:
             existing_walls = {w.pos for w in turn.walls()}
@@ -404,6 +430,20 @@ class Brain:
                 commands[worker.unit_id] = cmd
             ctx.reserve_from(cmd)
         self._maybe_medicine(turn, commands)
+
+    def _record_news(self, turn: Turn, trace: dict[str, Any]) -> None:
+        """每回合存档 worldNews（官方消息+民间传闻），供后续推理与召唤宝藏。"""
+        official = (turn.official_news or "").strip()
+        folk = (turn.folk_legends or "").strip()
+        if not official and not folk:
+            return
+        entry = {"round": turn.round_no, "day": turn.day_index,
+                 "official": official, "folk": folk}
+        # 去重：与上一条完全相同则跳过
+        if self.news_log and self.news_log[-1]["official"] == official and self.news_log[-1]["folk"] == folk:
+            return
+        self.news_log.append(entry)
+        trace["news"] = {"official": official[:80], "folk": folk[:80]}
 
     def _vacate_layout_cell(self, turn: Turn, worker, ctx: _Ctx) -> dict[str, Any] | None:
         """空闲工人站在炮台/控制点上时主动让位（否则该格永远无法建造/归位）。"""

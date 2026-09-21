@@ -44,7 +44,7 @@ STATE_REPAIR = "NIGHT_REPAIR"
 EVADE_DIST = 2  # 非眩晕机器人贴近此距离即撤离
 
 # 墙料批量阈值：攒够即去建墙，摊薄往返路费（入夜前紧急时 1 块也建）
-STONE_BATCH = 4
+STONE_BATCH = 6
 DUSK_URGENT_ROUNDS = 12
 
 # 机会性卖货阈值（STRATEGY_DECISIONS #11：看矿点与小贩相对位置）
@@ -70,9 +70,13 @@ class WorkerFSM:
         self._stuck_collects = 0
         self._last_pos: Pos | None = None
         self._last_bag = -1
+        self.night_home = False  # 当晚已被逼回家 → 锁定在家，不再外出（消除震荡）
+        self.build_phase = False  # 采够一批后连续建墙模式（防采一建一）
 
     # ---- 主入口 ----
     def decide(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        if turn.is_day:
+            self.night_home = False  # 天亮解除回家锁定
         if unit.pos != self._last_pos:
             self._stuck_moves = 0
         if len(unit.backpack) != self._last_bag:
@@ -92,12 +96,13 @@ class WorkerFSM:
         return cmd
 
     def _decide(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        # 0a. 夜间召回：CRITICAL 威胁，或工人已进机器人危险圈（实战教训：夜采/夜卖被兵潮打死）
+        # 0a. 夜间个体危险召回：仅当机器人逼近该工人时召回，并锁定在家到天亮（消除群体召回震荡）。
+        #     夜1 有升级火箭基本无风险 → 工人应全力采集，不做群体 CRITICAL 召回。
         in_danger = self.unit_id in getattr(ctx, "danger_workers", ())
-        if turn.is_night and (
-            getattr(ctx, "threat_level", "SAFE") == "CRITICAL" or in_danger
-        ):
-            cell = ctx.recall_cell(self.unit_id)
+        if turn.is_night and in_danger:
+            self.night_home = True
+        if turn.is_night and self.night_home:
+            cell = ctx.recall_cell(self.unit_id) or getattr(ctx, "safe_anchor", None)
             if cell is not None and unit.pos != cell:
                 self.mine = None
                 self.build = None
@@ -106,7 +111,8 @@ class WorkerFSM:
                 step = next_step(turn, unit, cell, ctx.reserved)
                 if step is not None:
                     return self._move(step, ctx)
-            return None  # 到位待命
+            self.state = STATE_CRITICAL
+            return None  # 在家待命，当晚不再外出
         # 0b. 近身机器人闪避（安全 > 矿锁；逃向墙后内圈而非 CP 开口侧）
         home = getattr(ctx, "safe_anchor", None) or getattr(ctx, "home_anchor", None)
         if home is not None and distance(unit.pos, home) > EVADE_DIST:

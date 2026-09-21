@@ -105,6 +105,26 @@ for path in paths or ["/"]:
                         print("__API status=OK base=%s path=%s auth=%s param=%s city=%s records=%d total=%s" % (base, path, auth_name, param, city, len(recs), total))
                         if recs and isinstance(recs[0], dict):
                             print("__API_KEYS %s" % json.dumps(sorted(recs[0].keys()), ensure_ascii=False))
+                        # 直接合成答案（零 LLM）：city + total_count + 类型分布 + 世界遗产计数
+                        ans = {}
+                        if city:
+                            ans["city"] = city
+                        try:
+                            ans["total_count"] = int(total) if total else len(recs)
+                        except Exception:
+                            ans["total_count"] = len(recs)
+                        if recs and isinstance(recs[0], dict):
+                            tk = next((k for k in recs[0] if str(k).lower() in ("type", "category", "类型", "level")), None)
+                            if tk:
+                                dist = {}
+                                for rr in recs:
+                                    tv = str(rr.get(tk, ""))
+                                    if tv:
+                                        dist[tv] = dist.get(tv, 0) + 1
+                                ans["types"] = dist
+                            wh = sum(1 for rr in recs if any(("世界" in str(v) or "遗产" in str(v)) for v in rr.values()))
+                            ans["world_heritage_count"] = wh
+                        print("__ANSWER %s" % json.dumps(ans, ensure_ascii=False))
                         if recs:
                             print("__ANSWER_CANDIDATE %s" % json.dumps(recs[:60], ensure_ascii=False))
                         best = True
@@ -309,13 +329,19 @@ class TaskPlanner:
                 m = re.search(r"auth=(\S+)", line)
                 if m and m.group(1) != "none":
                     self.api_facts["auth"] = m.group(1)
+            elif line.startswith("__ANSWER "):
+                ans = _extract_json(line[len("__ANSWER "):])
+                if ans and session.best_answer is None:
+                    session.best_answer = ans  # HARVEST 直接合成答案 → 零 LLM 提交
             elif line.startswith("__ANSWER_CANDIDATE "):
                 session.evidence.append(("__candidate__", line[:800]))
         # WS 流程推进：probe 完 → 尝试确定性修复
         if session.stage == "WS_PROBE":
             session.stage = "WS_FIX"
         elif session.stage == "API_HARVEST":
-            session.stage = "LLM"  # 收割完交给 LLM 组答
+            # 已直接合成答案则保持阶段（work() 第3步会提交），否则交 LLM 组答
+            if session.best_answer is None:
+                session.stage = "LLM"
         if session.cmd_fails >= MAX_CMD_FAILS:
             session.stage = "LLM"
 

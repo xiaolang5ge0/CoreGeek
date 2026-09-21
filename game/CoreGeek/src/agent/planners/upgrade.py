@@ -46,11 +46,12 @@ def voucher_for(kind: str, level: int) -> tuple[str, int] | None:
 
 class UpgradePlanner:
     """升级优先序（实战复盘版）：
-    武器全 L2（多个二级>单个三级）→ 受损墙 → 健康墙 L2（20金换+500血，极廉价）
-    → 武器 L3 → 墙 L3 → 基地（金富余）→ Day3+ 备货 WallFixer（夜间修墙岗用）。
+    武器全 L2（多个二级>单个三级）→ 受损墙（FRONT 优先）→ 健康墙 L1→L2（FRONT 优先）
+    → 武器 L3 → 墙 L3（**所有墙到 L2 之前不许升 L3**）→ 基地（金富余）→ Day3+ 备货 WallFixer。
+    FRONT = 离控制点 CP 最远的一侧（迎敌面）。
     """
 
-    def plan(self, turn: Turn) -> list[UpgradeMission]:
+    def plan(self, turn: Turn, cp=None) -> list[UpgradeMission]:
         missions: list[UpgradeMission] = []
         budget = turn.gold - RESERVE_GOLD
 
@@ -62,34 +63,41 @@ class UpgradePlanner:
             budget -= cost
             return True
 
+        from ..protocol import distance as _dist
+
+        def front_first(walls):
+            """迎敌面（离 CP 最远）优先；同距离按受损重的优先。"""
+            def key(w):
+                d = _dist(w.pos, cp) if cp is not None else 0
+                return (-d, w.health / WALL_MAX_HP[min(max(w.level, 1), 3) - 1])
+            return sorted(walls, key=key)
+
         weapons = sorted(turn.weapons(), key=lambda w: (w.level, w.unit_id))
+        all_walls = list(turn.walls())
+        any_l1_wall = any(w.level == 1 for w in all_walls)
+
         # 1. 武器全部 L2
         for w in weapons:
             if w.level == 1:
                 v, c = voucher_for("weapon", 1)
                 add(v, c, w.pos, "weapon", 10)
-        # 2. 受损墙（升级=回血），血量比例最低优先
-        hurt = sorted(
-            (w for w in turn.walls() if 1 <= w.level <= 2),
-            key=lambda w: w.health / WALL_MAX_HP[w.level - 1],
-        )
-        for wall in hurt:
+        # 2. 受损墙（升级=回血）FRONT 优先
+        for wall in front_first([w for w in all_walls if 1 <= w.level <= 2]):
             if wall.health / WALL_MAX_HP[wall.level - 1] < WALL_DAMAGE_RATIO:
                 v, c = voucher_for("wall", wall.level)
                 add(v, c, wall.pos, "wall", 20)
-        # 3. 健康墙 L1→L2（廉价大收益）
-        for wall in turn.walls():
-            if wall.level == 1 and wall.health / WALL_MAX_HP[0] >= WALL_DAMAGE_RATIO:
-                v, c = voucher_for("wall", 1)
-                add(v, c, wall.pos, "wall", 25)
+        # 3. 健康墙 L1→L2（廉价大收益）FRONT 优先
+        for wall in front_first([w for w in all_walls if w.level == 1]):
+            v, c = voucher_for("wall", 1)
+            add(v, c, wall.pos, "wall", 25)
         # 4. 武器 L3
         for w in weapons:
             if w.level == 2:
                 v, c = voucher_for("weapon", 2)
                 add(v, c, w.pos, "weapon", 30)
-        # 5. 墙 L3
-        for wall in turn.walls():
-            if wall.level == 2 and wall.health / WALL_MAX_HP[1] >= WALL_DAMAGE_RATIO:
+        # 5. 墙 L3 —— 门控：仍有 L1 墙时不升任何墙到 L3（先把正面都拉到 L2）
+        if not any_l1_wall:
+            for wall in front_first([w for w in all_walls if w.level == 2]):
                 v, c = voucher_for("wall", 2)
                 add(v, c, wall.pos, "wall", 35)
         # 6. 基地：金币富余时

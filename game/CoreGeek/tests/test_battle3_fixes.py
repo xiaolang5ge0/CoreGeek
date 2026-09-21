@@ -14,6 +14,24 @@ from agent.telemetry import compact_record, encrypt_text
 W1, W2 = 10010, 10012
 DAY1 = 70
 
+TASK = {
+    "pos": (14, 14),
+    "text": "任务：查询南京文化遗产数据",
+    "scoreReward": 50,
+    "goldReward": 30,
+    "timeoutRounds": 15,
+}
+API_LOCATE_RESULT = (
+    "[exitCode:0]\n__FILE:/data/task_api.md\n__DIR:/data\n"
+    "__DOC:/data/task_api.md\nAPI 文档：http://localhost:8899/api 查询文化遗产\n__END"
+)
+
+
+def make_sim(**kw):
+    base = dict(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
+    base.update(kw)
+    return SimWorld(**base)
+
 
 def run_rounds(brain, sim, n):
     out = []
@@ -148,6 +166,57 @@ class TestParamFix(unittest.TestCase):
         self.assertIsNotNone(cmd)
         self.assertIn("location=南京", cmd)
         self.assertIn("Bearer k123456", cmd)
+
+
+class TestApiHarvestDirectAnswer(unittest.TestCase):
+    def test_harvest_composes_answer_zero_llm(self):
+        """HARVEST 直接合成 __ANSWER（city+total_count）→ 零 LLM 提交（对齐参考文档 #14）。"""
+        def handler(cmd):
+            if "__FILE" in cmd:
+                return API_LOCATE_RESULT
+            if "python3 -c" in cmd or "python -c" in cmd:
+                return (
+                    '[exitCode:0]\n__API status=OK base=http://localhost:8899 path=/api '
+                    'auth=bearer param=location city=南京 records=12 total=12\n'
+                    '__API_KEYS ["name","type"]\n'
+                    '__ANSWER {"city": "南京", "total_count": 12, "world_heritage_count": 2}\n'
+                    '__ANSWER_CANDIDATE [{"name":"x","type":"y"}]'
+                )
+            return "[exitCode:0]\n"
+
+        sim = make_sim(tasks=[TASK], cmd_handler=handler, expected_answer="南京")
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        self.assertGreaterEqual(sim.score, 50)
+        self.assertEqual(sim.prompts_seen, [], "HARVEST 直采应零 LLM")
+        self.assertTrue(any("南京" in s for s in sim.submissions))
+
+
+class TestNightMiningNotRecalled(unittest.TestCase):
+    def test_workers_mine_at_night_when_safe(self):
+        """夜1 机器人远离矿区：工人应继续采集，不群体召回震荡（实战 65 回合 CRITICAL 的反面）。"""
+        sim = make_sim(mines={(8, 20): "copper", (6, 22): "stone"})
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        # 夜间补满矿（Day1 已采空），机器人放到东侧远角（离西部矿区 >15，安全）
+        sim.add_mine((8, 20), "copper", remaining=30)
+        sim.add_mine((6, 22), "stone", remaining=30)
+        for i, (x, y) in enumerate([(30, 5), (31, 6)]):
+            sim.spawn_robot(x, y, "smallRobot", hp=40, rid=30700 + i)
+        collect_rounds = 0
+        crit_rounds = 0
+        for _ in range(10):
+            response, trace = brain.decide(sim.payload())
+            cmds = response["roleCommandMap"]
+            if any(c.get("action") == "collect" for c in cmds.values()):
+                collect_rounds += 1
+            states = (trace.get("workers") or {})
+            if any((v or {}).get("state") == "CRITICAL_DEFENSE" for v in states.values()):
+                crit_rounds += 1
+            sim.apply(response)
+            sim.advance()
+        self.assertGreater(collect_rounds, 3, "安全时夜间应持续采集")
+        self.assertLess(crit_rounds, 5, "不得群体召回震荡")
 
 
 if __name__ == "__main__":

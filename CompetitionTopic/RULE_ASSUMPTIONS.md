@@ -162,6 +162,12 @@
 | 2026-09-21 实战 | 日志 | 平台只见 stdout，文件日志取不到 | 遥测改为**每回合 stdout 打印完整 Request+Response** |
 | 2026-09-21 经验（《自进化策略.md》） | acceptTask 失败 | FAIL 计 errorCode 4（指令错误） | **acceptTask FAIL 立即放弃+终身回避该任务点，绝不重试**（5 次封号红线） |
 | 2026-09-21 三场实战 | 任务超时 | playerTasks.timeoutRounds=**15**，reward 80分/80金 | 任务预算极紧：确定性流程≤8回合，deadline-2 强制交保底 |
+| 2026-09-22 三场实战(issue#11/12/13) | 夜间群体召回震荡 | 工人夜状态 CRITICAL_DEFENSE×65 vs MINE×1，整夜在墙边打转不采矿 | **取消 CRITICAL 群体召回**，改个体危险召回+当晚锁定在家；夜1有升级火箭=安全，工人全力采集 |
+| 同上 | 炮台误击 | 炮台打了 targetTeam=对方 的机器人，漏打冲我方的 | 射程内有冲我方机器人时**只打我方的**（硬过滤） |
+| 同上 | API 任务认证/参数 | 需 `Authorization: Bearer` + 参数名 `location`（非 city）；LLM 反复横跳耗尽15回合 | HARVEST v2 自动探测 认证×参数名×城市 并**直接合成 __ANSWER 零 LLM 提交**；参数/认证确定性纠错 |
+| 同上 | 采一个建一个 | 石头采1建1，墙进度慢 | build_phase：采够一批(6)连续建完再回矿；预留回合=待建墙数+缓冲 |
+| 同上 | 墙升级跳级 | 单墙直冲 L3，正面墙没先 L2 | FRONT(离CP最远)优先；**所有墙到 L2 之前禁止任何墙升 L3** |
+| 参考 issue#14 | 自进化最优流程 | 6任务全成、零LLM、27回合+590分：工程类3步(定位→探测→修复)、API类2步(定位→HARVEST→提交) | 对齐：确定性优先，phaseTask 不做正则 cat（用通用 find+cat 全部 .md），LLM 仅兜底 |
 | 同上 | API 任务 | 服务端要 `Authorization: Bearer <key>` + 参数名 `location`（非 city）；错误信息会明说缺什么参数 | harvest v2 自动探测 认证×参数名×城市；`Missing required parameter: X` 触发确定性重试 |
 | 同上 | 沙盒命令 | LLM 多行 python -c 命令导致 bash `unexpected EOF` | CMD 消毒：含换行/引号不配对一律拒收 |
 | 同上 | 夜潮规模 | Day1 夜 67 只、Day2 夜 90 只、Day3 夜 92 只（含大怪） | 墙必须升级（L2=1500血）；Day3+ 夜间设修墙岗 |

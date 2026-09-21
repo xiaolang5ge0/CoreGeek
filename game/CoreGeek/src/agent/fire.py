@@ -57,13 +57,16 @@ class JointFirePlanner:
 
     def _best_targets(self, turn: Turn, weapon: Unit) -> tuple[list[Pos], int]:
         reach = weapon.range_of_attack()
-        robots = [
+        in_range = [
             r
             for r in turn.robots
             if r.alive and 1 <= distance(weapon.pos, r.pos) <= reach
         ]
-        if not robots:
+        if not in_range:
             return (), 0
+        # 硬优先：射程内有冲我方来的机器人时，绝不打敌方机器人（实战教训：炮台误击对方机器人）
+        ours = [r for r in in_range if r.target_team in ("", turn.team_type)]
+        robots = ours if ours else in_range
         station = turn.station()
         anchor = station.pos if station is not None else weapon.pos
         scored: list[tuple[int, int, int, int, int, Pos]] = []
