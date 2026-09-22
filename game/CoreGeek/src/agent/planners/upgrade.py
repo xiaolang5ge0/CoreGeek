@@ -151,13 +151,15 @@ class UpgradePlanner:
             )
 
         # 0. 【插队 D3】墙血低于动态阈值 max(100,(day+1)×100) → 优先修复/升级（可插武器队）
-        #    仅升 L1→L2（防跳级）；回满血后自然退出。
+        #    L1→Voucher1、L2→Voucher2（正面 L2 也能升 L3 回血，用户补充）。
         crit = front_order(
-            [w for w in all_walls if w.level == 1 and w.health < wall_hp_threshold(turn.day_index)]
+            [w for w in all_walls
+             if w.level in (1, 2) and w.health < wall_hp_threshold(turn.day_index)]
         )
         for wall in crit:
-            v, c = voucher_for("wall", 1)
-            add(v, c, wall.pos, "wall", 5)
+            v, c = voucher_for("wall", wall.level)
+            if v is not None:
+                add(v, c, wall.pos, "wall", 5)
         # 1. 武器全部 L2（常规最高优先）
         for w in weapons:
             if w.level == 1:
@@ -212,9 +214,11 @@ class UpgradePlanner:
             l3_walls = [w for w in all_walls if w.level >= 3]
             if all_weapons_l3 and all_walls_l3:
                 desired = FIXER_STOCK_MAXED
+            elif turn.day_index >= 4:
+                desired = min(FIXER_STOCK_MAX, max(3, len(l3_walls)))  # D4+ 常备≥3
             else:
                 desired = 2
-                if turn.day_index >= 4 or l3_walls:
+                if l3_walls:
                     desired = min(FIXER_STOCK_MAX, max(2, len(l3_walls)))
             held = sum(
                 u.backpack.count("WallFixer")

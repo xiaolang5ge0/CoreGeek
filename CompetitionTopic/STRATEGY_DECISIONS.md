@@ -120,9 +120,10 @@
 | **武器券批量采购** | 到店后把**当前所有待升武器**所需券一次买齐（V1×L1数 + V2×L2数，`_shopping_needs`），买不起才停；减少"买一张→回去升级→再出来"的往返 | issue#25 复盘 | CONFIRMED |
 | **武器槽位上限** | 全局 3 座；已达上限时**不得**再派布局里"未对齐"的炮位格（否则每回合被 LegalityGuard `weapon_limit` 拒 → 占死修理工、从不建墙，issue IKHYHT 根因） | CONFIRMED |
 | **建造分配** | 武器优先于墙；**不得抢占已有建造任务的工人**（防覆盖在途建墙） | CONFIRMED |
-| **墙修复插队阈值** | `wall_hp_threshold(day)=max(100,(day+1)×100)`；墙血低于此**插队**于武器升级之前 | D3（外部策略） | CONFIRMED |
+| **墙修复插队阈值** | `wall_hp_threshold(day)=max(100,(day+1)×100)`；墙血低于此**插队**于武器升级之前（**L1→Voucher1、L2→Voucher2**，正面 L2 也升 L3 回血） | D3 + 用户补充 | CONFIRMED |
 | **基地升级门控** | **仅当武器+墙全 L3** 才升基地（D4：暂不升，全满后再考虑） | CONFIRMED |
-| **WallFixer 备货** | 金币紧缺时上限 **4**；武器+墙**全 L3 后不设上限**（8） | D8 | CONFIRMED |
+| **WallFixer 备货** | 金币紧缺时上限 **4**；**D4+ 常备 ≥3**；武器+墙**全 L3 后不设上限**（8） | D8 + 用户补充 | CONFIRMED |
+| **异常红线兜底** | `threat.evaluate` 空防御圈（基地+墙+武器全毁）返回 `nearest=99` 不崩；`brain.decide` 顶层 try/except → 任何内部异常回落合法空响应（5 次异常=判负） | issue IKHYNS 实锤 | CONFIRMED |
 | **任务命令预算** | 已用命令数 **≥8 → 强制只给答案**（拒绝新命令） | D7 | CONFIRMED |
 | **矿工返程 deadline** | 当前回合 + 归程 + 6 ≥ 白天70/夜间130 → 回基地附近；**基地受威胁 + 矿工在基地3格内 → 原地待命** | D6（外部策略） | CONFIRMED |
 | **归位余量** | 炮手 **5**（DUSK_MARGIN）；修理工 **3**（REPAIR_MARGIN） | D2 | CONFIRMED |

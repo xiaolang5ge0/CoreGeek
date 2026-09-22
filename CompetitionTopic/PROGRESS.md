@@ -7,8 +7,8 @@
 
 | 项 | 状态 |
 |---|---|
-| 当前阶段 | **P0~P5 + 十七轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
-| 测试 | **153/153 通过** |
+| 当前阶段 | **P0~P5 + 十八轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
+| 测试 | **160/160 通过** |
 | 打包 | `game/CoreGeek/dist/CoreGeek.tar.gz`（**tar 顶层 CoreGeek/ 目录**，平台父目录解包后运行 `<root>/CoreGeek/main3.py`） |
 | 代码 | `game/CoreGeek/`，Python ≥3.11 纯标准库 |
 | 当前行为 | Day1 双工人建满14墙+3火箭；夜1-3 双工人全力采矿卖钱（无蹲防）；开拓者单人控3炮；Day4+ 修墙岗（墙血<50%才修、正面优先、L3→WallFixer、L1/L2→升级券）；WallRegistry 追踪攻破/补建并优先重升级；武器优先升级；任务确定性+LLM兜底；选矿我方侧优先 |
@@ -87,6 +87,17 @@
 | `location=请阅读` 参数污染 | 把 `phaseTask` 文本（"请阅读task_1_beijing.md…"）当成城市候选 | 参数值禁取自 `phaseTask`/提示语，只取文档/响应中的真实字段 |
 | 任务1 仍靠 LLM 三次 | 工程类确定性路径缺失（cat spec→改配置→去 CRLF 全靠 LLM） | 工程类 SOP 固化：find+cat spec → 按 spec 正则修复 → 去 CRLF → check |
 | 两局总分均 88（仅任务1的80分） | 任务2 超时失败，无 +80 | 以上修复后复测通过率 |
+
+## 实战修复记录·第十八轮（2026-09-23 issue IKHYNS 异常红线 + 围墙券2/修复券）
+
+> 日志：Gitee issue `IKHYNS`（teamB19，1146 回合）；对手成功日志：`IKHYL5/IKHYL6`。
+
+| 项 | 内容 |
+|---|---|
+| **致命异常（封号红线）** | 实锤 traceback：`threat.py:64 nearest=min(...)` → **`ValueError: min() arg is an empty sequence`**。当**基地+墙+武器全毁但仍有机器人**时 `defense_cells` 为空 → `min()` 崩溃 → 之后每回合 `fatal: request_exception` → 无指令 → 开拓者站着不动被推平。**修复**：① `threat.evaluate` 空 `defense_cells` 时 `nearest=99`；② `brain.decide` 顶层 try/except 兜底（任何内部异常回落合法空响应，杜绝异常红线） |
+| **围墙升级券2（用户补充）** | 正面墙已是 L2 时，升级回血须用 **Voucher2**（升 L3）。**修复**：D3 插队阈值扩展到 L2 墙（`voucher_for(level)` → L2 用 Voucher2），正面优先 |
+| **修复券备货（用户补充）** | **D4+ 常备 ≥3 个 WallFixer**（原 2）；全升满后不设上限（8） |
+| **测试** | 新增 `tests/test_issue_ikyns.py`（4 例：空防御圈不崩/decide 兜底/L2 墙 Voucher2 插队/D4 备券≥3）；全量 **160/160 通过** |
 
 ## 实战修复记录·第十七轮（2026-09-23 issue IKHYHT 致命 bug + D1–D8 决策落地）
 

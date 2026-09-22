@@ -171,6 +171,13 @@ class Brain:
 
     # ---- 主入口 ----
     def decide(self, payload: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
+        """异常红线兜底：任何内部异常都回落合法空响应（5 次异常=判负）。"""
+        try:
+            return self._decide_core(payload)
+        except Exception as exc:  # noqa: BLE001
+            return empty_response(), {"fatal": f"decide:{exc!r}"}
+
+    def _decide_core(self, payload: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
         trace: dict[str, Any] = {"code_phase": "P1"}
         if not isinstance(payload, dict):
             trace["fatal"] = "payload_not_dict"

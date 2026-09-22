@@ -61,10 +61,12 @@ class ThreatEstimator:
             defense_cells.update(station_footprint(station.pos))
         defense_cells.update(w.pos for w in turn.walls())
         defense_cells.update(w.pos for w in turn.weapons())
-        nearest = min(
-            (min(distance(r.pos, cell) for cell in defense_cells) for r in robots),
-            default=99,
-        )
+        nearest = 99
+        if defense_cells:
+            nearest = min(
+                (min(distance(r.pos, cell) for cell in defense_cells) for r in robots),
+                default=99,
+            )
 
         total_hp = sum(r.health for r in robots)
         total_atk = sum(ROBOT_ATK.get(r.kind, 5) for r in robots)
