@@ -36,7 +36,7 @@ from .protocol import (
 from .rules import LegalityGuard
 from .threat import SAFE, ThreatEstimator
 
-NIGHT_SAFE_DIST = 5         # 夜间矿/小贩安全半径（机器人主攻基地不绕路杀工人，阈值取小）
+NIGHT_SAFE_DIST = 3         # 夜间矿/小贩安全半径（机器人攻击射程3；主攻基地不绕路杀工人）
 SPAWN_AVOID_DIST = 4        # 历史出生点直接避让半径
 CORRIDOR_WIDTH = 5          # 机器人行军走廊半宽（出生点→我方基地连线附近）——B 方案安全矿定义
 CORRIDOR_BASE_MARGIN = 8    # 走廊只算距基地 > 此值 的部分（近基地处有墙/炮塔保护，不算危险）
@@ -50,6 +50,7 @@ REPAIR_MARGIN = 4           # 修理工提前归位余量（距天黑 ≤ 路径
 WEAPON_L1_COST = 100        # 武器 L1→L2 券价（判断是否需要凑武器升级费）
 RESERVE_GOLD = 30           # 升级预算保留金
 LLM_DAILY_LIMIT = 3         # 每日 LLM 调用上限（用户：每天只有 3 次）
+WALL_DANGER_RATIO = 0.8     # 城墙危险阈值：预计伤害 > 城墙总HP × 此值 → 危险
 DAY1_RUSH_DEADLINE = 50     # Day1 双工人建墙冲刺截止回合（预留收尾）
 DAY1_WALL_TARGET = 12       # Day1 目标墙数
 PIONEER_FLEE_DIST = 1       # 机器人贴到 CP 才撤离（过早撤离=整夜哑火，实战权衡）
@@ -91,6 +92,8 @@ class _Ctx:
     dusk_avoid: bool = False  # 夜间 或 白天临近入夜 → 提前避开出生走廊
     walls_left: int = 0       # 剩余待建墙数（石料岗按此收敛采集量，防过量）
     repair_triggered: bool = False   # 修理工夜间/临近天黑归位触发
+    wall_danger: bool = False        # 城墙危险（问题4：预计伤害超阈值）
+    night_now: bool = False          # 当前是否夜间（影响 mine_unsafe）
     need_weapon_gold: bool = False   # 有武器未 L2 且金不足 → 挖矿工去卖钱
     gunner_upgrade = None            # 炮手武器升级计划 (Pos, "weapon")
     price_boost_map: dict = {}       # 新闻预测：矿种 → 售卖加权
@@ -99,10 +102,12 @@ class _Ctx:
         return float(self.price_boost_map.get(kind, 0.0))
 
     def mine_unsafe(self, pos) -> bool:
-        """位置处于危险区：当前活机器人 / 出生点 / 行军走廊（B 方案）。"""
+        """位置是否危险：活机器人近旁（昼夜都算）；走廊/出生点仅**白天黄昏窗口**算（夜间只看活机器人）。"""
         from .protocol import distance as _d
         if any(_d(pos, rc) <= NIGHT_SAFE_DIST for rc in self.robot_cells):
             return True
+        if getattr(self, "night_now", False):
+            return False  # 夜间：走廊是白天归位用的，夜里只看活机器人（问题1）
         if any(_d(pos, sc) <= SPAWN_AVOID_DIST for sc in self.spawn_cells):
             return True
         return any(_d(pos, cc) <= CORRIDOR_WIDTH for cc in self.corridor_cells)
@@ -187,6 +192,7 @@ class Brain:
         ctx.corridor_cells = self._corridor_cells(turn)
         # 白天临近入夜也提前避开出生走廊（用户要求：接近晚上时避开历史出生位置）
         ctx.dusk_avoid = turn.is_night or (0 < turn.rounds_until_night <= DUSK_AVOID_WINDOW)
+        ctx.night_now = turn.is_night
         self._record_news(turn, trace)
         ctx.price_boost_map = self.news_economy.boosts(turn.day_index)
         ctx.prompt = ""
@@ -434,6 +440,13 @@ class Brain:
                 for cell in station_footprint(station.pos)
             )
         )
+        # 城墙危险阈值（问题4）：预计本夜机器人总伤害 > 城墙总HP×阈值 → 危险
+        ctx.wall_danger = self._wall_danger(turn)
+        # 修理工触发（问题2 修复：夜间也要计算，此前只在 _day 算 → 夜里恒为 False）
+        ctx.repair_triggered = self._repair_triggered(
+            turn, sorted(turn.workers(), key=lambda w: w.unit_id)
+        )
+        ctx.trace["wall_danger"] = ctx.wall_danger
         # 修墙岗仅限：Day4+（BOSS 夜）或 墙严重受损（≥3 面掉血 或 有墙<50%）。
         # Night1-3 相对轻松（事实：机器人主攻基地、顺路才杀工人）→ 不设岗，双工人全力采矿。
         hurt_walls = [
@@ -532,23 +545,38 @@ class Brain:
                 cells.append(Pos(px, py))
         return tuple(cells)
 
+    def _wall_danger(self, turn: Turn) -> bool:
+        """城墙危险阈值（问题4）：预计本夜机器人总伤害 > 城墙总HP×WALL_DANGER_RATIO → 危险。
+        预计伤害 = 机器人总攻击力 × 清场回合数（清场回合 = 机器人总HP / 我方DPS，封顶 60）。"""
+        robots = [r for r in turn.robots if r.alive]
+        if not robots:
+            return False
+        from .threat import ROBOT_ATK
+        total_atk = sum(ROBOT_ATK.get(r.kind, 5) for r in robots)
+        total_hp = sum(r.health for r in robots)
+        dps = sum(20 * max(1, w.level) for w in turn.weapons()) / 3.0
+        rounds = min(total_hp / dps, 60.0) if dps > 0 else 60.0
+        damage = total_atk * rounds
+        wall_hp = sum(w.health for w in turn.walls())
+        return damage > wall_hp * WALL_DANGER_RATIO
+
     def _repair_triggered(self, turn: Turn, workers) -> bool:
-        """修理工触发：D1-D2 不触发；D3+ 距天黑≤路径+4 触发；夜间有威胁触发。"""
+        """修理工触发：D1-D2 不触发；D3+ 距天黑≤路径+4 触发；夜间有威胁/城墙危险触发。"""
         if turn.day_index <= 2:
             return False
         if turn.is_night:
             station = turn.station()
-            if station is None:
-                return False
-            near = any(
-                distance(r.pos, cell) <= 6
-                for r in turn.robots if r.alive
-                for cell in station_footprint(station.pos)
+            near = bool(
+                station is not None and any(
+                    distance(r.pos, cell) <= 6
+                    for r in turn.robots if r.alive
+                    for cell in station_footprint(station.pos)
+                )
             )
             hurt = any(
                 w.health < WALL_MAX_HP[min(max(w.level, 1), 3) - 1] for w in turn.walls()
             )
-            return near or hurt
+            return near or hurt or self._wall_danger(turn)
         repairer = next(
             (w for w in workers if self._worker_fsm(w).role == ROLE_REPAIRER), None
         )

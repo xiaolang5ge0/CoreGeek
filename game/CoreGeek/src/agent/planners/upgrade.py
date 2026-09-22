@@ -16,6 +16,7 @@ RESERVE_GOLD = 30      # 应急金（炸弹/修墙包）
 RICH_GOLD = 250        # 基地升级门槛
 WALL_DAMAGE_RATIO = 0.6
 CRITICAL_WALL_RATIO = 0.3  # 武器未到 L2 时，仅临界受损墙才修（其余攒钱升塔）
+WALL_MIN_L2 = 6            # 武器升 L3 前，先升的最小墙量（正面+侧面转角，约 6 块）
 
 WALL_MAX_HP = (1000, 1500, 2000)
 WEAPON_MAX_HP = (1000, 1500, 2000)
@@ -99,11 +100,16 @@ class UpgradePlanner:
         for wall in damaged:
             v, c = voucher_for("wall", 1)
             add(v, c, wall.pos, "wall", 20)
-        # 3. FRONT 方向健康墙 L1→L2 —— 仅当武器已全部 L2（否则金币留给武器）
+        # 3. FRONT 方向健康墙 L1→L2 —— 仅当武器已全部 L2；且**只升最小量**（正面+侧面转角，≤6 块），
+        #    之后优先把武器升到 L3（问题3：不能还没升满武器就铺满所有墙）
         if not weapons_need_l2:
+            n = 0
             for wall in front_first([w for w in all_walls if w.level == 1 and id(w) in front_walls]):
+                if n >= WALL_MIN_L2:
+                    break
                 v, c = voucher_for("wall", 1)
-                add(v, c, wall.pos, "wall", 25)
+                if add(v, c, wall.pos, "wall", 25):
+                    n += 1
         # 4. 武器 L3
         for w in weapons:
             if w.level == 2:
