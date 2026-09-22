@@ -113,6 +113,9 @@
 | **WallFixer 备货** | Day3+ 至少 1 个；Day4+（BOSS 夜）或已有 L3 墙时按 L3 墙数备货，上限 FIXER_STOCK_MAX=3；按持有量补差（不多买） | 用户补充：按需购买 | CONFIRMED |
 | **围墙状态表** | `WallRegistry`（Dict: Pos→exists/level/health/is_front/breached_round/rebuilt_round）；前夜被攻破→补建墙回到 L1 重新入升级队列（补建墙优先） | 用户补充：用 Dict 维护墙况 | CONFIRMED |
 | 基地升级门槛 | RICH_GOLD=250 | 武器/墙之后 | CONFIRMED |
+| **武器券批量采购** | 到店后把**当前所有待升武器**所需券一次买齐（V1×L1数 + V2×L2数，`_shopping_needs`），买不起才停；减少"买一张→回去升级→再出来"的往返 | issue#25 复盘 | CONFIRMED |
+| **修理工归位** | `ctx.home_anchor` 必须在**工人决策前**注入；归位回合数用 **A\* 实际路径长度**（非切比雪夫）；目标格被占（CP）退化到邻接格；归位失败兜底继续采集（不空转） | issue#25 卡墙外根因 | CONFIRMED |
+| **购买量守卫** | `_buy_qty/_voucher_qty/_stock_qty` 买不起返回 0（不发非法 buy） | 各角色购买逻辑审计 | CONFIRMED |
 | **升级任务时段** | **白天只采购（allow_buy/allow_use 分离），升级/修复留到夜间执行**；升级=回血可省修复包；机器人到墙有回合数，夜间来得及 | 用户策略：白天最大化采集 | CONFIRMED |
 | **夜间升级优先级** | 修理工夜间：①已分配升级任务（用券）→ ②受损<50%抢修 → ③无事才采矿 | 用户策略 | CONFIRMED |
 

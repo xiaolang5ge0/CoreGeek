@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .path import next_step, step_toward
+from .path import find_path, next_step, step_toward
 from .planners.upgrade import WALL_MAX_HP, voucher_for
 from .protocol import (
     MINE_TYPES,
@@ -155,12 +155,15 @@ class WorkerFSM:
         if turn.day_index <= 2:
             # D1-D2 自由：采石 + 建墙
             return self._build_mine(turn, unit, ctx)
-        # D3+：白天只采购（升级券/修复包）+ 建补墙 + 采集；升级/修复留到夜间（最大化采集）
+        # D3+：白天。临近天黑**优先归位**（安全第一，不再外出采购），否则采购+建补墙+采集
+        if 0 < turn.rounds_until_night <= self._path_home_len(turn, unit, ctx) + REPAIR_MARGIN:
+            cmd = self._go_home(turn, unit, ctx, ctx.home_anchor)
+            if cmd is not None:
+                return cmd
+            return self._build_mine(turn, unit, ctx)  # 已归位/受阻 → 就近采集（兜底不空转）
         cmd = self._upgrade_flow(turn, unit, ctx, allow_use=False, allow_buy=True)
         if cmd is not None:
             return cmd
-        if 0 < turn.rounds_until_night <= self._path_home_len(turn, unit, ctx) + REPAIR_MARGIN:
-            return self._go_home(turn, unit, ctx, ctx.home_anchor)
         return self._build_mine(turn, unit, ctx)
 
     def _build_mine(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
@@ -466,9 +469,10 @@ class WorkerFSM:
                 return None
             if not allow_buy:
                 return None
-            return self._buy_item(
-                turn, unit, ctx, item, self._stock_qty(turn, unit, item, qty)
-            )
+            want = self._stock_qty(turn, unit, item, qty)
+            if want <= 0:
+                return None
+            return self._buy_item(turn, unit, ctx, item, want)
         building = next(
             (u for u in turn.ours if u.pos == target and u.kind in (*TOWER_TYPES, WALL, STATION)),
             None,
@@ -490,8 +494,10 @@ class WorkerFSM:
                 self.upgrade = None
                 self.state = STATE_FREE
                 return None
-            return self._buy_item(turn, unit, ctx, voucher,
-                                  self._voucher_qty(turn, unit, voucher, cost, kind))
+            want = self._voucher_qty(turn, unit, voucher, cost, kind)
+            if want <= 0:
+                return None
+            return self._buy_item(turn, unit, ctx, voucher, want)
         if not allow_use:
             return None  # 白天只采购，升级/修复留到夜间
         if unit.pos != target and distance(unit.pos, target) <= 1:
@@ -509,11 +515,14 @@ class WorkerFSM:
     def _stock_qty(self, turn: Turn, unit: Unit, item: str, want: int = 1) -> int:
         price = turn.shop_prices.get(item, 10)
         if price <= 0:
-            return 1
+            return 0
         held = unit.backpack.count(item)
-        need = max(1, want - held)
+        need = max(0, want - held)
+        if need <= 0:
+            return 0
         room = (unit.capacity or 100) - len(unit.backpack)
-        return max(1, min(need, room, turn.gold // price))
+        afford = turn.gold // price
+        return max(0, min(need, room, afford))
 
     def _voucher_qty(self, turn: Turn, unit: Unit, voucher: str, cost: int, kind: str) -> int:
         """批量购买：min(刚需, 背包容量, 金币//单价)，扣除已持有（不多买）。"""
@@ -525,10 +534,10 @@ class WorkerFSM:
         held = unit.backpack.count(voucher)
         want = max(0, need - held)
         if want <= 0:
-            return 1
+            return 0
         room = (unit.capacity or 100) - len(unit.backpack)
         afford = turn.gold // cost if cost > 0 else 1
-        return max(1, min(want, room, afford))
+        return max(0, min(want, room, afford))
 
     def _buy_item(self, turn: Turn, unit: Unit, ctx, name: str, num: int) -> dict[str, Any] | None:
         shop = self._nearest_shop(turn, unit)
@@ -594,14 +603,21 @@ class WorkerFSM:
 
     # ---- 归位 ----
     def _path_home_len(self, turn: Turn, unit: Unit, ctx) -> int:
+        """归位所需回合：优先用 A* 实际路径长度（切比雪夫距离会低估绕墙路程）。"""
         home = ctx.home_anchor
         if home is None:
             return 0
-        return distance(unit.pos, home)
+        if unit.pos == home:
+            return 0
+        path = find_path(turn, unit, home, ctx.reserved)
+        return len(path) - 1 if path else distance(unit.pos, home)
 
     def _go_home(self, turn: Turn, unit: Unit, ctx, home) -> dict[str, Any] | None:
         if home is None or unit.pos == home:
             return None
         self.state = STATE_RETURN
+        # 归位目标格可能被占（如 CP 被开拓者占用）→ A* 视其为阻挡；退化到邻接格
         step = next_step(turn, unit, home, ctx.reserved)
+        if step is None:
+            step = step_toward(turn, unit, home, ctx.reserved)
         return self._move(step, ctx) if step is not None else None

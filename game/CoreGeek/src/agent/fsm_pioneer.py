@@ -104,7 +104,24 @@ class PioneerFSM:
             self.state = STATE_GUARD
             return None
         voucher = f"WeaponUpgradeVoucher{weapon.level}"
-        cost = WEAPON_L1_COST if weapon.level == 1 else WEAPON_L2_COST
+        needs = self._shopping_needs(turn, pioneer)
+        # 采购：缺券就去店；在店里把当前所有缺口一次买齐（避免买了立刻回去升级再出来）
+        if needs and (self.state == STATE_WEAPON_BUY or pioneer.backpack.count(voucher) < 1):
+            affordable = [n for n in needs if turn.gold >= n[1]]
+            if affordable:
+                shop = self._nearest_shop(turn, pioneer)
+                if shop is None:
+                    return None
+                self.state = STATE_WEAPON_BUY
+                if pioneer.pos != shop and distance(pioneer.pos, shop) <= 1:
+                    v, c, _want = affordable[0]
+                    qty = self._buy_qty(turn, pioneer, v, c)
+                    if qty <= 0:
+                        self.state = STATE_GUARD
+                        return None
+                    return buy_command(v, qty)
+                step = step_toward(turn, pioneer, shop, ctx.reserved)
+                return move_command(step) if step is not None else None
         # 券已入手 → 去武器处升级
         if pioneer.backpack.count(voucher) >= 1:
             self.state = STATE_WEAPON_UPGRADE
@@ -115,34 +132,37 @@ class PioneerFSM:
                 return use_command(voucher, target)
             step = step_toward(turn, pioneer, target, ctx.reserved)
             return move_command(step) if step is not None else None
-        # 没券 → 去商店买（批量）
-        if turn.gold < cost:
-            self.upgrade_target = None
-            self.state = STATE_GUARD
-            return None
-        shop = self._nearest_shop(turn, pioneer)
-        if shop is None:
-            return None
-        self.state = STATE_WEAPON_BUY
-        if pioneer.pos != shop and distance(pioneer.pos, shop) <= 1:
-            qty = self._buy_qty(turn, pioneer, voucher, cost)
-            return buy_command(voucher, qty)
-        step = step_toward(turn, pioneer, shop, ctx.reserved)
-        return move_command(step) if step is not None else None
+        # 没券且买不起
+        self.upgrade_target = None
+        self.state = STATE_GUARD
+        return None
+
+    def _shopping_needs(self, turn: Turn, pioneer: Unit) -> list[tuple[str, int, int]]:
+        """还缺的武器券清单 [(voucher, cost, want)]：按武器等级升序，覆盖**所有**待升武器。"""
+        needs: list[tuple[str, int, int]] = []
+        for lvl, cost in ((1, WEAPON_L1_COST), (2, WEAPON_L2_COST)):
+            cnt = sum(1 for w in turn.weapons() if w.level == lvl)
+            if cnt <= 0:
+                continue
+            voucher = f"WeaponUpgradeVoucher{lvl}"
+            held = pioneer.backpack.count(voucher)
+            want = cnt - held
+            if want > 0:
+                needs.append((voucher, cost, want))
+        return needs
 
     def _buy_qty(self, turn: Turn, pioneer: Unit, voucher: str, cost: int) -> int:
-        """批量购买：min(刚需, 背包容量, 金币//单价)；扣除已持有。"""
+        """批量购买：min(刚需, 背包容量, 金币//单价)；扣除已持有。买不起返回 0。"""
         held = pioneer.backpack.count(voucher)
         weapons = turn.weapons()
-        # 刚需 = 还差几张券（同等级武器数 - 已持有）
         lvl = 1 if voucher.endswith("1") else 2
         need = sum(1 for w in weapons if w.level == lvl)
-        want = max(0, need - held)
+        want = need - held
         if want <= 0:
-            return 1
+            return 0
         room = (pioneer.capacity or 40) - len(pioneer.backpack)
         afford = turn.gold // cost if cost > 0 else 1
-        return max(1, min(want, room, afford))
+        return max(0, min(want, room, afford))
 
     def _nearest_shop(self, turn: Turn, pioneer: Unit) -> Pos | None:
         shops = turn.shop_positions()

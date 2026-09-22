@@ -7,8 +7,8 @@
 
 | 项 | 状态 |
 |---|---|
-| 当前阶段 | **P0~P5 + 十二轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
-| 测试 | **111/111 通过** |
+| 当前阶段 | **P0~P5 + 十三轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
+| 测试 | **114/114 通过** |
 | 打包 | `game/CoreGeek/dist/CoreGeek.tar.gz`（**tar 顶层 CoreGeek/ 目录**，平台父目录解包后运行 `<root>/CoreGeek/main3.py`） |
 | 代码 | `game/CoreGeek/`，Python ≥3.11 纯标准库 |
 | 当前行为 | Day1 双工人建满14墙+3火箭；夜1-3 双工人全力采矿卖钱（无蹲防）；开拓者单人控3炮；Day4+ 修墙岗（墙血<50%才修、正面优先、L3→WallFixer、L1/L2→升级券）；WallRegistry 追踪攻破/补建并优先重升级；武器优先升级；任务确定性+LLM兜底；选矿我方侧优先 |
@@ -75,6 +75,19 @@
 | `location=请阅读` 参数污染 | 把 `phaseTask` 文本（"请阅读task_1_beijing.md…"）当成城市候选 | 参数值禁取自 `phaseTask`/提示语，只取文档/响应中的真实字段 |
 | 任务1 仍靠 LLM 三次 | 工程类确定性路径缺失（cat spec→改配置→去 CRLF 全靠 LLM） | 工程类 SOP 固化：find+cat spec → 按 spec 正则修复 → 去 CRLF → check |
 | 两局总分均 88（仅任务1的80分） | 任务2 超时失败，无 +80 | 以上修复后复测通过率 |
+
+## 实战修复记录·第十三轮（2026-09-22 issue#25 复盘：买券批量 + 修理工归位兜底）
+
+> 复盘方法见 `LOG_ANALYSIS_PLAYBOOK.md`；issue#25 日志在正文+16 条评论里（`analyze_issue_log.py` 只读正文，需合并评论）。
+
+| 问题 | 根因（解密日志实锤） | 修复 |
+|---|---|---|
+| **炮手只买 V1×1，不买 V2**（r280 有 272 金） | `_weapon_upgrade_cmd` 每次只算**当前目标券**；买一张即回去升级 | **`_shopping_needs`**：一次买齐当前所有待升武器所需券（V1×L1数 + V2×L2数）；在店内连续买直到买齐/买不起（issue#25 期望：V1+V2 一次带走） |
+| **购买量可能发出非法 buy** | `_buy_qty/_voucher_qty/_stock_qty` 买不起时 `max(1,…)` 仍返回 1 | 买不起返回 0 + 调用处守卫 |
+| **修理工从不回防、卡墙外**（r457–r471 `state=MINE_COLLECT_LOCKED, cmd=None`） | `_day` 里 `ctx.home_anchor` 在 **pioneer 分支**才设置 → 工人阶段恒为 None → `_path_home_len=0`、`_go_home(None)=None`，直接空转 | `ctx.home_anchor` 提到**工人决策前**；`_go_home` 失败兜底继续采集 |
+| **归位慢 2-3 回合** | `_path_home_len` 用切比雪夫距离，低估绕墙路程 | 改用 **A\* 实际路径长度**（`find_path`） |
+| **CP 被开拓者占用 → 归位 A\* 失败** | `find_path` 把被占的 CP 视为阻挡 | `_go_home` 退化到 `step_toward`（目标邻接格） |
+| **测试** | — | 新增 3 例（一次买齐 V1+V2 / 买不起返回 0 / 修理工黄昏归位）；全量 **114/114 通过** |
 
 ## 实战修复记录·第十二轮（2026-09-22 用户策略：围墙升级/修复移到夜间）
 

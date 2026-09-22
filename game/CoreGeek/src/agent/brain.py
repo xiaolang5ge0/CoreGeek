@@ -369,6 +369,9 @@ class Brain:
         self._assign_repair_mission(turn, layout, ctx, workers, allow_stock=True)
         # 炮手武器升级计划（由 fsm_pioneer 执行）
         ctx.gunner_upgrade = self._gunner_upgrade_plan(turn)
+        # 归位锚点必须在工人决策前设置：修理工黄昏归位依赖 ctx.home_anchor
+        # （此前在 pioneer 分支里才设置 → 工人阶段恒为 None → 修理工从不回防，实战 issue#25 卡墙外）
+        ctx.home_anchor = layout.control_point
 
         for worker in workers:
             cmd = self._worker_fsm(worker).decide(turn, worker, ctx)

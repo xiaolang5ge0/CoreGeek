@@ -4,7 +4,8 @@ import unittest
 import _bootstrap  # noqa: F401
 
 from harness import SimWorld
-from agent.brain import Brain
+from agent.brain import Brain, _Ctx
+from agent.fsm_pioneer import PioneerFSM, STATE_WEAPON_BUY, STATE_WEAPON_UPGRADE
 from agent.planners.upgrade import UpgradePlanner
 from agent.protocol import Pos, Turn
 
@@ -116,6 +117,70 @@ class TestNightWallUpgrade(unittest.TestCase):
             sim.advance()
         self.assertEqual(day_uses, 0, "白天不应用券升级墙（应留给夜间）")
         self.assertGreaterEqual(night_uses, 1, "夜间应执行围墙升级（升级=回血）")
+
+
+class TestPioneerBatchPurchase(unittest.TestCase):
+    def test_buys_current_level_vouchers_in_one_trip(self):
+        """issue#25：金币够时应一次买齐当前所需券（V1+V2），而不是买一张就回去升级再出来。"""
+        sim = SimWorld(station_pos=(10, 24), mines={}, gold=272, shop=(25, 20))
+        sim.roles = [r for r in sim.roles if r["roleType"] != "station"]
+        sim.roles.append(sim._role(50013, 10, 24, "station", 1500, level=1))
+        sim.roles.append(sim._role(50040, 8, 20, "rocket", 1000, level=1))
+        sim.roles.append(sim._role(50041, 8, 22, "rocket", 1500, level=2))
+        sim.roles.append(sim._role(50042, 9, 20, "rocket", 1500, level=2))
+        sim.role(10011)["pos"] = {"x": 24, "y": 19}  # 商店旁
+        fsm = PioneerFSM()
+        ctx = _Ctx({})
+        ctx.reserved = set()
+        ctx.gunner_upgrade = (Pos(8, 20), "weapon")   # 目标=最低级武器 L1
+        buys = []
+        for _ in range(4):
+            turn = Turn.load(sim.payload())
+            pioneer = next(u for u in turn.ours if u.kind == "pioneer")
+            cmd = fsm._weapon_upgrade_cmd(turn, pioneer, ctx)
+            if cmd and cmd.get("action") == "buy":
+                buys.append((cmd["name"], cmd.get("num")))
+                sim.role(10011)["backpack"].append(cmd["name"])
+                sim.gold -= {"WeaponUpgradeVoucher1": 100, "WeaponUpgradeVoucher2": 150}[cmd["name"]]
+            else:
+                break
+        self.assertEqual([b[0] for b in buys],
+                         ["WeaponUpgradeVoucher1", "WeaponUpgradeVoucher2"],
+                         "应一次买齐 V1 + V2")
+        self.assertEqual(sim.gold, 22)
+
+    def test_buy_qty_zero_when_unaffordable(self):
+        """买不起时数量为 0（不得发出非法 buy）。"""
+        sim = SimWorld(station_pos=(10, 24), mines={}, gold=10, shop=(25, 20))
+        sim.roles.append(sim._role(50040, 8, 20, "rocket", 1000, level=1))
+        turn = Turn.load(sim.payload())
+        pioneer = next(u for u in turn.ours if u.kind == "pioneer")
+        fsm = PioneerFSM()
+        self.assertEqual(fsm._buy_qty(turn, pioneer, "WeaponUpgradeVoucher1", 100), 0)
+
+
+class TestRepairerReturnHome(unittest.TestCase):
+    def test_repairer_returns_home_before_dusk(self):
+        """issue#25：修理工黄昏必须归位（此前 ctx.home_anchor 在工人阶段为 None → 卡墙外）。"""
+        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (7, 26): "stone"})
+        sim.add_mine((6, 22), "stone", remaining=120)
+        sim.add_mine((7, 26), "stone", remaining=120)
+        brain = Brain()
+        build_day1(brain, sim)
+        sim.role(W1)["pos"] = {"x": 22, "y": 30}  # 把修理工丢到远处墙外
+        sim.gold = 0                               # 排除采购干扰
+        sim.round_no = 321                         # Day3 白天后段（距天黑 10 回合）
+        cp = brain.layout.control_point
+        states = set()
+        for _ in range(8):
+            response, trace = brain.decide(sim.payload())
+            info = (trace.get("workers") or {}).get(str(W1)) or {}
+            states.add(info.get("state"))
+            sim.apply(response)
+            sim.advance()
+        self.assertIn("RETURN_HOME", states, "修理工应在黄昏前进入归位状态")
+        pos = sim.role(W1)["pos"]
+        self.assertLess(max(abs(pos["x"] - cp.x), abs(pos["y"] - cp.y)), 20, "应朝基地移动")
 
 
 class TestMineBlacklist(unittest.TestCase):

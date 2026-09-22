@@ -60,6 +60,17 @@ def fetch_issue_body(repo: str, number: int, timeout: int = 60) -> tuple[str, st
     return data.get("title") or f"issue-{number}", data.get("body") or ""
 
 
+def fetch_issue_comments(repo: str, number: int, timeout: int = 60) -> list[str]:
+    """返回 issue 全部评论正文（遥测常因正文 60KB 截断，续在评论里）。"""
+    url = f"https://api.github.com/repos/{repo}/issues/{number}/comments?per_page=100"
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "CoreGeek-log-analyzer", "Accept": "application/vnd.github+json"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.load(resp)
+    return [str(c.get("body") or "") for c in data]
+
+
 def parse_records(text: str) -> list[dict]:
     """从文本中提取并解密所有 round_record；无法解析的以 {'_error': ...} 返回。"""
     records: list[dict] = []
@@ -125,7 +136,9 @@ def collect_texts(args: argparse.Namespace) -> list[tuple[str, str]]:
     texts: list[tuple[str, str]] = []
     for number in args.issue or []:
         title, body = fetch_issue_body(args.repo, number)
-        texts.append((f"ISSUE #{number}: {title}", body))
+        # 正文常被 60KB 截断 → 合并全部评论（遥测续写）
+        chunks = [body, *fetch_issue_comments(args.repo, number)]
+        texts.append((f"ISSUE #{number}: {title}", "\n".join(chunks)))
     for path in args.file or []:
         with open(path, encoding="utf-8", errors="ignore") as handle:
             texts.append((f"FILE: {path}", handle.read()))
