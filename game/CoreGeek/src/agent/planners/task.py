@@ -38,8 +38,9 @@ ST_FIND = ST_EXPLORE
 ST_READ = ST_EXPLORE
 
 MAX_NON_JSON = 3       # 连续非 JSON 上限 → 强制结束
-MAX_LLM_LOOPS = 8      # LLM 循环上限默认值（实际按任务 timeoutRounds 收紧，见 _loop_limit）
-FORCE_SUBMIT_CMDS = 8  # 已用命令数 ≥8 → 强制进入"只准给答案"模式（D7）
+MAX_LLM_LOOPS = 8      # LLM 循环上限默认值（实际按任务 timeoutRounds 收紧，见 _task_timeout）
+FORCE_SUBMIT_CMDS = 8  # 命令预算默认值（实际按 timeout 动态，见 max_cmds）
+FORCE_ANSWER_MARGIN = 2  # 距任务超时 ≤ 此回合 → 强制"只给答案"模式
 EXPLORE_LIMIT = 8000   # 探索输出保留字符数（需容纳 API_DOCS 全文/密钥）
 
 _FILE_NAME = re.compile(r"[A-Za-z0-9_\-/]+\.(?:md|txt)", re.I)
@@ -119,8 +120,14 @@ class TaskSession:
     submitted: bool = False
     need_refine: bool = False
     max_loops: int = MAX_LLM_LOOPS                          # 本任务 LLM 循环上限（按 timeout 收紧）
-    cmd_count: int = 0                                      # 已下发命令数（D7：≥8 强制提交）
+    cmd_count: int = 0                                      # 已下发命令数
     last_error: str = ""                                    # 上次提交被判错的原因（重试时喂 LLM）
+    # ---- 超时模型（按剩余回合驱动）----
+    accept_round: int = 0                                   # 接取任务的回合
+    timeout_rounds: int = 0                                 # 任务超时回合数（平台给）
+    max_cmds: int = FORCE_SUBMIT_CMDS                       # 命令预算（按 timeout 动态）
+    force_sent: bool = False                                # 是否已发过"强制答案"prompt
+    force_answer: bool = False                              # 强制只给答案模式（拒绝新命令）
 
     def reset(self) -> None:
         self.__init__()
@@ -150,7 +157,13 @@ class TaskPlanner:
             session.task_key = self._task_key(turn.phase_task)
             names = _extract_file_names(turn.phase_task)
             session.target_name = names[0] if names else "task_*.md"
-            session.max_loops = self._loop_limit(turn)
+            # 超时模型（按剩余回合驱动）：循环/命令预算 = max(2, (timeout-4)//2)
+            session.accept_round = turn.round_no
+            session.timeout_rounds = self._task_timeout(turn)
+            if session.timeout_rounds > 0:
+                budget = max(2, (session.timeout_rounds - 4) // 2)
+                session.max_loops = min(MAX_LLM_LOOPS, budget)
+                session.max_cmds = min(MAX_LLM_LOOPS, budget)
             session.stage = ST_EXPLORE
 
         # 1. 回收异步结果
@@ -250,9 +263,18 @@ class TaskPlanner:
             return out
         # LLM_LOOP
         if session.stage == ST_LLM:
-            if session.llm_loops >= session.max_loops:
-                session.stage = ST_DONE
-                return out
+            # 强制答案触发：循环超限 或 距任务超时 ≤ FORCE_ANSWER_MARGIN 回合
+            force = (
+                session.force_answer
+                or session.llm_loops >= session.max_loops
+                or self._at_deadline(turn, session)
+            )
+            if force:
+                if session.force_sent:
+                    session.stage = ST_DONE   # 已要过答案仍不给 → 放弃（保底避免异常）
+                    return out
+                session.force_sent = True
+                session.force_answer = True
             out.prompt = self._build_prompt(session)
             session.llm_pending = True
             session.llm_loops += 1
@@ -545,8 +567,9 @@ class TaskPlanner:
             session.stage = ST_SUBMIT
             return
         if cmd and not cmd.startswith("cat "):
-            # D7：命令数 ≥8 → 只准给答案，拒绝新命令
-            if session.cmd_count >= FORCE_SUBMIT_CMDS:
+            # 强制答案模式 或 命令预算用尽 → 拒绝新命令，只准给答案
+            if session.force_answer or session.cmd_count >= session.max_cmds:
+                session.force_answer = True
                 session.stage = ST_LLM
                 return
             session.stage = ST_WAIT_CMD
@@ -583,10 +606,10 @@ class TaskPlanner:
                 "API 探测已成功：`API_OK` 行给出了可用的 base/path/认证/参数/城市，"
                 "请直接用该组合 curl 收割并组装 answer，不要再更换认证或参数名。"
             )
-        if session.cmd_count >= FORCE_SUBMIT_CMDS:
+        if session.force_answer:
             parts.append(
-                f"已用命令数 {session.cmd_count} ≥ {FORCE_SUBMIT_CMDS}：**必须直接给出 answer，"
-                "不得再返回 cmd**；信息不足也要给出当前最佳答案。"
+                "【强制提交】距任务超时/命令预算已到极限：**必须直接给出 answer，不得再返回 cmd**；"
+                "信息不足也要给出当前最佳答案。"
             )
         parts.append(
             "请只返回 JSON: {\"cmd\": \"\", \"answer\": \"\", \"isFinished\": true|false}\n"
@@ -611,18 +634,23 @@ class TaskPlanner:
         )
 
     @staticmethod
-    def _loop_limit(turn: Turn) -> int:
-        """按任务 timeoutRounds 收紧 LLM 循环上限（留 2 回合给提交/收尾）。"""
+    def _task_timeout(turn: Turn) -> int:
+        """当前任务点的 timeoutRounds（取距开拓者 ≤1 的那个）。"""
         pioneer = turn.pioneer()
-        timeout = 0
-        if pioneer is not None:
-            for t in turn.tasks:
-                if t.timeout_rounds > 0 and distance(pioneer.pos, t.pos) <= 1:
-                    timeout = t.timeout_rounds
-                    break
-        if timeout <= 0:
-            return MAX_LLM_LOOPS
-        return max(2, min(MAX_LLM_LOOPS, timeout - 2))
+        if pioneer is None:
+            return 0
+        for t in turn.tasks:
+            if t.timeout_rounds > 0 and distance(pioneer.pos, t.pos) <= 1:
+                return t.timeout_rounds
+        return 0
+
+    @staticmethod
+    def _at_deadline(turn: Turn, session: TaskSession) -> bool:
+        """距任务超时 ≤ FORCE_ANSWER_MARGIN 回合 → 强制只给答案。"""
+        if session.timeout_rounds <= 0:
+            return False
+        remaining = session.timeout_rounds - (turn.round_no - session.accept_round)
+        return remaining <= FORCE_ANSWER_MARGIN
 
     @staticmethod
     def _task_key(task_text: str) -> str:

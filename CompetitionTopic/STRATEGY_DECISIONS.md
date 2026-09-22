@@ -132,7 +132,9 @@
 | **正面墙防御死线** | **D3 入夜前正面（迎敌侧整列，含两端拐角）≥5 面 L2**；**D5 入夜前正面 ≥5 面 L3**；优先级 12（武器 L2 之后、武器 L3 之前） | 用户 2026-09-23 | CONFIRMED |
 | **白天可升级墙** | 修理工白天也允许用券升级围墙（不闲置等晚上）；缺口补建优先于升级 | 用户 2026-09-23 | CONFIRMED |
 | **正面墙券/修复包备货** | D3+ 按正面墙等级备 ≥5 张对应升级券（L1→V1、L2→V2）；**D4+ WallFixer ≥5**；金币不足则不要求；武器未 L2 时不为墙券花钱（武器优先）；武器+墙全满后不设上限 | 用户 2026-09-23 | CONFIRMED |
-| **答案判错重试** | 提交被判错（errorCode=2）→ **stage 拉回 LLM 重试**（此前停在 DONE 干等到超时，IKHYQC/IKHYQB 根因）；错误原因注入 prompt | issue IKHYQC/IKHYQB | CONFIRMED |
+| **LLM 循环/命令预算** | 按任务 `timeoutRounds` 动态：`budget = max(2, (timeout-4)//2)`（timeout15→5，timeout10→3），循环上限与命令预算同值；timeout 未知时用默认 8 | 用户：按 timeout 校准 | CONFIRMED |
+| **到点强制要答案** | 距任务超时 ≤ `FORCE_ANSWER_MARGIN=2` 回合（或循环/命令预算用尽）→ 发"**只准给 answer、不得再 cmd**"的强制 prompt；再不给答案才放弃 | 用户：到点强制提交 | CONFIRMED |
+| **答案判错重试** | 提交被判错（errorCode=2）→ **stage 拉回 LLM 重试**（此前停在 DONE 干等到超时，IKHYQC/IKHYQB 根因）；错误原因注入 prompt；重试回退 2 次循环余量 | issue IKHYQC/IKHYQB | CONFIRMED |
 | **修理工抢修供给** | 夜间 `_repair_cmd` 用券按墙当前等级匹配（L2→V2），否则 WallFixer；**WallFixer 常备**（Day3+，只数工人背包），Day4+/有 L3 墙按 L3 数加备 | issue#26：L2 墙烧而修理工只有 V1 | CONFIRMED |
 | **购买量守卫** | `_buy_qty/_voucher_qty/_stock_qty` 买不起返回 0（不发非法 buy） | 各角色购买逻辑审计 | CONFIRMED |
 | **建造失败重试** | BuildableMap 失败格带 40 回合过期重试（`BUILD_FAIL_RETRY`），不再永久拉黑 | issue#26：(31,12) 永久缺口根因 | CONFIRMED |
@@ -144,7 +146,7 @@
 
 | 参数 | 代码值 | 含义 | 状态 |
 |---|---|---|---|
-| **任务 FSM** | `EXPLORE_FILES → (ENGINEER_PROBE) → LLM_LOOP → WAIT_CMD_RESULT/WAIT_LLM → SUBMIT_ANSWER → COMPLETED` | issue#21 7 阶段 + 健壮探索 | CONFIRMED |
+| **任务 FSM** | `EXPLORE_FILES → (ENGINEER_PROBE/FIX 或 API_PROBE，仅硬编码开启时) → LLM_LOOP → WAIT_CMD_RESULT/WAIT_LLM → SUBMIT_ANSWER → COMPLETED` | issue#21 + 健壮探索 | CONFIRMED |
 | **健壮探索（单命令）** | 一条命令：`find /tmp/selfEvolutionTask -iname <任务文件名>` 定位 → cat 任务文件 → 读同目录 `README.md/API_DOCS.md/ws_*/spec.md` → `find -printf '%p %m'` 列权限 → `__FILE:/__DIR:` 标记 | 用户模板；替代易失的多步 find→cat | CONFIRMED |
 | **文件名提取** | phase_task 提取 `.md/.txt`（大小写不敏感）；提取失败回退 `task_*.md` | 用户要求 | CONFIRMED |
 | **工程类确定性路径** | 识别 `ws_N`+`check` → 探测命令：定位 check → **去 CRLF** → chmod → `./check` 拿 FAIL 清单（零 LLM 探测） | 修实战 CRLF 失败 | CONFIRMED |

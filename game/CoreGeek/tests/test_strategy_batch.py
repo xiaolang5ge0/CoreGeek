@@ -124,17 +124,32 @@ class TestRepairerStickyReturn(unittest.TestCase):
 
 class TestLoopLimitByTimeout(unittest.TestCase):
     def test_max_loops_from_timeout(self):
-        """LLM 循环上限按任务 timeoutRounds 收紧（timeout-2，且不超过默认值）。"""
+        """循环/命令预算按 timeout 动态：max(2, (timeout-4)//2)，且不超过默认值。"""
         task = {"pos": (14, 14), "text": "请阅读task_1_beijing.md，获取任务信息",
-                "scoreReward": 50, "goldReward": 30, "timeoutRounds": 6}
+                "scoreReward": 50, "goldReward": 30, "timeoutRounds": 15}
         sim = make_sim(tasks=[task])
         sim.role(PIONEER)["pos"] = {"x": 14, "y": 14}
         sim.phase_task = task["text"]
         turn = Turn.load(sim.payload())
         session = TaskSession()
         TaskPlanner().work(turn, session)
-        self.assertEqual(session.max_loops, 4)  # min(8, 6-2)
-        self.assertLess(session.max_loops, MAX_LLM_LOOPS)
+        self.assertEqual(session.max_loops, min(MAX_LLM_LOOPS, max(2, (15 - 4) // 2)))  # 5
+        self.assertEqual(session.max_cmds, session.max_loops)
+        self.assertEqual(session.timeout_rounds, 15)
+
+    def test_deadline_forces_answer(self):
+        """距任务超时 ≤2 回合 → 强制只给答案。"""
+        from agent.planners.task import TaskPlanner, TaskSession
+        planner = TaskPlanner()
+        s = TaskSession()
+        turn = Turn.load(make_sim().payload())   # round_no = 1
+        s.accept_round = 1
+        s.timeout_rounds = 3
+        self.assertFalse(planner._at_deadline(turn, s))   # remaining = 3
+        s.timeout_rounds = 2
+        self.assertTrue(planner._at_deadline(turn, s))    # remaining = 2
+        s.timeout_rounds = 0
+        self.assertFalse(planner._at_deadline(turn, s))   # 未知 timeout 不触发
 
 
 class TestNewsLlmFallback(unittest.TestCase):

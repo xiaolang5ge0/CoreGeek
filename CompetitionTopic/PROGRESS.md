@@ -7,8 +7,8 @@
 
 | 项 | 状态 |
 |---|---|
-| 当前阶段 | **P0~P5 + 二十轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
-| 测试 | **172/172 通过** |
+| 当前阶段 | **P0~P5 + 二十一轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
+| 测试 | **173/173 通过** |
 | 打包 | `game/CoreGeek/dist/CoreGeek.tar.gz`（**tar 顶层 CoreGeek/ 目录**，平台父目录解包后运行 `<root>/CoreGeek/main3.py`） |
 | 代码 | `game/CoreGeek/`，Python ≥3.11 纯标准库 |
 | 当前行为 | Day1 双工人建满14墙+3火箭；夜1-3 双工人全力采矿卖钱（无蹲防）；开拓者单人控3炮；Day4+ 修墙岗（墙血<50%才修、正面优先、L3→WallFixer、L1/L2→升级券）；WallRegistry 追踪攻破/补建并优先重升级；武器优先升级；任务确定性+LLM兜底；选矿我方侧优先 |
@@ -87,6 +87,15 @@
 | `location=请阅读` 参数污染 | 把 `phaseTask` 文本（"请阅读task_1_beijing.md…"）当成城市候选 | 参数值禁取自 `phaseTask`/提示语，只取文档/响应中的真实字段 |
 | 任务1 仍靠 LLM 三次 | 工程类确定性路径缺失（cat spec→改配置→去 CRLF 全靠 LLM） | 工程类 SOP 固化：find+cat spec → 按 spec 正则修复 → 去 CRLF → check |
 | 两局总分均 88（仅任务1的80分） | 任务2 超时失败，无 +80 | 以上修复后复测通过率 |
+
+## 实战修复记录·第二十一轮（2026-09-23 自进化超时模型：按剩余回合驱动）
+
+| 项 | 内容 |
+|---|---|
+| **超时模型** | 记录 `accept_round`/`timeout_rounds`；`remaining = timeout - (round_no - accept_round)`；循环/命令预算 = `max(2, (timeout-4)//2)`（timeout15→5） |
+| **到点强制要答案** | `remaining ≤ 2` 或预算用尽 → 发"只准 answer、不得 cmd"的强制 prompt；再不给才放弃（避免干等到平台超时） |
+| **动态命令预算** | `max_cmds` 同预算；命令数达上限 → 拒绝新命令、强制要答案 |
+| **测试** | 更新 `TestLoopLimitByTimeout` + 新增 `test_deadline_forces_answer`；全量 **173/173 通过** |
 
 ## 实战修复记录·第二十轮（2026-09-23 issue IKHYQC/IKHYQB 自进化失败 + 防线加固）
 
