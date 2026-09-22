@@ -82,6 +82,7 @@ class WorkerFSM:
         self.build_phase = False
         self.returning = False       # 回防粘性：D4+ 一旦开始返回，持续到进墙
         self.return_since = 0        # 开始返回的回合（防死循环兜底）
+        self._pos_hist: list = []    # 最近位置历史（检测 A→B→A 两格震荡）
 
     # ================= 主入口 =================
     def decide(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
@@ -93,6 +94,10 @@ class WorkerFSM:
             self._stuck_collects = 0
         self._last_pos = unit.pos
         self._last_bag = len(unit.backpack)
+        # 位置历史（最多 6）：检测两格震荡（A→B→A，位置每回合都变，旧 stuck 检测不到）
+        self._pos_hist.append(unit.pos)
+        if len(self._pos_hist) > 6:
+            self._pos_hist.pop(0)
 
         # 0. 吃药（所有角色最高优先）
         cmd = self._medicine_cmd(turn, unit)
@@ -103,6 +108,16 @@ class WorkerFSM:
                 cmd = self._miner(turn, unit, ctx)
         self._trace(ctx, cmd)
         return cmd
+
+    def _oscillating(self) -> bool:
+        """A→B→A→B 两格震荡：当前位置 == 2 步前 且 上一步 == 3 步前。"""
+        h = self._pos_hist
+        return (
+            len(h) >= 4
+            and h[-1] == h[-3]
+            and h[-2] == h[-4]
+            and h[-1] != h[-2]
+        )
 
     def _trace(self, ctx, cmd) -> None:
         up = self.upgrade
@@ -133,28 +148,33 @@ class WorkerFSM:
 
     def _move(self, step: Pos, ctx) -> dict[str, Any] | None:
         self._stuck_moves += 1
-        if self._stuck_moves >= STUCK_LIMIT:
+        # 卡住（原地不动）或 两格震荡（A→B→A）→ 清目标重来
+        if self._stuck_moves >= STUCK_LIMIT or self._oscillating():
             self._stuck_moves = 0
+            self._pos_hist.clear()
             ctx.note(self.unit_id, "unstuck")
             self.mine = None
             self.build = None
             self.sell_vendor = None
             self.upgrade = None
+            self.returning = False
             self.state = STATE_FREE
             return None
         return move_command(step)
 
     # ================= 修理工 =================
     def _repairer(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        # 修理工的家 = repair_post（内圈邻墙格），不是 CP（issue#26：D4+ 夜到修理位就位）
+        anchor = getattr(ctx, "repair_anchor", None) or ctx.home_anchor
         # 回防粘性（D4+）：一旦开始返回，跨昼夜持续到进墙（A* 绕墙，不穿墙）
         if self.returning:
-            cmd = self._go_home(turn, unit, ctx, ctx.home_anchor)
+            cmd = self._go_home(turn, unit, ctx, anchor)
             if cmd is not None:
                 if turn.round_no - self.return_since > 40:  # 兜底：长期无法进墙则放弃
                     self.returning = False
                 return cmd
             self.returning = False  # 已进墙/受阻 → 继续正常流程
-        # 夜间优先：升级（=回血，省修复包）→ 抢修 → 无事才采矿
+        # 夜间优先：升级（=回血，省修复包）→ 抢修 → 就位 repair_post
         if turn.is_night:
             cmd = self._upgrade_flow(turn, unit, ctx, allow_use=True, allow_buy=False)
             if cmd is not None:
@@ -163,7 +183,8 @@ class WorkerFSM:
             if cmd is not None:
                 return cmd
             if turn.day_index >= RETURN_STICKY_DAY:
-                return None  # D4+ 夜：守内圈，不外出采矿
+                # D4+ 夜：无事可修 → 就位 repair_post（不在外采矿，便于就近抢修）
+                return self._go_home(turn, unit, ctx, anchor)
             return self._miner(turn, unit, ctx)
         # 白天
         if turn.day_index <= 1:
@@ -172,13 +193,13 @@ class WorkerFSM:
         # D2+：建墙优先（无缺口）→ 采购 → 回防预留 → 采矿(铜/铁)
         near_dusk = (
             0 < turn.rounds_until_night
-            <= self._path_home_len(turn, unit, ctx) + REPAIR_MARGIN
+            <= self._path_home_len(turn, unit, ctx, anchor) + REPAIR_MARGIN
         )
         if near_dusk:
             if turn.day_index >= RETURN_STICKY_DAY:
                 self.returning = True
                 self.return_since = turn.round_no
-            cmd = self._go_home(turn, unit, ctx, ctx.home_anchor)
+            cmd = self._go_home(turn, unit, ctx, anchor)
             if cmd is not None:
                 return cmd
             self.returning = False
@@ -200,6 +221,9 @@ class WorkerFSM:
         stones = unit.backpack.count("stone")
         if stones and ctx.walls_left > 0 and (self.build_phase or stones >= ctx.walls_left):
             return None  # 由 brain 派单
+        # D2/D3 有缺口且石头不够 → 改采石补缺口（用户：D2/D3 白天也检索缺口）
+        if ctx.walls_left > 0 and stones < ctx.walls_left:
+            prefer = "stone"
         return self._mine_flow(turn, unit, ctx, prefer=prefer)
 
     # ================= 挖矿工 =================
@@ -231,7 +255,16 @@ class WorkerFSM:
             return self._sell_chain(turn, unit, ctx, mandatory=True)
         # 矿锁
         if self.mine is not None:
-            if self.mine not in turn.mines():
+            # 矿锁与当前偏好不符（issue#26：修理工 Day1 建墙锁了石矿，入夜该采钱却仍走远石矿）
+            # prefer=money 且锁的是石矿 → 释放（改采铜/铁）；prefer=stone 且锁的是铜/铁 → 释放。
+            locked_kind = turn.zones.get(self.mine)
+            if locked_kind is not None and (
+                (prefer == "money" and locked_kind == "stone")
+                or (prefer == "stone" and locked_kind != "stone")
+            ):
+                ctx.note(self.unit_id, "mine_prefer_release")
+                self.mine = None
+            elif self.mine not in turn.mines():
                 ctx.note(self.unit_id, "mine_depleted")
                 self.mine = None
             elif ctx.is_mine_blocked(self.mine, turn.round_no):
@@ -328,7 +361,11 @@ class WorkerFSM:
                 price = turn.vendor_prices.get(kind, 1)
                 # 新闻囤货：被预测涨价的矿种优先级提高
                 boost = ctx.price_boost(kind) if hasattr(ctx, "price_boost") else 0.0
-                key = (dist - price * 10 - boost + our_dist * 0.6 + side, dist, pos.x, pos.y)
+                # 单位回合收益（issue#26：矿工跑远矿空耗往返）：
+                # rate = 一矿总收益 / (往返路程 + 采集回合)，越高越好 → 取负号做升序键。
+                # 一矿≈10 次；往返 = 2×dist（去采+回卖）。
+                rate = (price * 10.0 + boost) / (2 * dist + 10.0)
+                key = (-rate, our_dist * 0.1 + side, dist, pos.x, pos.y)
             if best is None or key < best_key:
                 best, best_key = pos, key
         return best
@@ -635,9 +672,9 @@ class WorkerFSM:
         return None
 
     # ---- 归位 ----
-    def _path_home_len(self, turn: Turn, unit: Unit, ctx) -> int:
+    def _path_home_len(self, turn: Turn, unit: Unit, ctx, home=None) -> int:
         """归位所需回合：优先用 A* 实际路径长度（切比雪夫距离会低估绕墙路程）。"""
-        home = ctx.home_anchor
+        home = home if home is not None else ctx.home_anchor
         if home is None:
             return 0
         if unit.pos == home:

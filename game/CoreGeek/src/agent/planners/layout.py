@@ -76,6 +76,7 @@ class BaseLayout:
     turret_cells: tuple[Pos, ...]
     control_point: Pos
     wall_cells: tuple[Pos, ...]  # 按距 CP 由近到远（开口侧优先建造）
+    repair_post: Pos | None = None  # 修理工夜间抢修就位点（内圈、邻墙最多、非炮台/CP）
 
 
 def _ring_cells(xmin: int, ymin: int, dist: int) -> list[Pos]:
@@ -120,7 +121,7 @@ def compute_layout(
             return False
         if kind == "wall" and pos in our_weapon_pos:
             return False
-        if buildable is not None and not buildable.is_usable(pos, kind):
+        if buildable is not None and not buildable.is_usable(pos, kind, turn.round_no):
             return False
         return True
 
@@ -168,4 +169,20 @@ def compute_layout(
     walls = [p for p in (to_abs(c) for c in CANONICAL_WALLS) if usable(p, "wall")]
     # 建造优先级：正面（迎敌侧，离 CP 最远）优先，再到侧面（实战复盘：正面必须先封）
     walls.sort(key=lambda p: (-distance(p, cp), p.x, p.y))
-    return BaseLayout(front, tuple(turrets), cp, tuple(walls))
+    # 修理工夜间抢修就位点（issue#26）：内圈（ring1）中非炮台/非 CP 的可站格，
+    # 选在"邻接墙最多"的位置（=贴墙侧，上下走动即可覆盖整圈墙）；候选为空则退化为 CP。
+    occupied_role_cells = set(turrets) | {cp}
+    repair_post: Pos | None = None
+    best_score = -1
+    for cell in ring1:
+        if cell in occupied_role_cells or cell in base_cells:
+            continue
+        if not turn.land(cell):
+            continue
+        adj = sum(1 for nb in cell.neighbours() if nb in set(walls))
+        if adj > best_score:
+            best_score = adj
+            repair_post = cell
+    if repair_post is None:
+        repair_post = cp
+    return BaseLayout(front, tuple(turrets), cp, tuple(walls), repair_post)

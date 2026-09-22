@@ -101,7 +101,8 @@ class PioneerFSM:
         weapon = next((w for w in turn.weapons() if w.pos == target), None)
         if weapon is None or weapon.level >= 3:
             self.upgrade_target = None
-            self.state = STATE_GUARD
+            if self.state in (STATE_WEAPON_BUY, STATE_WEAPON_UPGRADE):
+                self.state = STATE_GUARD
             return None
         voucher = f"WeaponUpgradeVoucher{weapon.level}"
         needs = self._shopping_needs(turn, pioneer)
@@ -117,8 +118,7 @@ class PioneerFSM:
                     v, c, _want = affordable[0]
                     qty = self._buy_qty(turn, pioneer, v, c)
                     if qty <= 0:
-                        self.state = STATE_GUARD
-                        return None
+                        return None  # 买不起：不清任务状态（防打断 TASK_TRAVEL 致震荡）
                     return buy_command(v, qty)
                 step = step_toward(turn, pioneer, shop, ctx.reserved)
                 return move_command(step) if step is not None else None
@@ -132,9 +132,10 @@ class PioneerFSM:
                 return use_command(voucher, target)
             step = step_toward(turn, pioneer, target, ctx.reserved)
             return move_command(step) if step is not None else None
-        # 没券且买不起
+        # 没券且买不起：返回 None，但**不重置任务状态**（否则每回合重选任务点→来回震荡）
         self.upgrade_target = None
-        self.state = STATE_GUARD
+        if self.state in (STATE_WEAPON_BUY, STATE_WEAPON_UPGRADE):
+            self.state = STATE_GUARD
         return None
 
     def _shopping_needs(self, turn: Turn, pioneer: Unit) -> list[tuple[str, int, int]]:

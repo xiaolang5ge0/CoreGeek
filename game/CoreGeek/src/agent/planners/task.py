@@ -20,10 +20,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..protocol import Turn, distance, submit_answer_command
+from ._harvest_data import HARVEST_B64
 
 # ---- 阶段 ----
 ST_EXPLORE = "EXPLORE_FILES"
 ST_PROBE = "ENGINEER_PROBE"
+ST_API_PROBE = "API_PROBE"
 ST_LLM = "LLM_LOOP"
 ST_WAIT_CMD = "WAIT_CMD_RESULT"
 ST_WAIT_LLM = "WAIT_LLM"
@@ -39,7 +41,10 @@ EXPLORE_LIMIT = 8000   # 探索输出保留字符数（需容纳 API_DOCS 全文
 
 _FILE_NAME = re.compile(r"[A-Za-z0-9_\-/]+\.(?:md|txt)", re.I)
 _JSON_BLOCK = re.compile(r"\{.*\}", re.S)
-_TOKEN = re.compile(r"TOKEN\s*[:：]\s*([A-Za-z0-9_\-]+)", re.I)
+# 行首锚定（re.M）：只认 check 脚本输出里的独立行 `TOKEN: xxx`，
+# 不匹配任务书示例里的 `"token": "xxx"`（issue#26 误提交占位符的根因）。
+_TOKEN = re.compile(r"^\s*TOKEN\s*[:：]\s*([A-Za-z0-9_\-]{6,})\s*$", re.M)
+_TOKEN_PLACEHOLDERS = {"xxx", "xxxx", "token", "your_token", "your-token", "todo", "none"}
 _WS_DIR = re.compile(r"__WS:(\S+)")
 _DIR = re.compile(r"__DIR:(\S*)")
 _FILE = re.compile(r"__FILE:(\S*)")
@@ -90,6 +95,8 @@ class TaskSession:
     engineer: bool = False
     probe_sent: bool = False
     crlf_fixed: bool = False
+    api_probe_sent: bool = False                        # API 类确定性探测已发
+    city: str = ""                                       # API 任务城市（探测参数值）
     files: dict = field(default_factory=dict)            # 文件名 → 内容（兼容旧引用）
     pending_cmd: str | None = None
     cmd_history: list = field(default_factory=list)      # [(cmd, result)]
@@ -201,6 +208,15 @@ class TaskPlanner:
             session._pending_kind = "probe"  # type: ignore[attr-defined]
             session.stage = ST_WAIT_CMD
             return out
+        # API 类确定性探测（认证×参数矩阵 + 收割）
+        if session.stage == ST_API_PROBE:
+            session.api_probe_sent = True
+            cmd = self._api_probe_cmd(session)
+            out.execute_cmd = cmd
+            session.pending_cmd = cmd
+            session._pending_kind = "api_probe"  # type: ignore[attr-defined]
+            session.stage = ST_WAIT_CMD
+            return out
         # LLM_LOOP
         if session.stage == ST_LLM:
             if session.llm_loops >= session.max_loops:
@@ -236,6 +252,15 @@ class TaskPlanner:
             'chmod +x check 2>/dev/null; ls -la; echo "=== CHECK ==="; ./check 2>&1'
         )
 
+    def _api_probe_cmd(self, session: TaskSession) -> str:
+        """API 类确定性探测（issue#26）：沙盒跑内嵌 harvester，探测认证×参数矩阵并收割。"""
+        d = session.task_dir or "."
+        city = session.city or ""
+        return (
+            f'python3 -c "import base64;exec(base64.b64decode(\'{HARVEST_B64}\'))" '
+            f'"{d}" "{city}"'
+        )
+
     @staticmethod
     def _anchor(cmd: str, session: TaskSession) -> str:
         """LLM 命令锚定工作目录：未显式 cd 且未用绝对路径时补 `cd "$dir" && `。"""
@@ -256,6 +281,9 @@ class TaskPlanner:
         if kind == "probe":
             self._on_probe(session, result)
             return
+        if kind == "api_probe":
+            self._on_api_probe(session, result)
+            return
         # LLM / 工程修复命令结果
         if self._try_token_submit(session, result):
             return
@@ -272,19 +300,52 @@ class TaskPlanner:
             session.task_dir = dir_m.group(1).strip()
         if path:
             session.files[path.rsplit("/", 1)[-1]] = session.explore_output
-        # 工程类识别：存在 ws_N 工作区且含 check 脚本（题面或探索输出）
         out = session.explore_output
+        # 工程类识别：存在 ws_N 工作区且含 check 脚本（题面或探索输出）
         session.engineer = bool(
             re.search(r"ws_\d+", out) and re.search(r"\bcheck\b", out)
         ) or (
             "ws_" in (session.task_text or "") and "check" in (session.task_text or "")
+        )
+        # API 类识别：文档含 localhost/http + /api/ 路径（issue#26：探测认证×参数矩阵）
+        session.city = self._extract_city(session, out)
+        api = bool(
+            re.search(r"http://localhost:\d+", out)
+            or ("/api/" in out and "API_DOCS" in out.upper())
         )
         if self._try_token_submit(session, result):
             return
         if session.engineer and not session.probe_sent:
             session.stage = ST_PROBE
             return
+        if api and not session.api_probe_sent:
+            session.stage = ST_API_PROBE
+            return
         session.stage = ST_LLM
+
+    # 城市名映射：文件名拼音 + 任务文本中的中文城市
+    _CITY_PINYIN = {
+        "beijing": "北京", "shanghai": "上海", "guangzhou": "广州", "shenzhen": "深圳",
+        "xian": "西安", "nanjing": "南京", "hangzhou": "杭州", "chengdu": "成都",
+        "tianjin": "天津", "chongqing": "重庆", "wuhan": "武汉", "suzhou": "苏州",
+        "xianyang": "咸阳", "luoyang": "洛阳", "kaifeng": "开封", "datong": "大同",
+    }
+    _CITY_CN = (
+        "北京", "上海", "广州", "深圳", "西安", "南京", "杭州", "成都",
+        "天津", "重庆", "武汉", "苏州", "洛阳", "开封", "大同", "沈阳",
+    )
+
+    @classmethod
+    def _extract_city(cls, session: TaskSession, explore: str) -> str:
+        """从任务文件名(拼音)或探索输出(中文)提取 API 任务的城市参数值。"""
+        for py, cn in cls._CITY_PINYIN.items():
+            if py in (session.target_name or "").lower() or py in (session.task_text or "").lower():
+                return cn
+        for cn in cls._CITY_CN:
+            if cn in (explore or "") or cn in (session.task_text or ""):
+                return cn
+        m = re.search(r"([一-龥]{2,4})市", explore or "")
+        return m.group(1) if m else ""
 
     def _on_probe(self, session: TaskSession, result: str) -> None:
         ws = _WS_DIR.search(result or "")
@@ -294,12 +355,24 @@ class TaskPlanner:
             return
         session.stage = ST_LLM
 
+    def _on_api_probe(self, session: TaskSession, result: str) -> None:
+        """API 探测结果 → 事实行喂给 LLM（认证/参数已确定，LLM 只需组答案）。"""
+        session.explore_output = (session.explore_output + "\n=== API 探测事实 ===\n"
+                                  + (result or "")[:3000])[:EXPLORE_LIMIT]
+        session.stage = ST_LLM
+
     def _try_token_submit(self, session: TaskSession, result: str) -> bool:
-        """任意命令输出里的 `TOKEN: xxx` → 直接提交（零 LLM 往返）。"""
+        """命令输出里**独立行** `TOKEN: xxx`（真实 check 通过标志）→ 直接提交。
+
+        防误收（issue#26）：任务书示例 `"token": "xxx"` 含占位符，不得当答案。
+        """
         m = _TOKEN.search(result or "")
         if not m:
             return False
-        session.answer = json.dumps({"token": m.group(1)}, ensure_ascii=False)
+        value = m.group(1).strip()
+        if value.lower() in _TOKEN_PLACEHOLDERS or len(value) < 6:
+            return False
+        session.answer = json.dumps({"token": value}, ensure_ascii=False)
         session.stage = ST_SUBMIT
         return True
 

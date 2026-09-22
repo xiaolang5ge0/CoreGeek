@@ -149,16 +149,17 @@ class UpgradePlanner:
             v, c = voucher_for("station", station.level)
             add(v, c, station.pos, "station", 45)
         # 8. 按需备货 WallFixer（用户补充）：围墙到 L3 后升级券失效 → 只能靠修复包回血。
-        #    Day3+ 起至少 1 个；Day4+（BOSS 夜）或已有 L3 墙时按 L3 墙数加备（上限 FIXER_STOCK_MAX）。
+        #    Day3+ 起常备 2 个（通用修复，不挑墙等级）；Day4+（BOSS 夜）或已有 L3 墙时按 L3 墙数加备。
+        #    注意：只数**工人**背包（修理工夜间单独用，炮手持有不算数）。
         if turn.day_index >= 3:
             l3_walls = [w for w in all_walls if w.level >= 3]
-            desired = 1
+            desired = 2
             if turn.day_index >= 4 or l3_walls:
-                desired = min(FIXER_STOCK_MAX, max(1, len(l3_walls)))
+                desired = min(FIXER_STOCK_MAX, max(2, len(l3_walls)))
             held = sum(
                 u.backpack.count("WallFixer")
                 for u in turn.ours
-                if u.kind in ("worker", "pioneer")
+                if u.kind == "worker"
             )
             if held < desired and turn.gold >= RESERVE_GOLD + 10:
                 missions.append(

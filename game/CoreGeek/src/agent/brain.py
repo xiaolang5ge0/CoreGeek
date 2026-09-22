@@ -102,6 +102,7 @@ class _Ctx:
     price_boost_map: dict = {}       # 新闻预测：矿种 → 售卖加权
     wall_registry = None             # L2 围墙状态表（跨回合，供修理工按需修复/升级）
     treasure = None                  # 宝藏计划（民间传闻推断）
+    repair_anchor = None             # 修理工夜间就位点（layout.repair_post，内圈邻墙）
     prompt: str = ""                 # LLM prompt（非任务期 news/treasure 或任务）
     execute_cmd: str = ""            # 沙盒命令（仅任务期）
 
@@ -159,6 +160,7 @@ class Brain:
         self.wall_registry = WallRegistry()
         self.llm_day: int = 0
         self.llm_calls_today: int = 0
+        self._layout_recomputed_round: int = -100  # 上次布局自愈重算回合
         self.worker_fsms: dict[int, WorkerFSM] = {}
         self.layout: BaseLayout | None = None
         self.front: str | None = None
@@ -201,6 +203,18 @@ class Brain:
                         "cp": self.layout.control_point.dump(),
                         "walls": len(self.layout.wall_cells),
                     }
+            # 围墙缺口自愈（issue#26）：建造失败格 40 回合过期后可重建；
+            # 布局缓存不会自动收回该格 → 白天定期重算布局，把恢复可用的墙格补回墙环。
+            if (
+                self.layout is not None
+                and turn.is_day
+                and turn.round_no - self._layout_recomputed_round >= 20
+            ):
+                recomputed = compute_layout(turn, self.front, self.buildable)
+                if recomputed is not None and len(recomputed.wall_cells) > len(self.layout.wall_cells):
+                    self.layout = recomputed
+                    self._layout_recomputed_round = turn.round_no
+                    trace["layout_gap_recovered"] = len(recomputed.wall_cells)
             # 围墙状态表刷新（识别攻破/补建，供修理工按需修复/升级）
             if self.layout is not None:
                 self.wall_registry.sync(turn, self.layout)
@@ -252,7 +266,7 @@ class Brain:
             action = cmd.get("action")
             targets = parse_targets(cmd.get("targetPos"))
             if action == "build" and targets:
-                self.buildable.record(targets[0], str(cmd.get("name") or ""), ok)
+                self.buildable.record(targets[0], str(cmd.get("name") or ""), ok, turn.round_no)
                 if not ok:
                     relearn = True
                     trace.setdefault("build_illegal", []).append(
@@ -364,13 +378,21 @@ class Brain:
             if fsm.role != ROLE_REPAIRER and repairer_alive:
                 if not (turn.day_index == 1 and stones > 20 and walls_missing):
                     continue
-            # 批量建造：采够一批进入 build_phase 后连续建完该批（不采一个建一个）；
-            # 批量随剩余墙数收敛（只剩 2 墙就采 2 块，不采满 6，防过量采集）
-            batch = min(STONE_BATCH, max(1, walls_left))
-            if stones >= batch:
-                fsm.build_phase = True
+            # 批量建造：采够一批进入 build_phase 后连续建完该批（不采一个建一个）。
+            # Day1 首冲（issue#26）：目标一次采 12-14 块再连续建（减少往返）。
+            # 但每座矿仅 10 块 → 采满一座(≥10)且**当前无更多石矿可采**时立即开建，
+            # 避免"凑不满 14 就永远不开建"拖垮 Day1 墙环。
+            if turn.day_index == 1:
+                batch = max(1, min(walls_left, 14))
+                if stones >= batch or (stones >= 10 and not stone_mines):
+                    fsm.build_phase = True
+            else:
+                batch = min(STONE_BATCH, max(1, walls_left))
+                if stones >= batch:
+                    fsm.build_phase = True
             if stones == 0:
                 fsm.build_phase = False
+            # Day1 未达批量绝不开建（攒够一批再连续建）；入夜紧急兜底除外
             can_build = stones >= 1 and (fsm.build_phase or urgent or stones >= walls_left)
             if not walls_missing or not can_build:
                 continue
@@ -392,6 +414,8 @@ class Brain:
         # 归位锚点必须在工人决策前设置：修理工黄昏归位依赖 ctx.home_anchor
         # （此前在 pioneer 分支里才设置 → 工人阶段恒为 None → 修理工从不回防，实战 issue#25 卡墙外）
         ctx.home_anchor = layout.control_point
+        # 修理工夜间就位点 = 内圈邻墙格（issue#26：D4+ 夜到 repair_post 就位，非只回家）
+        ctx.repair_anchor = layout.repair_post or layout.control_point
 
         for worker in workers:
             cmd = self._worker_fsm(worker).decide(turn, worker, ctx)
@@ -434,6 +458,7 @@ class Brain:
         ctx.trace["threat"] = report.dump()
         if self.layout is not None:
             ctx.home_anchor = self.layout.control_point
+            ctx.repair_anchor = self.layout.repair_post or self.layout.control_point
         # 机器人危险圈 + 内圈安全锚点（实战教训：夜采/夜卖被兵潮打死）
         ctx.robot_cells = tuple(r.pos for r in turn.robots if r.alive)
         interior = self._interior_cells(turn)

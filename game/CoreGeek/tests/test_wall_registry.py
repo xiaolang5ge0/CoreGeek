@@ -191,7 +191,7 @@ class TestFixerStockOnDemand(unittest.TestCase):
         sim = make_sim()
         brain = Brain()
         brain.decide(sim.payload())
-        sim.role(W1)["backpack"] = ["WallFixer"]
+        sim.role(W1)["backpack"] = ["WallFixer", "WallFixer"]  # 常备 2 个 → 不再备货
         sim.gold = 300
         missions = self._plan(sim, brain, 261)
         self.assertFalse([m for m in missions if m.kind == "stock"])
