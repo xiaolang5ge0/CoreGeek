@@ -256,10 +256,10 @@ class TaskPlanner:
         """API 类确定性探测（issue#26）：沙盒跑内嵌 harvester，探测认证×参数矩阵并收割。"""
         d = session.task_dir or "."
         city = session.city or ""
-        return (
-            f'python3 -c "import base64;exec(base64.b64decode(\'{HARVEST_B64}\'))" '
-            f'"{d}" "{city}"'
-        )
+        run = f'python3 -c "import base64;exec(base64.b64decode(\'{HARVEST_B64}\'))" "{d}" "{city}"'
+        # 沙盒可能只有 python（无 python3）→ 兜底
+        run_py = f'python -c "import base64;exec(base64.b64decode(\'{HARVEST_B64}\'))" "{d}" "{city}"'
+        return f'{run} 2>/dev/null || {run_py}'
 
     @staticmethod
     def _anchor(cmd: str, session: TaskSession) -> str:
@@ -361,6 +361,31 @@ class TaskPlanner:
                                   + (result or "")[:3000])[:EXPLORE_LIMIT]
         session.stage = ST_LLM
 
+    def _answer_suspect(self, answer: Any) -> bool:
+        """答案安全校验（策略书 §6.4）：疑似查询失败/占位符 → 不提交。
+
+        - 空 dict / 空字符串
+        - 字符串含 401/403/error/traceback/占位符 xxx
+        - 全零 JSON（total_count/types 全空，通常是查询失败被吞成 0）
+        """
+        if answer in (None, "", {}):
+            return True
+        text = answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=False)
+        low = text.lower()
+        for bad in ("401", "403", "error", "traceback", "unauthorized", "forbidden"):
+            if bad in low:
+                return True
+        if "xxx" in low or "占位" in text:
+            return True
+        obj = _parse_llm_json(text) if text.strip().startswith("{") else None
+        if isinstance(obj, dict) and obj:
+            nums = [v for v in obj.values() if isinstance(v, (int, float))]
+            lists = [v for v in obj.values() if isinstance(v, list)]
+            # 所有数值均为 0 且列表均空 → 视为查询失败
+            if nums and all(n == 0 for n in nums) and (not lists or all(len(x) == 0 for x in lists)):
+                return True
+        return False
+
     def _try_token_submit(self, session: TaskSession, result: str) -> bool:
         """命令输出里**独立行** `TOKEN: xxx`（真实 check 通过标志）→ 直接提交。
 
@@ -403,6 +428,15 @@ class TaskPlanner:
         answer = obj.get("answer")
         finished = bool(obj.get("isFinished"))
         if answer not in (None, "", {}):
+            # 答案安全校验（策略书 §6.4）：查询失败/全零/占位符一律不提交，让 LLM 重试
+            if self._answer_suspect(answer):
+                session.non_json += 1
+                session.need_refine = True
+                if session.non_json >= MAX_NON_JSON:
+                    session.stage = ST_DONE
+                else:
+                    session.stage = ST_LLM
+                return
             session.answer = answer
             session.stage = ST_SUBMIT
             return

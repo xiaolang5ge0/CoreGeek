@@ -1,0 +1,150 @@
+"""自进化任务端到端验证（issue#28–#32 交接结论 → 当前代码能否通过）。
+
+模拟沙盒（cmd_handler）覆盖：健壮探索 → 工程探测/API 探测 → 提交。
+验证点（对照交接文档 §5 验收点）：
+1. API 任务：出现读取 API_DOCS 的探索 + 确定性探测命中可用组合 → 提交。
+2. 工程任务：读 spec/check 拿到真实 TOKEN 后提交；**禁止**提交任务书示例占位 token。
+3. 答案安全校验：全零/错误答案不提交。
+"""
+import json
+import unittest
+
+import _bootstrap  # noqa: F401
+
+from harness import SimWorld
+from agent.brain import Brain
+
+PIONEER = 10011
+DAY1 = 70
+
+API_TASK = {"pos": (14, 14), "text": "请阅读task_1_beijing.md，获取任务信息",
+            "scoreReward": 80, "goldReward": 80, "timeoutRounds": 15}
+ENG_TASK = {"pos": (14, 14), "text": "任务：修复 ws_3 工程，通过 ./check",
+            "scoreReward": 50, "goldReward": 30, "timeoutRounds": 20}
+
+# 探索输出：含任务书 + 二级文档（API_DOCS / spec）
+API_EXPLORE = (
+    "[exitCode:0]\n"
+    "__FILE:/tmp/selfEvolutionTask/1-unknown-api/task_1_beijing.md\n"
+    "=== TASK ===\n# 自进化任务 A-1：查询北京文化遗产\n提交格式 {\"token\": \"xxx\"}\n"
+    "=== FILE:/tmp/selfEvolutionTask/1-unknown-api/API_DOCS.md ===\n"
+    "base http://localhost:8899\nGET /api/v1/heritage/search\nAPI Key: `heritage-api-key-2024`\n"
+    "__DIR:/tmp/selfEvolutionTask/1-unknown-api\n"
+)
+ENG_EXPLORE = (
+    "[exitCode:0]\n"
+    "__FILE:/tmp/selfEvolutionTask/2-engineering-fix/task_1_alpha.md\n"
+    "=== TASK ===\n# 自进化任务 B-1：修复应用 alpha 部署\n提交格式 {\"token\": \"xxx\"}\n"
+    "=== FILE:/tmp/selfEvolutionTask/2-engineering-fix/ws_1/spec.md ===\n"
+    "目录 logs/alpha 权限 755\n"
+    "__DIR:/tmp/selfEvolutionTask/2-engineering-fix\n"
+)
+API_PROBE_OK = (
+    "[exitCode:0]\n"
+    "API_OK base=http://localhost:8899 path=/api/v1/heritage/search auth=bearer "
+    "key=heritage-api-key-2024 param=location city=北京\n"
+    "COUNT 3\n"
+    "KEYS [\"era\",\"level\",\"name\",\"type\"]\n"
+    "DIST type {\"古建筑\": 2, \"古遗址\": 1}\n"
+)
+ENG_PROBE_OK = "[exitCode:0]\n[ OK ] 全部通过 (6/6)\nTOKEN: fc1e78eb2a5a\n"
+API_ANSWER = '{"city":"北京","total_count":3,"world_heritage_count":1,"types":["古建筑","古遗址"]}'
+
+
+def llm_answer(ans):
+    return json.dumps({"cmd": "", "answer": ans, "isFinished": True}, ensure_ascii=False)
+
+
+def run_rounds(brain, sim, n):
+    for _ in range(n):
+        response, _ = brain.decide(sim.payload())
+        sim.apply(response)
+        sim.advance()
+
+
+class TestApiTaskE2E(unittest.TestCase):
+    def test_api_task_probe_then_submit(self):
+        captured = []
+
+        def handler(cmd):
+            captured.append(cmd)
+            if "find /tmp/selfEvolutionTask" in cmd:
+                return API_EXPLORE
+            if "base64" in cmd and "python3" in cmd:   # API 确定性探测
+                return API_PROBE_OK
+            if "curl" in cmd:
+                return '[exitCode:0]\n{"records":[{"name":"故宫","type":"古建筑"}],"total":3}\n'
+            return "[exitCode:0]\n"
+
+        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone"},
+                       tasks=[API_TASK], llm_script=[llm_answer(API_ANSWER)],
+                       cmd_handler=handler, expected_answer="北京")
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        # 验收点 1：出现 API 确定性探测，且提交了答案
+        self.assertTrue(any("base64" in c and "python3" in c for c in captured),
+                        "应触发 API 确定性探测")
+        self.assertTrue(sim.submissions, "应提交答案")
+        self.assertIn("北京", sim.submissions[0])
+        self.assertGreaterEqual(sim.score, 80)
+
+    def test_api_probe_cmd_has_python_fallback(self):
+        from agent.planners.task import TaskPlanner, TaskSession
+        s = TaskSession()
+        s.task_dir = "/tmp/x"
+        s.city = "北京"
+        cmd = TaskPlanner()._api_probe_cmd(s)
+        self.assertIn("python3", cmd)
+        self.assertIn("|| python ", cmd, "应有 python 兜底")
+
+
+class TestEngineerTaskE2E(unittest.TestCase):
+    def test_engineer_reads_check_token_not_placeholder(self):
+        captured = []
+
+        def handler(cmd):
+            captured.append(cmd)
+            if "find /tmp/selfEvolutionTask" in cmd:
+                return ENG_EXPLORE
+            if "-maxdepth 3 -type f -name check" in cmd:   # 工程确定性探测
+                return ENG_PROBE_OK
+            return "[exitCode:0]\n"
+
+        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone"},
+                       tasks=[ENG_TASK], cmd_handler=handler,
+                       expected_answer="fc1e78eb2a5a")
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        # 验收点 2：出现 check 探测 + 提交真实 token（非 xxx）
+        self.assertTrue(any("-name check" in c for c in captured), "应触发工程 check 探测")
+        self.assertTrue(sim.submissions, "应提交 token")
+        self.assertIn("fc1e78eb2a5a", sim.submissions[0])
+        self.assertNotIn("xxx", sim.submissions[0])
+        self.assertGreaterEqual(sim.score, 50)
+
+
+class TestAnswerSafety(unittest.TestCase):
+    def test_all_zero_answer_rejected(self):
+        from agent.planners.task import TaskPlanner, TaskSession, ST_SUBMIT
+        planner = TaskPlanner()
+        s = TaskSession()
+        planner._on_llm_result(s, llm_answer('{"total_count":0,"world_heritage_count":0,"types":[]}'))
+        self.assertNotEqual(s.stage, ST_SUBMIT, "全零答案不得提交")
+
+    def test_error_answer_rejected(self):
+        from agent.planners.task import TaskPlanner, TaskSession, ST_SUBMIT
+        planner = TaskPlanner()
+        s = TaskSession()
+        planner._on_llm_result(s, llm_answer('{"error":"401 unauthorized"}'))
+        self.assertNotEqual(s.stage, ST_SUBMIT, "错误答案不得提交")
+
+    def test_valid_answer_accepted(self):
+        from agent.planners.task import TaskPlanner, TaskSession, ST_SUBMIT
+        planner = TaskPlanner()
+        s = TaskSession()
+        planner._on_llm_result(s, llm_answer(API_ANSWER))
+        self.assertEqual(s.stage, ST_SUBMIT)
+
+
+if __name__ == "__main__":
+    unittest.main()

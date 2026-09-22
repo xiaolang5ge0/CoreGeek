@@ -180,6 +180,10 @@ class Brain:
             return empty_response(), trace
 
         self._learn(turn, trace)
+        # 寻宝召唤结果处理（策略书 §8.4）：1/4 完成；2/3 失败→丢弃计划待重推
+        if turn.last_summon_result:
+            self.treasure.on_summon_result(turn.last_summon_result)
+            trace["summon_result"] = turn.last_summon_result
         # 非任务期 LLM 兜底：回收上回合响应（news / treasure），无响应 2 回合后放弃
         if self._llm_waiting and (
             turn.llm_resp or turn.round_no - self._llm_round >= 2

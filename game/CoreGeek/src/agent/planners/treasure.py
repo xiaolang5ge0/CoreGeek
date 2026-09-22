@@ -95,16 +95,31 @@ class TreasurePlanner:
             x, y = int(obj.get("x")), int(obj.get("y"))
         except (TypeError, ValueError):
             return False
+        # 计划校验（策略书 §8.3）：坐标/祭品/开启日非法 → 丢弃计划（防 LLM 臆造）
+        if not (0 <= x < 41 and 0 <= y < 32):
+            return False
         items = tuple(
             str(i) for i in (obj.get("items") or []) if str(i) in TREASURE_ITEMS
         )
+        if not items:
+            return False
         try:
             day = int(obj.get("day") or 0)
         except (TypeError, ValueError):
             day = 0
-        ready = bool(obj.get("ready")) and bool(items)
+        if not (1 <= day <= 10):
+            return False
+        ready = bool(obj.get("ready"))
         self.plan = TreasurePlan(Pos(x, y), items, day, ready, (response or "")[:200])
         return True
+
+    def on_summon_result(self, code: int) -> None:
+        """召唤结果（策略书 §8.4）：1/4=完成不再尝试；2/3=失败→丢弃计划待新传闻重推。"""
+        if code in (1, 4):
+            self.attempted = True
+        elif code in (2, 3):
+            self.plan = TreasurePlan()
+            self.attempted = False
 
     def record_attempt(self) -> None:
         self.attempted = True
