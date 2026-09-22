@@ -211,7 +211,10 @@ class SimWorld:
                 "playerTasks": self._player_tasks(),
                 "roles": roles,
             },
-            "teamEnemy": {"roles": []},
+            "teamEnemy": {"roles": [
+                {"id": 20013, "pos": {"x": 30, "y": 10}, "roleType": "station",
+                 "health": 1500, "attackPower": 0, "attackRange": 0, "level": 1},
+            ]},
             "robot": {"roles": copy.deepcopy(self.robots)},
             "phaseTask": self.phase_task,
             "lastRoundRoleActionResults": {str(k): v for k, v in self.last_results.items()},

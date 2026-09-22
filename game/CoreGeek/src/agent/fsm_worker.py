@@ -55,6 +55,8 @@ SELL_RICH_MAX_DIST = 15     # 专程跑的最大距离
 
 STUCK_LIMIT = 5             # 连续移动意图但位置未变的上限
 STUCK_COLLECT_LIMIT = 3     # 连续 collect 但背包不涨 → 矿已空/封矿，解锁拉黑
+WORKER_DANGER_DIST = 3      # 机器人贴脸(≤此距离)才规避；脱离 +2 即恢复采矿（与 brain 一致）
+MAX_MINE_DIST = 16          # 优先选距我方基地此范围内的矿（避免深入对方侧被兵潮顺路打死）
 
 
 class WorkerFSM:
@@ -70,13 +72,13 @@ class WorkerFSM:
         self._stuck_collects = 0
         self._last_pos: Pos | None = None
         self._last_bag = -1
-        self.night_home = False  # 当晚已被逼回家 → 锁定在家，不再外出（消除震荡）
+        self._evading = False  # 夜间危险规避中（滞回：≤3进 ≥5退），脱离即恢复采矿
         self.build_phase = False  # 采够一批后连续建墙模式（防采一建一）
 
     # ---- 主入口 ----
     def decide(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
         if turn.is_day:
-            self.night_home = False  # 天亮解除回家锁定
+            self._evading = False  # 天亮解除规避
         if unit.pos != self._last_pos:
             self._stuck_moves = 0
         if len(unit.backpack) != self._last_bag:
@@ -103,47 +105,37 @@ class WorkerFSM:
         return cmd
 
     def _decide(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        # 修墙岗（夜间固定 ID 最小工人）：职责是留在墙内修墙，豁免群体/危险召回
+        # 修墙岗（Day4+/重伤夜固定 ID 最小工人）：仅在确有墙需修时值守，否则照常采矿
         is_repair = turn.is_night and getattr(ctx, "repair_worker", None) == self.unit_id
-        # 0a. 夜间个体危险召回：仅当机器人逼近该工人时召回，并锁定在家到天亮（消除群体召回震荡）。
-        #     夜1 有升级火箭基本无风险 → 工人应全力采集，不做群体 CRITICAL 召回。
-        in_danger = self.unit_id in getattr(ctx, "danger_workers", ())
-        if turn.is_night and in_danger and not is_repair:
-            self.night_home = True
-        if turn.is_night and self.night_home and not is_repair:
-            cell = ctx.recall_cell(self.unit_id) or getattr(ctx, "safe_anchor", None)
-            if cell is not None and unit.pos != cell:
-                self.mine = None
-                self.build = None
-                self.sell_vendor = None
-                self.state = STATE_CRITICAL
-                step = next_step(turn, unit, cell, ctx.reserved)
-                if step is not None:
-                    return self._move(step, ctx)
-            self.state = STATE_CRITICAL
-            return None  # 在家待命，当晚不再外出
-        # 0b. 近身机器人闪避（安全 > 矿锁；修墙岗用更紧阈值——墙已破贴脸才逃）
-        home = getattr(ctx, "safe_anchor", None) or getattr(ctx, "home_anchor", None)
-        evade_dist = 1 if is_repair else EVADE_DIST
-        if home is not None and distance(unit.pos, home) > evade_dist:
-            close_robot = any(
-                r.alive and not r.dizzy
-                and r.target_team in ("", turn.team_type)
-                and distance(r.pos, unit.pos) <= evade_dist
-                for r in turn.robots
+        # 0a. 夜间危险规避（滞回，非粘性）：机器人贴脸(≤3)才规避，脱离(≥5)即恢复采矿。
+        #     事实：机器人主攻基地、顺路才杀工人 → 不必整夜蹲防，夜1 可全力采矿。
+        if turn.is_night and not is_repair:
+            nearest = min(
+                (distance(unit.pos, r.pos) for r in turn.robots
+                 if r.alive and r.target_team in ("", turn.team_type)),
+                default=99,
             )
-            if close_robot:
-                self.mine = None
-                self.sell_vendor = None
-                self.state = STATE_EVADE
-                # 逃向内圈安全位（墙后），而非 CP 开口侧
-                step = step_toward(turn, unit, home, ctx.reserved)
-                if step is not None:
-                    return self._move(step, ctx)
-        # 0c. 夜间修墙岗：修复包/升级券就地维护围墙，不外出（无物料也在墙内待命）
+            if nearest <= WORKER_DANGER_DIST:
+                self._evading = True
+            elif nearest >= WORKER_DANGER_DIST + 2:
+                self._evading = False
+            if self._evading:
+                cell = getattr(ctx, "safe_anchor", None) or ctx.recall_cell(self.unit_id)
+                if cell is not None and unit.pos != cell:
+                    self.mine = None
+                    self.build = None
+                    self.sell_vendor = None
+                    self.state = STATE_CRITICAL
+                    step = next_step(turn, unit, cell, ctx.reserved)
+                    if step is not None:
+                        return self._move(step, ctx)
+                self.state = STATE_CRITICAL
+                return None  # 危险未解除，暂避内圈
+        # 0c. 夜间修墙岗：有墙需修且持有物料 → 就地修复；否则落到采矿逻辑（不空蹲）
         if is_repair:
             cmd = self._repair_cmd(turn, unit, ctx)
-            return cmd  # 可能为 None（墙内待命）
+            if cmd is not None:
+                return cmd
         # 1. 建造任务（白天，优先级最高）
         if self.build is not None:
             if turn.is_night:
@@ -307,13 +299,7 @@ class WorkerFSM:
             step = step_toward(turn, unit, target, ctx.reserved)
             if step is not None:
                 return self._move(step, ctx)
-            return None
-        # 无修复物品 → 内圈安全位待命（不外出送死）
-        anchor = getattr(ctx, "safe_anchor", None)
-        if anchor is not None and unit.pos != anchor:
-            step = next_step(turn, unit, anchor, ctx.reserved)
-            if step is not None:
-                return self._move(step, ctx)
+        # 无修复需求/无物料 → 返回 None，落回采矿逻辑（不空蹲内圈）
         return None
 
     # ---- 采矿 ----
@@ -321,6 +307,13 @@ class WorkerFSM:
         # 锁定矿进入机器人危险圈/出生走廊（夜间或临近入夜）→ 放弃
         if ctx.dusk_avoid and ctx.mine_unsafe(self.mine):
             ctx.note(self.unit_id, "mine_unsafe_release")
+            self.mine = None
+            self.state = STATE_FREE
+            return None
+        # 锁定矿距我方基地超出近矿半径 → 释放（实战：跑远侧矿区被兵潮顺路打死）
+        station = turn.station()
+        if station is not None and distance(station.pos, self.mine) > MAX_MINE_DIST:
+            ctx.note(self.unit_id, "mine_too_far_release")
             self.mine = None
             self.state = STATE_FREE
             return None
@@ -344,29 +337,49 @@ class WorkerFSM:
 
     def _select_mine(self, turn: Turn, unit: Unit, ctx) -> Pos | None:
         other_locks = () if ctx.share_mines else ctx.other_mine_locks(self.unit_id)
-        best: Pos | None = None
-        best_key = None
+        station = turn.station()
+        enemy_station = next((u for u in turn.enemy if u.kind == "station"), None)
+        # 两遍：先在我方基地 MAX_MINE_DIST 内的矿中选；没有才放宽（避免舍近求远深入对方侧）
+        valid: list[tuple[Pos, str, int, int]] = []
         for pos in turn.mines():
             if pos in other_locks:
                 continue
             if ctx.is_mine_blocked(pos, turn.round_no):
                 continue
-            # 安全选矿：夜间或临近入夜时，机器人/出生走廊附近的矿一律不碰（实战教训：夜采被兵潮打死）
             if ctx.dusk_avoid and ctx.mine_unsafe(pos):
                 continue
             kind = turn.zones.get(pos)
             if self.ore_role == ORE_STONE and kind != "stone":
                 continue
-            # 墙未建完时石料岗专供石矿，经济岗不抢（防石料工无矿可采死锁）
             if self.ore_role == ORE_MONEY and kind == "stone" and ctx.walls_missing:
                 continue
-            dist = distance(unit.pos, pos)
+            our_dist = distance(station.pos, pos) if station is not None else distance(unit.pos, pos)
+            valid.append((pos, kind, distance(unit.pos, pos), our_dist))
+        if not valid:
+            return None
+        near = [m for m in valid if m[3] <= MAX_MINE_DIST]
+        if near:
+            pool = near
+        else:
+            # 无近矿：只接受"离我方基地不更远"的矿；敌方侧矿一律不选（宁可空闲等刷新，也不深入送死）
+            pool = [
+                m for m in valid
+                if enemy_station is None
+                or distance(enemy_station.pos, m[0]) >= m[3]
+            ]
+        if not pool:
+            return None
+        best: Pos | None = None
+        best_key = None
+        for pos, kind, dist, our_dist in pool:
+            side_penalty = 0.0
+            if enemy_station is not None and distance(enemy_station.pos, pos) < our_dist:
+                side_penalty = 12.0  # 该矿离敌方基地更近 → 对方侧
             if self.ore_role == ORE_STONE:
-                key = (dist, pos.x, pos.y)
+                key = (dist + our_dist * 0.6 + side_penalty, dist, pos.x, pos.y)
             else:
                 price = turn.vendor_prices.get(kind, 1)
-                # 价高优先、距离次要：约 10 格路程 ≈ 2 金差价
-                key = (dist - price * 10, dist, pos.x, pos.y)
+                key = (dist - price * 10 + our_dist * 0.6 + side_penalty, dist, pos.x, pos.y)
             if best is None or key < best_key:
                 best, best_key = pos, key
         return best

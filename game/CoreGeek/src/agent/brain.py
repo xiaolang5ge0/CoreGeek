@@ -393,11 +393,16 @@ class Brain:
             w.unit_id for w in turn.workers()
             if any(distance(w.pos, rc) <= WORKER_DANGER_DIST for rc in ctx.robot_cells)
         }
-        # Day4+（BOSS 夜）或墙受损 → 固定 ID 最小的工人为夜间修墙岗（背包不共享，需自购券/修复包）
-        walls_hurt = any(
-            w.health < WALL_MAX_HP[min(max(w.level, 1), 3) - 1] for w in turn.walls()
+        # 修墙岗仅限：Day4+（BOSS 夜）或 墙严重受损（≥3 面掉血 或 有墙<50%）。
+        # Night1-3 相对轻松（事实：机器人主攻基地、顺路才杀工人）→ 不设岗，双工人全力采矿。
+        hurt_walls = [
+            w for w in turn.walls()
+            if w.health < WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
+        ]
+        severe = len(hurt_walls) >= 3 or any(
+            w.health < 0.5 * WALL_MAX_HP[min(max(w.level, 1), 3) - 1] for w in hurt_walls
         )
-        if turn.day_index >= 4 or walls_hurt:
+        if turn.day_index >= 4 or severe:
             workers_sorted = sorted(turn.workers(), key=lambda w: w.unit_id)
             if workers_sorted:
                 ctx.repair_worker = workers_sorted[0].unit_id

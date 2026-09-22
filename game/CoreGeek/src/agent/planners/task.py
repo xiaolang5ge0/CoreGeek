@@ -272,12 +272,23 @@ class TaskPlanner:
             session.pending_cmd = retry
             return out
 
-        # 4b. 超时预算：任务 timeout（实战=15 回合）逼近 → 强制交保底/停止浪费
+        # 4b. 超时预算：任务 timeout（实战=15 回合）逼近 → 最后一次向 LLM 要最佳猜测答案，否则停止浪费
         if session.timeout_rounds > 0:
             deadline = session.started_round + session.timeout_rounds
             if turn.round_no >= deadline - 2:
                 if session.best_answer and not session.submitted:
                     out.submit = self._submit(session)
+                elif not session.llm_pending and session.quiet_rounds >= 1:
+                    # 最后一搏：把已收集证据+错误喂给 LLM，要求直接给最佳猜测 ANSWER
+                    out.prompt = (
+                        "时间即将耗尽，必须立刻作答。只输出一行 ANSWER: <JSON答案>。\n"
+                        f"任务原文：{_clip(session.task_text, 800)}\n"
+                        f"沙盒证据：\n{_history(session)}\n"
+                        f"遇到的错误：{'; '.join(session.error_log[-4:])}\n"
+                        "即使信息不全，也请给出字段尽量完整的最佳猜测 JSON。"
+                    )
+                    session.llm_pending = True
+                    session.llm_loops += 1
                 return out
 
         # 5. 阶段推进
@@ -533,21 +544,31 @@ class TaskPlanner:
 
     def _on_llm_result(self, session: TaskSession, text: str) -> None:
         session.quiet_rounds = 0
-        line = text.strip().splitlines()[0] if text.strip() else ""
-        if line.startswith("ANSWER:"):
-            answer = _extract_json(line[7:])
+        text = (text or "").strip()
+        if not text:
+            return
+        # 兼容 LLM 输出前后缀说明/多行：在整段文本中定位 ANSWER:/CMD:（实战 LLM 常带解释文字）
+        ans_idx = text.find("ANSWER:")
+        cmd_idx = text.find("CMD:")
+        if ans_idx >= 0 and (cmd_idx < 0 or ans_idx < cmd_idx):
+            answer = _extract_json(text[ans_idx + 7:])
             if answer:
                 session.best_answer = answer
-        elif line.startswith("CMD:"):
-            cmd = line[4:].strip()
+                return
+        if cmd_idx >= 0:
+            cmd = text[cmd_idx + 4:].strip().splitlines()[0].strip()
             # 命令消毒：多行/引号不配对会在沙盒 bash 里爆炸（实战 EOF 报错），直接拒收
             if (
                 cmd
-                and "\n" not in cmd
                 and cmd.count('"') % 2 == 0
                 and not cmd.startswith("cat ")
             ):
                 session.pending_llm_cmd = cmd
+                return
+        # 兜底：LLM 直接给了 JSON 对象 → 当作答案
+        answer = _extract_json(text)
+        if answer and not session.best_answer:
+            session.best_answer = answer
 
     # ---- 提交 ----
     def _submit(self, session: TaskSession) -> dict:
