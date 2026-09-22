@@ -4,6 +4,11 @@ import unittest
 
 import _bootstrap  # noqa: F401
 
+from agent import config
+
+# 本模块含"硬编码确定性能力"测试，显式开启开关（默认关闭见 test_hardcoded_switch.py）
+config.HARDCODED_ASSIST = True
+
 from harness import SimWorld
 from agent.brain import Brain, _Ctx
 from agent.fsm_pioneer import PioneerFSM, STATE_TASK_TRAVEL

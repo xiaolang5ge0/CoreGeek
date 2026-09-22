@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..protocol import Turn, distance, submit_answer_command
+from .. import config
 from ._harvest_data import HARVEST_B64
 
 # ---- 阶段 ----
@@ -313,12 +314,13 @@ class TaskPlanner:
             self._on_api_probe(session, result)
             return
         # LLM / 工程修复命令结果
-        if self._try_token_submit(session, result):
-            return
-        if self._try_answer_submit(session, result):
-            return
-        if self._maybe_crlf_fix(session, result):
-            return
+        if config.HARDCODED_ASSIST:
+            if self._try_token_submit(session, result):
+                return
+            if self._try_answer_submit(session, result):
+                return
+            if self._maybe_crlf_fix(session, result):
+                return
         session.stage = ST_LLM
 
     def _try_answer_submit(self, session: TaskSession, result: str) -> bool:
@@ -358,14 +360,16 @@ class TaskPlanner:
             re.search(r"http://localhost:\d+", out)
             or ("/api/" in out and "API_DOCS" in out.upper())
         )
-        if self._try_token_submit(session, result):
-            return
-        if session.engineer and not session.probe_sent:
-            session.stage = ST_PROBE
-            return
-        if api and not session.api_probe_sent:
-            session.stage = ST_API_PROBE
-            return
+        # 硬编码能力（默认关闭）：仅当 HARDCODED_ASSIST=True 才走确定性分支
+        if config.HARDCODED_ASSIST:
+            if self._try_token_submit(session, result):
+                return
+            if session.engineer and not session.probe_sent:
+                session.stage = ST_PROBE
+                return
+            if api and not session.api_probe_sent:
+                session.stage = ST_API_PROBE
+                return
         session.stage = ST_LLM
 
     # 城市名映射：文件名拼音 + 任务文本中的中文城市
@@ -396,7 +400,7 @@ class TaskPlanner:
         ws = _WS_DIR.search(result or "")
         if ws and ws.group(1).strip() not in ("", "."):
             session.task_dir = ws.group(1).strip()
-        if self._try_token_submit(session, result):
+        if config.HARDCODED_ASSIST and self._try_token_submit(session, result):
             return
         # 工程类确定性修复（零 LLM）：解析 check FAIL → mkdir/chmod/sed → 再 check
         if session.fix_rounds < 2:
@@ -408,7 +412,7 @@ class TaskPlanner:
         session.stage = ST_LLM
 
     def _on_fix(self, session: TaskSession, result: str) -> None:
-        if self._try_token_submit(session, result):
+        if config.HARDCODED_ASSIST and self._try_token_submit(session, result):
             return
         if session.fix_rounds < 2:
             fix = self._build_fix(session, result)
@@ -420,6 +424,8 @@ class TaskPlanner:
 
     def _build_fix(self, session: TaskSession, result: str) -> str | None:
         """解析 check 的 `[FAIL] DIR/LINE` 行（其次 spec）→ 生成修复命令（末尾附 ./check）。"""
+        if not config.HARDCODED_ASSIST:
+            return None  # 硬编码能力关闭：交给 LLM 修复
         cmds: list[str] = []
         for path, mode in _FAIL_DIR.findall(result or ""):
             cmds.append(f'mkdir -p "{path}" && chmod {mode} "{path}"')
@@ -450,7 +456,7 @@ class TaskPlanner:
         """API 探测结果：有 `__ANSWER` → 直接提交（零 LLM）；否则事实喂 LLM 组装。"""
         session.explore_output = (session.explore_output + "\n=== API 探测事实 ===\n"
                                   + (result or "")[:3000])[:EXPLORE_LIMIT]
-        if self._try_answer_submit(session, result):
+        if config.HARDCODED_ASSIST and self._try_answer_submit(session, result):
             return
         session.stage = ST_LLM
 
