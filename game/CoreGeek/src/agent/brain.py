@@ -18,6 +18,7 @@ from .phases import PhaseManager
 from .planners.layout import BaseLayout, choose_front, compute_layout
 from .planners.news import NewsEconomy
 from .planners.task import TaskPlanner, TaskSession
+from .planners.treasure import TreasurePlanner
 from .planners.upgrade import WALL_MAX_HP, UpgradePlanner
 from .protocol import (
     Pos,
@@ -100,6 +101,9 @@ class _Ctx:
     gunner_upgrade = None            # 炮手武器升级计划 (Pos, "weapon")
     price_boost_map: dict = {}       # 新闻预测：矿种 → 售卖加权
     wall_registry = None             # L2 围墙状态表（跨回合，供修理工按需修复/升级）
+    treasure = None                  # 宝藏计划（民间传闻推断）
+    prompt: str = ""                 # LLM prompt（非任务期 news/treasure 或任务）
+    execute_cmd: str = ""            # 沙盒命令（仅任务期）
 
     def price_boost(self, kind: str) -> float:
         return float(self.price_boost_map.get(kind, 0.0))
@@ -149,6 +153,9 @@ class Brain:
         self.robot_spawn_log: list = []
         self.news_log: list = []  # 每回合 worldNews 存档（宝藏推断用）
         self.news_economy = NewsEconomy()
+        self.treasure = TreasurePlanner()
+        self._llm_waiting: str = ""      # 非任务期 LLM 用途：news / treasure
+        self._llm_round: int = 0
         self.wall_registry = WallRegistry()
         self.llm_day: int = 0
         self.llm_calls_today: int = 0
@@ -171,6 +178,18 @@ class Brain:
             return empty_response(), trace
 
         self._learn(turn, trace)
+        # 非任务期 LLM 兜底：回收上回合响应（news / treasure），无响应 2 回合后放弃
+        if self._llm_waiting and (
+            turn.llm_resp or turn.round_no - self._llm_round >= 2
+        ):
+            if turn.llm_resp:
+                if self._llm_waiting == "news":
+                    if self.news_economy.apply_llm(turn.llm_resp):
+                        trace["news_llm_applied"] = True
+                elif self._llm_waiting == "treasure":
+                    if self.treasure.apply_llm(turn.llm_resp):
+                        trace["treasure_llm_applied"] = True
+            self._llm_waiting = ""
         if turn.station() is not None:
             if self.layout is None:
                 self.front = choose_front(turn)
@@ -196,6 +215,7 @@ class Brain:
         ctx = _Ctx(trace)
         ctx.fsms = self.worker_fsms
         ctx.wall_registry = self.wall_registry
+        ctx.treasure = self.treasure
         ctx.reserved = {u.pos for u in turn.controllable()}
         ctx.mine_blacklist = self.mine_blacklist
         # 历史出生走廊（首夜起累积，全局固定）→ 夜间选矿/卖货避让
@@ -207,7 +227,7 @@ class Brain:
         # 白天临近入夜也提前避开出生走廊（用户要求：接近晚上时避开历史出生位置）
         ctx.dusk_avoid = turn.is_night or (0 < turn.rounds_until_night <= DUSK_AVOID_WINDOW)
         ctx.night_now = turn.is_night
-        self._record_news(turn, trace)
+        self._record_news(turn, ctx)
         ctx.price_boost_map = self.news_economy.boosts(turn.day_index)
         ctx.prompt = ""
         ctx.execute_cmd = ""
@@ -650,12 +670,29 @@ class Brain:
                 return (w.pos, "weapon")
         return None
 
-    def _record_news(self, turn: Turn, trace: dict[str, Any]) -> None:
-        """每回合存档 worldNews（官方消息+民间传闻），并喂给新闻经济模块。"""
+    def _record_news(self, turn: Turn, ctx) -> None:
+        """每回合存档 worldNews（官方消息+民间传闻），并喂给新闻经济/宝藏模块。"""
+        trace = ctx.trace
         official = (turn.official_news or "").strip()
         folk = (turn.folk_legends or "").strip()
+        in_task = self.pioneer_fsm.state == STATE_TASK_WORK
         if official:
             self.news_economy.update(official, turn.day_index)
+            # 确定性解析失败 → 少量每日 LLM 兜底（非任务期，不占任务额度）
+            if (
+                self.news_economy.last_new
+                and not self.news_economy.last_parsed
+                and not in_task
+            ):
+                if self._ask_llm(turn, ctx, "news", NewsEconomy.prompt(official)):
+                    trace["news_llm"] = True
+        if folk:
+            if self.treasure.observe(folk):
+                trace["treasure_clue"] = len(self.treasure.legends)
+            # 线索足够且无 ready 计划 → LLM 推断宝藏（地点/祭品/时间）
+            if self.treasure.needs_inference() and not in_task:
+                if self._ask_llm(turn, ctx, "treasure", self.treasure.prompt()):
+                    trace["treasure_llm"] = True
         if not official and not folk:
             return
         entry = {"round": turn.round_no, "day": turn.day_index,
@@ -665,6 +702,16 @@ class Brain:
             return
         self.news_log.append(entry)
         trace["news"] = {"official": official[:80], "folk": folk[:80]}
+
+    def _ask_llm(self, turn: Turn, ctx, kind: str, prompt: str) -> bool:
+        """非任务期统一 LLM 提问（每回合至多 1 条，受每日额度限制）。"""
+        if self._llm_waiting or ctx.prompt or not self._llm_budget_ok(turn):
+            return False
+        ctx.prompt = prompt
+        self.llm_calls_today += 1
+        self._llm_waiting = kind
+        self._llm_round = turn.round_no
+        return True
 
     def _vacate_layout_cell(self, turn: Turn, worker, ctx: _Ctx) -> dict[str, Any] | None:
         """空闲工人站在炮台/控制点上时主动让位（否则该格永远无法建造/归位）。"""

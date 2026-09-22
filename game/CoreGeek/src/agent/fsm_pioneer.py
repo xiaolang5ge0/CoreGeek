@@ -67,9 +67,9 @@ class PioneerFSM:
         return cmd
 
     def _day_cmd(self, turn: Turn, pioneer: Unit, cp: Pos, ctx) -> dict[str, Any] | None:
-        in_task = self.state in (
-            STATE_TASK_TRAVEL, STATE_TASK_ACCEPT, STATE_TASK_WAIT_ACCEPT, STATE_TASK_WORK
-        )
+        # 仅在"任务已接取/进行中"时禁止插空升级；TASK_TRAVEL 途中仍可插空买券/用券
+        # （用户：炮手做任务与买券升级互斥 → 需要任务间隙插空升级）
+        in_task = self.state in (STATE_TASK_ACCEPT, STATE_TASK_WAIT_ACCEPT, STATE_TASK_WORK)
         # 4. 入夜前回归 CP（时间敏感，优先于升级/任务；避免夜里还在外面）
         travel = self._travel_rounds(turn, pioneer, cp, ctx)
         if turn.rounds_until_night <= travel + DUSK_MARGIN:
@@ -170,11 +170,22 @@ class PioneerFSM:
             return None
         return min(shops, key=lambda s: (distance(pioneer.pos, s), s.x, s.y))
 
+    def _treasure_cmd(self, turn: Turn, pioneer: Unit, ctx) -> dict[str, Any] | None:
+        """长上下文类（宝藏）：ready 计划才行动（最低优先，仅在无任务可接时）。"""
+        planner = getattr(ctx, "treasure", None)
+        if planner is None:
+            return None
+        return planner.cmd(turn, pioneer, self._nearest_shop(turn, pioneer), ctx)
+
     # ---- 任务流程 ----
     def _task_flow(self, turn: Turn, pioneer: Unit, cp: Pos, ctx) -> dict[str, Any] | None:
         if self.state == STATE_GUARD:
             target = self._choose_task_point(turn, pioneer)
             if target is None:
+                # 无任务可接 → 尝试宝藏（P6，最低优先；仅在 ready 计划时行动）
+                cmd = self._treasure_cmd(turn, pioneer, ctx)
+                if cmd is not None:
+                    return cmd
                 return self.move_to_guard(turn, pioneer, cp, ctx)
             self.task_point = target
             self.state = STATE_TASK_TRAVEL

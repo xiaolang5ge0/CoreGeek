@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..protocol import Turn, submit_answer_command
+from ..protocol import Turn, distance, submit_answer_command
 
 # ---- 阶段 ----
 ST_EXPLORE = "EXPLORE_FILES"
@@ -34,7 +34,7 @@ ST_FIND = ST_EXPLORE
 ST_READ = ST_EXPLORE
 
 MAX_NON_JSON = 3       # 连续非 JSON 上限 → 强制结束
-MAX_LLM_LOOPS = 16     # LLM 循环上限（防死循环）
+MAX_LLM_LOOPS = 8      # LLM 循环上限默认值（实际按任务 timeoutRounds 收紧，见 _loop_limit）
 EXPLORE_LIMIT = 8000   # 探索输出保留字符数（需容纳 API_DOCS 全文/密钥）
 
 _FILE_NAME = re.compile(r"[A-Za-z0-9_\-/]+\.(?:md|txt)", re.I)
@@ -100,6 +100,7 @@ class TaskSession:
     answer: Any = None
     submitted: bool = False
     need_refine: bool = False
+    max_loops: int = MAX_LLM_LOOPS                          # 本任务 LLM 循环上限（按 timeout 收紧）
 
     def reset(self) -> None:
         self.__init__()
@@ -129,6 +130,7 @@ class TaskPlanner:
             session.task_key = self._task_key(turn.phase_task)
             names = _extract_file_names(turn.phase_task)
             session.target_name = names[0] if names else "task_*.md"
+            session.max_loops = self._loop_limit(turn)
             session.stage = ST_EXPLORE
 
         # 1. 回收异步结果
@@ -201,7 +203,7 @@ class TaskPlanner:
             return out
         # LLM_LOOP
         if session.stage == ST_LLM:
-            if session.llm_loops >= MAX_LLM_LOOPS:
+            if session.llm_loops >= session.max_loops:
                 session.stage = ST_DONE
                 return out
             out.prompt = self._build_prompt(session)
@@ -380,6 +382,20 @@ class TaskPlanner:
         self.sop[session.task_key] = (
             f"任务：{session.task_text[:200]}\n命令序列：{cmds[:600]}\n最终答案：{ans[:400]}"
         )
+
+    @staticmethod
+    def _loop_limit(turn: Turn) -> int:
+        """按任务 timeoutRounds 收紧 LLM 循环上限（留 2 回合给提交/收尾）。"""
+        pioneer = turn.pioneer()
+        timeout = 0
+        if pioneer is not None:
+            for t in turn.tasks:
+                if t.timeout_rounds > 0 and distance(pioneer.pos, t.pos) <= 1:
+                    timeout = t.timeout_rounds
+                    break
+        if timeout <= 0:
+            return MAX_LLM_LOOPS
+        return max(2, min(MAX_LLM_LOOPS, timeout - 2))
 
     @staticmethod
     def _task_key(task_text: str) -> str:

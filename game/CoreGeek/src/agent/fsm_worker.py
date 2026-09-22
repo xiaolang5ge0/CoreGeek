@@ -61,6 +61,8 @@ STUCK_COLLECT_LIMIT = 3
 WORKER_DANGER_DIST = 3      # 机器人贴脸(≤)才规避；脱离 +2 恢复
 MAX_MINE_DIST = 16
 REPAIR_MARGIN = 4           # 修理工归位余量（距天黑 ≤ 路径 + 4）
+REPAIR_STONE_KEEP = 5       # 修理工常备石头（修墙用），低于此不卖
+RETURN_STICKY_DAY = 4       # D4+ 修理工回防粘性：一旦开始返回，跨昼夜持续到进墙
 
 
 class WorkerFSM:
@@ -78,6 +80,8 @@ class WorkerFSM:
         self._last_bag = -1
         self._evading = False
         self.build_phase = False
+        self.returning = False       # 回防粘性：D4+ 一旦开始返回，持续到进墙
+        self.return_since = 0        # 开始返回的回合（防死循环兜底）
 
     # ================= 主入口 =================
     def decide(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
@@ -142,6 +146,14 @@ class WorkerFSM:
 
     # ================= 修理工 =================
     def _repairer(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        # 回防粘性（D4+）：一旦开始返回，跨昼夜持续到进墙（A* 绕墙，不穿墙）
+        if self.returning:
+            cmd = self._go_home(turn, unit, ctx, ctx.home_anchor)
+            if cmd is not None:
+                if turn.round_no - self.return_since > 40:  # 兜底：长期无法进墙则放弃
+                    self.returning = False
+                return cmd
+            self.returning = False  # 已进墙/受阻 → 继续正常流程
         # 夜间优先：升级（=回血，省修复包）→ 抢修 → 无事才采矿
         if turn.is_night:
             cmd = self._upgrade_flow(turn, unit, ctx, allow_use=True, allow_buy=False)
@@ -150,24 +162,36 @@ class WorkerFSM:
             cmd = self._repair_cmd(turn, unit, ctx)
             if cmd is not None:
                 return cmd
+            if turn.day_index >= RETURN_STICKY_DAY:
+                return None  # D4+ 夜：守内圈，不外出采矿
             return self._miner(turn, unit, ctx)
         # 白天
-        if turn.day_index <= 2:
-            # D1-D2 自由：采石 + 建墙
-            return self._build_mine(turn, unit, ctx)
-        # D3+：白天。临近天黑**优先归位**（安全第一，不再外出采购），否则采购+建补墙+采集
-        if 0 < turn.rounds_until_night <= self._path_home_len(turn, unit, ctx) + REPAIR_MARGIN:
+        if turn.day_index <= 1:
+            # D1 全力石料 + 建墙
+            return self._build_mine(turn, unit, ctx, prefer="stone")
+        # D2+：建墙优先（无缺口）→ 采购 → 回防预留 → 采矿(铜/铁)
+        near_dusk = (
+            0 < turn.rounds_until_night
+            <= self._path_home_len(turn, unit, ctx) + REPAIR_MARGIN
+        )
+        if near_dusk:
+            if turn.day_index >= RETURN_STICKY_DAY:
+                self.returning = True
+                self.return_since = turn.round_no
             cmd = self._go_home(turn, unit, ctx, ctx.home_anchor)
             if cmd is not None:
                 return cmd
-            return self._build_mine(turn, unit, ctx)  # 已归位/受阻 → 就近采集（兜底不空转）
+            self.returning = False
+            return self._build_mine(turn, unit, ctx, prefer="money")  # 已归位/受阻 → 就近
         cmd = self._upgrade_flow(turn, unit, ctx, allow_use=False, allow_buy=True)
         if cmd is not None:
             return cmd
-        return self._build_mine(turn, unit, ctx)
+        return self._build_mine(turn, unit, ctx, prefer="money")
 
-    def _build_mine(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        """自由采石+建墙（D1-D2 修理工 / 紧急时挖矿工）。"""
+    def _build_mine(
+        self, turn: Turn, unit: Unit, ctx, *, prefer: str = "stone"
+    ) -> dict[str, Any] | None:
+        """建墙优先（保证无缺口），否则采矿（D1 prefer=stone，D2+ prefer=money）。"""
         # 建墙任务优先
         if self.build is not None:
             self.state = STATE_BUILD
@@ -176,7 +200,7 @@ class WorkerFSM:
         stones = unit.backpack.count("stone")
         if stones and ctx.walls_left > 0 and (self.build_phase or stones >= ctx.walls_left):
             return None  # 由 brain 派单
-        return self._mine_flow(turn, unit, ctx, prefer="stone")
+        return self._mine_flow(turn, unit, ctx, prefer=prefer)
 
     # ================= 挖矿工 =================
     def _miner(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
@@ -331,12 +355,19 @@ class WorkerFSM:
             return True
         return False
 
+    def _stone_keep(self) -> int:
+        """修理工常备石头（修墙用），低于此不卖；其余角色不留。"""
+        return REPAIR_STONE_KEEP if self.role == ROLE_REPAIRER else 0
+
     def _sellable_value(self, turn: Turn, unit: Unit, ctx) -> int:
         value = 0
         for ore in MINE_TYPES:
-            if ore == "stone" and ctx.walls_left > 0:
-                continue  # 墙料不外流
-            value += unit.backpack.count(ore) * turn.vendor_prices.get(ore, 1)
+            count = unit.backpack.count(ore)
+            if ore == "stone":
+                if ctx.walls_left > 0:
+                    continue  # 墙料不外流
+                count = max(0, count - self._stone_keep())
+            value += count * turn.vendor_prices.get(ore, 1)
         return value
 
     def _sell_chain(self, turn: Turn, unit: Unit, ctx, *, mandatory: bool) -> dict[str, Any] | None:
@@ -362,19 +393,21 @@ class WorkerFSM:
         # 优先卖"新闻预测高价"的矿种，否则卖 数量×单价 最高
         best = None
         for ore in MINE_TYPES:
-            if ore == "stone" and ctx.walls_left > 0:
-                continue
             count = unit.backpack.count(ore)
+            if ore == "stone":
+                if ctx.walls_left > 0:
+                    continue
+                count = max(0, count - self._stone_keep())
             if count == 0:
                 continue
             value = count * turn.vendor_prices.get(ore, 1)
             if hasattr(ctx, "price_boost"):
                 value += ctx.price_boost(ore)  # 囤货到期 → 优先卖
             if best is None or value > best[0]:
-                best = (value, ore)
+                best = (value, ore, count)
         if best is None:
             return None
-        return sell_command(best[1], unit.backpack.count(best[1]))
+        return sell_command(best[1], best[2])
 
     def _nearest_vendor(self, turn: Turn, unit: Unit) -> Pos | None:
         vendors = turn.vendor_positions()
