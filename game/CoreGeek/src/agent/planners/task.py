@@ -25,6 +25,7 @@ from ._harvest_data import HARVEST_B64
 # ---- 阶段 ----
 ST_EXPLORE = "EXPLORE_FILES"
 ST_PROBE = "ENGINEER_PROBE"
+ST_FIX = "ENGINEER_FIX"
 ST_API_PROBE = "API_PROBE"
 ST_LLM = "LLM_LOOP"
 ST_WAIT_CMD = "WAIT_CMD_RESULT"
@@ -49,6 +50,12 @@ _TOKEN_PLACEHOLDERS = {"xxx", "xxxx", "token", "your_token", "your-token", "todo
 _WS_DIR = re.compile(r"__WS:(\S+)")
 _DIR = re.compile(r"__DIR:(\S*)")
 _FILE = re.compile(r"__FILE:(\S*)")
+# API 确定性答案行（harvester 产出）与工程 check 的 FAIL 行
+_ANSWER_LINE = re.compile(r"^\s*__ANSWER\s+(\{.*\})\s*$", re.M)
+_FAIL_DIR = re.compile(r"\[FAIL\]\s*DIR\s+(\S+)\s*[→>\-]*\s*期望\s+exists\s*,?\s*(\d{3})")
+_FAIL_LINE = re.compile(r"\[FAIL\]\s*LINE\s+(\S+?):(\d+)\s*[→>\-]*\s*期望\s+(.+?)\s*[，,]\s*实际")
+_SPEC_LINE = re.compile(r"第\s*(\d+)\s*行[：:]\s*[`\"']?([^`\"'\n]+)[`\"']?")
+_SPEC_DIR = re.compile(r"[-*]\s*(\S+/?)\s*必须存在[，,]?\s*权限为?\s*(\d{3})")
 
 
 def _extract_file_names(text: str) -> list[str]:
@@ -98,6 +105,8 @@ class TaskSession:
     crlf_fixed: bool = False
     api_probe_sent: bool = False                        # API 类确定性探测已发
     city: str = ""                                       # API 任务城市（探测参数值）
+    fix_rounds: int = 0                                  # 工程确定性修复轮数（防死循环）
+    pending_fix: str | None = None                       # 待下发的确定性修复命令
     files: dict = field(default_factory=dict)            # 文件名 → 内容（兼容旧引用）
     pending_cmd: str | None = None
     cmd_history: list = field(default_factory=list)      # [(cmd, result)]
@@ -211,6 +220,19 @@ class TaskPlanner:
             session._pending_kind = "probe"  # type: ignore[attr-defined]
             session.stage = ST_WAIT_CMD
             return out
+        # 工程类确定性修复（按 check FAIL / spec 生成 mkdir/chmod/sed，零 LLM）
+        if session.stage == ST_FIX:
+            cmd = session.pending_fix
+            session.pending_fix = None
+            if cmd is None:
+                session.stage = ST_LLM
+                return self._advance(turn, session, out)
+            session.fix_rounds += 1
+            out.execute_cmd = cmd
+            session.pending_cmd = cmd
+            session._pending_kind = "fix"  # type: ignore[attr-defined]
+            session.stage = ST_WAIT_CMD
+            return out
         # API 类确定性探测（认证×参数矩阵 + 收割）
         if session.stage == ST_API_PROBE:
             session.api_probe_sent = True
@@ -284,15 +306,35 @@ class TaskPlanner:
         if kind == "probe":
             self._on_probe(session, result)
             return
+        if kind == "fix":
+            self._on_fix(session, result)
+            return
         if kind == "api_probe":
             self._on_api_probe(session, result)
             return
         # LLM / 工程修复命令结果
         if self._try_token_submit(session, result):
             return
+        if self._try_answer_submit(session, result):
+            return
         if self._maybe_crlf_fix(session, result):
             return
         session.stage = ST_LLM
+
+    def _try_answer_submit(self, session: TaskSession, result: str) -> bool:
+        """命令输出里的 `__ANSWER {json}` → 直接提交（零 LLM，API 类确定性答案）。"""
+        m = _ANSWER_LINE.search(result or "")
+        if not m:
+            return False
+        try:
+            ans = json.loads(m.group(1))
+        except (json.JSONDecodeError, ValueError):
+            return False
+        if not ans or self._answer_suspect(ans):
+            return False
+        session.answer = json.dumps(ans, ensure_ascii=False)
+        session.stage = ST_SUBMIT
+        return True
 
     def _on_explore(self, session: TaskSession, result: str) -> None:
         session.explore_output = (result or "")[:EXPLORE_LIMIT]
@@ -356,12 +398,60 @@ class TaskPlanner:
             session.task_dir = ws.group(1).strip()
         if self._try_token_submit(session, result):
             return
+        # 工程类确定性修复（零 LLM）：解析 check FAIL → mkdir/chmod/sed → 再 check
+        if session.fix_rounds < 2:
+            fix = self._build_fix(session, result)
+            if fix is not None:
+                session.pending_fix = fix
+                session.stage = ST_FIX
+                return
         session.stage = ST_LLM
 
+    def _on_fix(self, session: TaskSession, result: str) -> None:
+        if self._try_token_submit(session, result):
+            return
+        if session.fix_rounds < 2:
+            fix = self._build_fix(session, result)
+            if fix is not None:
+                session.pending_fix = fix
+                session.stage = ST_FIX
+                return
+        session.stage = ST_LLM
+
+    def _build_fix(self, session: TaskSession, result: str) -> str | None:
+        """解析 check 的 `[FAIL] DIR/LINE` 行（其次 spec）→ 生成修复命令（末尾附 ./check）。"""
+        cmds: list[str] = []
+        for path, mode in _FAIL_DIR.findall(result or ""):
+            cmds.append(f'mkdir -p "{path}" && chmod {mode} "{path}"')
+        for file, line, val in _FAIL_LINE.findall(result or ""):
+            val = val.strip().strip("`").replace("/", "\\/")
+            cmds.append(f"sed -i '{line}s/.*/{val}/' \"{file}\"")
+        if not cmds:
+            # 回退：从 spec 提取目录权限 + 第 N 行内容
+            spec = session.explore_output or ""
+            for path, mode in _SPEC_DIR.findall(spec):
+                cmds.append(f'mkdir -p "{path}" && chmod {mode} "{path}"')
+            conf = self._spec_conf_file(spec)
+            for line, val in _SPEC_LINE.findall(spec):
+                if conf:
+                    val = val.strip().strip("`").replace("/", "\\/")
+                    cmds.append(f"sed -i '{line}s/.*/{val}/' \"{conf}\"")
+        if not cmds:
+            return None
+        body = " ; ".join(cmds)
+        return f'cd "{session.task_dir or "."}" && {body} ; ./check 2>&1'
+
+    @staticmethod
+    def _spec_conf_file(spec: str) -> str | None:
+        m = re.search(r"配置文件\s+(\S+\.conf)", spec or "")
+        return m.group(1) if m else None
+
     def _on_api_probe(self, session: TaskSession, result: str) -> None:
-        """API 探测结果 → 事实行喂给 LLM（认证/参数已确定，LLM 只需组答案）。"""
+        """API 探测结果：有 `__ANSWER` → 直接提交（零 LLM）；否则事实喂 LLM 组装。"""
         session.explore_output = (session.explore_output + "\n=== API 探测事实 ===\n"
                                   + (result or "")[:3000])[:EXPLORE_LIMIT]
+        if self._try_answer_submit(session, result):
+            return
         session.stage = ST_LLM
 
     def _answer_suspect(self, answer: Any) -> bool:

@@ -25,6 +25,39 @@ def wall_hp_threshold(day: int) -> int:
     """墙修复/插队动态阈值（D3，外部策略）：max(100, (day+1)×100)，随天数递增。"""
     return max(100, (day + 1) * 100)
 
+
+# 墙环分级（任务2）：0=正面(迎敌侧) > 1=拐角 > 2=侧面（用户指定升级顺序）
+WALL_FRONT = 0
+WALL_CORNER = 1
+WALL_SIDE = 2
+_RING_LO, _RING_HI = -2, 3
+
+
+def wall_rank(pos, anchor, front: str | None) -> int:
+    """按墙环位置分级：正面(迎敌侧) → 拐角 → 侧面。
+
+    front = 开口侧（背向敌人）；敌人方向 = front 的反向。以基地锚点 (xmin,ymin) 为原点，
+    墙环偏移 dx,dy ∈ [-2,3]。正面 = 敌人方向的极值列/行；拐角 = 正面两端；
+    其余（开口两侧的翼排） = 侧面。
+    """
+    dx = pos.x - anchor[0]
+    dy = pos.y - anchor[1]
+    if front == "W":
+        prim, sec, pext = dx, dy, _RING_HI
+    elif front == "E":
+        prim, sec, pext = dx, dy, _RING_LO
+    elif front == "N":
+        prim, sec, pext = dy, dx, _RING_LO
+    else:  # S / None
+        prim, sec, pext = dy, dx, _RING_HI
+    at_prim = prim == pext
+    at_sec = sec in (_RING_LO, _RING_HI)
+    if at_prim and at_sec:
+        return WALL_CORNER
+    if at_prim:
+        return WALL_FRONT
+    return WALL_SIDE
+
 VOUCHER = {
     ("weapon", 1): ("WeaponUpgradeVoucher1", 100),
     ("weapon", 2): ("WeaponUpgradeVoucher2", 150),
@@ -57,9 +90,11 @@ class UpgradePlanner:
     FRONT = 离控制点 CP 最远的一侧（迎敌面）。
     """
 
-    def plan(self, turn: Turn, cp=None, registry=None) -> list[UpgradeMission]:
+    def plan(self, turn: Turn, cp=None, registry=None, front: str | None = None) -> list[UpgradeMission]:
         missions: list[UpgradeMission] = []
         budget = turn.gold - RESERVE_GOLD
+        station0 = turn.station()
+        anchor = (station0.pos.x, station0.pos.y - 1) if station0 is not None else None
 
         def add(voucher, cost, target, kind, priority):
             nonlocal budget
@@ -100,21 +135,25 @@ class UpgradePlanner:
             ordered = front_first(all_walls)
             front_walls = set(id(w) for w in ordered[: max(1, len(ordered) // 2)])
 
+        def rank(w):
+            return wall_rank(w.pos, anchor, front) if anchor is not None else 0
+
         def front_order(walls):
-            """正面优先；补建墙再优先（前夜被攻破 → 需尽快恢复等级）。"""
+            """升级顺序（任务2）：正面 → 拐角 → 侧面；同级补建墙优先、低血优先。"""
             return sorted(
                 walls,
                 key=lambda w: (
+                    rank(w),
                     0 if w.pos in rebuilt_pos else 1,
+                    ratio(w),
                     -dist_cp(w), w.pos.x, w.pos.y,
                 ),
             )
 
         # 0. 【插队 D3】墙血低于动态阈值 max(100,(day+1)×100) → 优先修复/升级（可插武器队）
         #    仅升 L1→L2（防跳级）；回满血后自然退出。
-        crit = sorted(
-            (w for w in all_walls if w.level == 1 and w.health < wall_hp_threshold(turn.day_index)),
-            key=lambda w: (w.health, -dist_cp(w)),
+        crit = front_order(
+            [w for w in all_walls if w.level == 1 and w.health < wall_hp_threshold(turn.day_index)]
         )
         for wall in crit:
             v, c = voucher_for("wall", 1)
@@ -126,18 +165,17 @@ class UpgradePlanner:
                 add(v, c, w.pos, "weapon", 10)
         # 2. 受损墙 → 升级回血。武器未到 L2 时仅修临界受损(ratio<0.3)，其余攒钱升武器
         repair_line = WALL_DAMAGE_RATIO if not weapons_need_l2 else CRITICAL_WALL_RATIO
-        damaged = sorted(
-            (w for w in all_walls if w.level == 1 and ratio(w) < repair_line),
-            key=lambda w: (ratio(w), -dist_cp(w)),
+        damaged = front_order(
+            [w for w in all_walls if w.level == 1 and ratio(w) < repair_line]
         )
         for wall in damaged:
             v, c = voucher_for("wall", 1)
             add(v, c, wall.pos, "wall", 20)
-        # 3. FRONT 方向健康墙 L1→L2 —— 仅当武器已全部 L2；且**只升最小量**（正面+侧面转角，≤6 块），
-        #    之后优先把武器升到 L3（问题3：不能还没升满武器就铺满所有墙）
+        # 3. 墙 L2（任务2 顺序：正面→拐角→侧面）—— 仅当武器已全部 L2；
+        #    先升最小量 WALL_MIN_L2（≈正面4+拐角2），之后优先把武器升到 L3。
         if not weapons_need_l2:
             n = 0
-            for wall in front_order([w for w in all_walls if w.level == 1 and id(w) in front_walls]):
+            for wall in front_order([w for w in all_walls if w.level == 1]):
                 if n >= WALL_MIN_L2:
                     break
                 v, c = voucher_for("wall", 1)

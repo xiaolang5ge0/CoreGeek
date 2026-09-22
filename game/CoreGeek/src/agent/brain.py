@@ -667,7 +667,7 @@ class Brain:
             if fsm.upgrade and hasattr(fsm.upgrade[0], "dump")
         }
         for mission in self.upgrades.plan(
-            turn, cp=layout.control_point, registry=self.wall_registry
+            turn, cp=layout.control_point, registry=self.wall_registry, front=self.front
         ):
             if mission.kind not in ("wall", "stock"):
                 continue  # 武器/基地升级不派给工人

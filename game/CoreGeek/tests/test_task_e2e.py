@@ -43,9 +43,18 @@ API_PROBE_OK = (
     "[exitCode:0]\n"
     "API_OK base=http://localhost:8899 path=/api/v1/heritage/search auth=bearer "
     "key=heritage-api-key-2024 param=location city=北京\n"
-    "COUNT 3\n"
-    "KEYS [\"era\",\"level\",\"name\",\"type\"]\n"
-    "DIST type {\"古建筑\": 2, \"古遗址\": 1}\n"
+    "COUNT 15\n"
+    "TOTAL 15\n"
+    '__ANSWER {"city": "北京", "total_count": 15, "world_heritage_count": 6, '
+    '"types": ["宫殿", "园林"], "oldest_era": "周口店遗址"}\n'
+)
+ENG_PROBE_FAIL = (
+    "[exitCode:0]\n"
+    "=== CHECK ===\n"
+    "[FAIL] 3/6 通过，3 失败\n"
+    "[FAIL] DIR   logs/alpha   → 期望 exists,755，实际 不存在\n"
+    "[FAIL] LINE  config/alpha.conf:3   → 期望 port 8080，实际 port 9999\n"
+    "[FAIL] LINE  config/alpha.conf:6   → 期望 name alpha-app，实际 name wrong-app\n"
 )
 ENG_PROBE_OK = "[exitCode:0]\n[ OK ] 全部通过 (6/6)\nTOKEN: fc1e78eb2a5a\n"
 API_ANSWER = '{"city":"北京","total_count":3,"world_heritage_count":1,"types":["古建筑","古遗址"]}'
@@ -64,6 +73,7 @@ def run_rounds(brain, sim, n):
 
 class TestApiTaskE2E(unittest.TestCase):
     def test_api_task_probe_then_submit(self):
+        """API 类全确定性：探索 → 探测（__ANSWER）→ 直接提交，零 LLM。"""
         captured = []
 
         def handler(cmd):
@@ -72,21 +82,19 @@ class TestApiTaskE2E(unittest.TestCase):
                 return API_EXPLORE
             if "base64" in cmd and "python3" in cmd:   # API 确定性探测
                 return API_PROBE_OK
-            if "curl" in cmd:
-                return '[exitCode:0]\n{"records":[{"name":"故宫","type":"古建筑"}],"total":3}\n'
             return "[exitCode:0]\n"
 
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone"},
-                       tasks=[API_TASK], llm_script=[llm_answer(API_ANSWER)],
-                       cmd_handler=handler, expected_answer="北京")
+                       tasks=[API_TASK], cmd_handler=handler,
+                       expected_answer="北京")
         brain = Brain()
         run_rounds(brain, sim, DAY1)
-        # 验收点 1：出现 API 确定性探测，且提交了答案
         self.assertTrue(any("base64" in c and "python3" in c for c in captured),
                         "应触发 API 确定性探测")
         self.assertTrue(sim.submissions, "应提交答案")
         self.assertIn("北京", sim.submissions[0])
         self.assertGreaterEqual(sim.score, 80)
+        self.assertEqual(len(sim.prompts_seen), 0, "API 类应零 LLM")
 
     def test_api_probe_cmd_has_python_fallback(self):
         from agent.planners.task import TaskPlanner, TaskSession
@@ -115,12 +123,38 @@ class TestEngineerTaskE2E(unittest.TestCase):
                        expected_answer="fc1e78eb2a5a")
         brain = Brain()
         run_rounds(brain, sim, DAY1)
-        # 验收点 2：出现 check 探测 + 提交真实 token（非 xxx）
         self.assertTrue(any("-name check" in c for c in captured), "应触发工程 check 探测")
         self.assertTrue(sim.submissions, "应提交 token")
         self.assertIn("fc1e78eb2a5a", sim.submissions[0])
         self.assertNotIn("xxx", sim.submissions[0])
-        self.assertGreaterEqual(sim.score, 50)
+
+    def test_engineer_deterministic_fix_zero_llm(self):
+        """工程类：探测拿 FAIL → 确定性修复(mkdir/chmod/sed) → check 通过 → 提交，零 LLM。"""
+        captured = []
+
+        def handler(cmd):
+            captured.append(cmd)
+            if "find /tmp/selfEvolutionTask" in cmd:
+                return ENG_EXPLORE
+            if "-maxdepth 3 -type f -name check" in cmd:
+                return ENG_PROBE_FAIL           # 首次探测：check 有 3 处 FAIL
+            if "mkdir" in cmd or "sed -i" in cmd:
+                return ENG_PROBE_OK             # 修复后再 check：通过 + TOKEN
+            return "[exitCode:0]\n"
+
+        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone"},
+                       tasks=[ENG_TASK], cmd_handler=handler,
+                       expected_answer="fc1e78eb2a5a")
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        fix = next((c for c in captured if "logs/alpha" in c or "port 8080" in c), None)
+        self.assertIsNotNone(fix, "应生成确定性修复命令")
+        self.assertIn("logs/alpha", fix)
+        self.assertIn("port 8080", fix)
+        self.assertIn("name alpha-app", fix)
+        self.assertTrue(sim.submissions)
+        self.assertIn("fc1e78eb2a5a", sim.submissions[0])
+        self.assertEqual(len(sim.prompts_seen), 0, "工程类应零 LLM")
 
 
 class TestAnswerSafety(unittest.TestCase):

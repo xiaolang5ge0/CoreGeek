@@ -168,5 +168,40 @@ class TestD1RepairerNightHold(unittest.TestCase):
         self.assertTrue(held, "D3 夜修理工应就位 repair_post（守内圈）")
 
 
+class TestWallUpgradeOrder(unittest.TestCase):
+    def test_wall_rank_classification(self):
+        """任务2：正面 → 拐角 → 侧面 分级（front=开口侧，敌人=反向）。"""
+        from agent.planners.upgrade import WALL_CORNER, WALL_FRONT, WALL_SIDE, wall_rank
+        # front=W（开口西，敌人东）：dx=3 为正面；dx=3 且 dy=±端点 为拐角；其余侧面
+        self.assertEqual(wall_rank(Pos(3, 0), (0, 0), "W"), WALL_FRONT)
+        self.assertEqual(wall_rank(Pos(3, -2), (0, 0), "W"), WALL_CORNER)
+        self.assertEqual(wall_rank(Pos(2, 0), (0, 0), "W"), WALL_SIDE)
+        # front=E：dx=-2 为正面
+        self.assertEqual(wall_rank(Pos(-2, 0), (0, 0), "E"), WALL_FRONT)
+        self.assertEqual(wall_rank(Pos(-2, 3), (0, 0), "E"), WALL_CORNER)
+
+    def test_upgrade_order_front_corner_side(self):
+        """墙 L1→L2 任务顺序：正面 → 拐角 → 侧面。"""
+        from agent.planners.upgrade import UpgradePlanner, wall_rank
+        sim = make_sim(gold=400)
+        for pos in [(9, 20), (10, 20), (9, 21)]:
+            add_weapon(sim, pos, level=2)
+        brain = Brain()
+        brain.decide(sim.payload())
+        front = brain.front
+        for cell in brain.layout.wall_cells:
+            add_wall(sim, (cell.x, cell.y), level=1, health=1000)
+        turn = Turn.load(sim.payload())
+        missions = UpgradePlanner().plan(turn, cp=brain.layout.control_point, front=front)
+        st = sim.role(10013)["pos"]
+        anchor = (st["x"], st["y"] - 1)
+        wall_order = [
+            wall_rank(m.target, anchor, front)
+            for m in missions if m.kind == "wall" and m.target is not None
+        ]
+        self.assertTrue(wall_order)
+        self.assertEqual(wall_order, sorted(wall_order), "墙升级应 正面→拐角→侧面（rank 递增）")
+
+
 if __name__ == "__main__":
     unittest.main()
