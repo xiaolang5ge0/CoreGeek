@@ -142,22 +142,21 @@ class WorkerFSM:
 
     # ================= 修理工 =================
     def _repairer(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        # 夜间
+        # 夜间优先：升级（=回血，省修复包）→ 抢修 → 无事才采矿
         if turn.is_night:
-            if getattr(ctx, "repair_triggered", False):
-                cmd = self._repair_cmd(turn, unit, ctx)
-                if cmd is not None:
-                    return cmd
-                # 无达标修复需求（<50%）或手上无券/修复包 → 不空蹲，落回采矿
-                return self._miner(turn, unit, ctx)
-            # 无威胁 → 可外出采矿
+            cmd = self._upgrade_flow(turn, unit, ctx, allow_use=True, allow_buy=False)
+            if cmd is not None:
+                return cmd
+            cmd = self._repair_cmd(turn, unit, ctx)
+            if cmd is not None:
+                return cmd
             return self._miner(turn, unit, ctx)
         # 白天
         if turn.day_index <= 2:
             # D1-D2 自由：采石 + 建墙
             return self._build_mine(turn, unit, ctx)
-        # D3+：买墙券/维修券 + 升级墙；距天黑 ≤ 路径+4 提前归位
-        cmd = self._upgrade_flow(turn, unit, ctx)
+        # D3+：白天只采购（升级券/修复包）+ 建补墙 + 采集；升级/修复留到夜间（最大化采集）
+        cmd = self._upgrade_flow(turn, unit, ctx, allow_use=False, allow_buy=True)
         if cmd is not None:
             return cmd
         if 0 < turn.rounds_until_night <= self._path_home_len(turn, unit, ctx) + REPAIR_MARGIN:
@@ -442,13 +441,21 @@ class WorkerFSM:
         return None
 
     # ---- 升级 ----
-    def _upgrade_flow(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+    def _upgrade_flow(
+        self, turn: Turn, unit: Unit, ctx, *, allow_use: bool = True, allow_buy: bool = True
+    ) -> dict[str, Any] | None:
+        """执行已分配的升级/备货任务。
+
+        白天：allow_use=False, allow_buy=True → 只采购（不占用白天采集）。
+        夜间：allow_use=True, allow_buy=False → 只使用（升级=回血，省修复包）。
+        """
         if self.upgrade is None:
             return None
-        self.state = STATE_UPGRADE
-        return self._upgrade_cmd(turn, unit, ctx)
+        return self._upgrade_cmd(turn, unit, ctx, allow_use=allow_use, allow_buy=allow_buy)
 
-    def _upgrade_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+    def _upgrade_cmd(
+        self, turn: Turn, unit: Unit, ctx, *, allow_use: bool = True, allow_buy: bool = True
+    ) -> dict[str, Any] | None:
         target, kind = self.upgrade[0], self.upgrade[1]
         qty = self.upgrade[2] if len(self.upgrade) > 2 else 1
         if kind == "stock":
@@ -456,6 +463,8 @@ class WorkerFSM:
             if unit.backpack.count(item) >= qty:
                 self.upgrade = None
                 self.state = STATE_FREE
+                return None
+            if not allow_buy:
                 return None
             return self._buy_item(
                 turn, unit, ctx, item, self._stock_qty(turn, unit, item, qty)
@@ -475,12 +484,16 @@ class WorkerFSM:
             return None
         voucher, cost = entry
         if unit.backpack.count(voucher) < 1:
+            if not allow_buy:
+                return None  # 夜间不采购；留待白天买
             if turn.gold < cost:
                 self.upgrade = None
                 self.state = STATE_FREE
                 return None
             return self._buy_item(turn, unit, ctx, voucher,
                                   self._voucher_qty(turn, unit, voucher, cost, kind))
+        if not allow_use:
+            return None  # 白天只采购，升级/修复留到夜间
         if unit.pos != target and distance(unit.pos, target) <= 1:
             self.upgrade = None
             self.state = STATE_FREE
@@ -490,6 +503,7 @@ class WorkerFSM:
             self.upgrade = None
             self.state = STATE_FREE
             return None
+        self.state = STATE_UPGRADE
         return self._move(step, ctx)
 
     def _stock_qty(self, turn: Turn, unit: Unit, item: str, want: int = 1) -> int:

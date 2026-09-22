@@ -365,35 +365,8 @@ class Brain:
                 busy.add(worker.unit_id)
 
         # 升级任务分配（仅墙/备货 → 只派修理工；武器升级由炮手 pioneer 处理）
-        # 每回合最多派 1 个升级任务（始终留挖矿工在外采矿卖钱）
-        repair_worker = next(
-            (w for w in workers if self._worker_fsm(w).role == ROLE_REPAIRER), None
-        )
-        if repair_worker is not None:
-            rfsm = self._worker_fsm(repair_worker)
-            taken_targets = {
-                fsm.upgrade[0] for fsm in self.worker_fsms.values()
-                if fsm.upgrade and hasattr(fsm.upgrade[0], "dump")
-            }
-            if rfsm.upgrade is None and rfsm.build is None:
-                for mission in self.upgrades.plan(
-                    turn, cp=layout.control_point, registry=self.wall_registry
-                ):
-                    if mission.kind not in ("wall", "stock"):
-                        continue  # 武器/基地升级不派给工人
-                    if mission.target is not None and mission.target in taken_targets:
-                        continue
-                    if mission.kind == "stock":
-                        rfsm.upgrade = (mission.voucher, "stock", mission.qty)
-                    else:
-                        rfsm.upgrade = (mission.target, mission.kind)
-                        taken_targets.add(mission.target)
-                    ctx.trace.setdefault("upgrade_assigned", []).append(
-                        {"worker": repair_worker.unit_id, "kind": mission.kind,
-                         "target": mission.target.dump() if mission.target is not None else None,
-                         "voucher": mission.voucher}
-                    )
-                    break  # 每回合最多 1 个
+        # 白天只**采购**（allow_stock=True）；实际升级/修复留到夜间（用户：白天最大化采集）
+        self._assign_repair_mission(turn, layout, ctx, workers, allow_stock=True)
         # 炮手武器升级计划（由 fsm_pioneer 执行）
         ctx.gunner_upgrade = self._gunner_upgrade_plan(turn)
 
@@ -494,6 +467,11 @@ class Brain:
         else:
             ctx.walls_missing = False
             ctx.need_gold = False
+        # 夜间升级任务分配：修理工用白天采购的券升级/修复墙（升级=回血，省修复包）
+        self._assign_repair_mission(
+            turn, self.layout, ctx, sorted(turn.workers(), key=lambda w: w.unit_id),
+            allow_stock=False,
+        )
         pioneer = turn.pioneer()
         if pioneer is not None and self.layout is not None:
             cp = self.layout.control_point
@@ -600,6 +578,45 @@ class Brain:
         if repairer is None or home is None:
             return False
         return 0 < turn.rounds_until_night <= distance(repairer.pos, home) + REPAIR_MARGIN
+
+    def _assign_repair_mission(self, turn: Turn, layout, ctx, workers, *, allow_stock: bool) -> None:
+        """把 1 个墙升级/备货任务派给修理工（每回合最多 1 个）。
+
+        - allow_stock=True（白天）：可派 WallFixer 备货任务（白天采购）。
+        - allow_stock=False（夜间）：只派墙升级任务（夜间执行，升级=回血）。
+        """
+        repair_worker = next(
+            (w for w in workers if self._worker_fsm(w).role == ROLE_REPAIRER), None
+        )
+        if repair_worker is None or layout is None:
+            return
+        rfsm = self._worker_fsm(repair_worker)
+        if rfsm.upgrade is not None or rfsm.build is not None:
+            return
+        taken_targets = {
+            fsm.upgrade[0] for fsm in self.worker_fsms.values()
+            if fsm.upgrade and hasattr(fsm.upgrade[0], "dump")
+        }
+        for mission in self.upgrades.plan(
+            turn, cp=layout.control_point, registry=self.wall_registry
+        ):
+            if mission.kind not in ("wall", "stock"):
+                continue  # 武器/基地升级不派给工人
+            if mission.kind == "stock" and not allow_stock:
+                continue  # 夜间不采购
+            if mission.target is not None and mission.target in taken_targets:
+                continue
+            if mission.kind == "stock":
+                rfsm.upgrade = (mission.voucher, "stock", mission.qty)
+            else:
+                rfsm.upgrade = (mission.target, mission.kind)
+                taken_targets.add(mission.target)
+            ctx.trace.setdefault("upgrade_assigned", []).append(
+                {"worker": repair_worker.unit_id, "kind": mission.kind,
+                 "target": mission.target.dump() if mission.target is not None else None,
+                 "voucher": mission.voucher}
+            )
+            break  # 每回合最多 1 个
 
     def _llm_budget_ok(self, turn: Turn) -> bool:
         """每日 LLM 上限 3 次（跨天重置）。
