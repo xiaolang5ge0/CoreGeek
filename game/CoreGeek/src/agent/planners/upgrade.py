@@ -46,9 +46,9 @@ def voucher_for(kind: str, level: int) -> tuple[str, int] | None:
 
 
 class UpgradePlanner:
-    """升级优先序（实战复盘版）：
-    武器全 L2（多个二级>单个三级）→ 受损墙（FRONT 优先）→ 健康墙 L1→L2（FRONT 优先）
-    → 武器 L3 → 墙 L3（**所有墙到 L2 之前不许升 L3**）→ 基地（金富余）→ Day3+ 备货 WallFixer。
+    """升级优先序（用户指定）：武器优先整体推进，墙按受损/FRONT 插队。
+    武器L2 → 受损墙(FRONT优先) → FRONT方向墙L2 → 武器L3 → 墙全L2 → 墙L3 → 基地 → Day3+备货。
+    约束：墙 L3 门控——仍有 L1 墙时不升任何墙到 L3（杜绝相邻 L3/L1/L1）。
     FRONT = 离控制点 CP 最远的一侧（迎敌面）。
     """
 
@@ -66,52 +66,61 @@ class UpgradePlanner:
 
         from ..protocol import distance as _dist
 
+        def dist_cp(w):
+            return _dist(w.pos, cp) if cp is not None else 0
+
         def front_first(walls):
-            """迎敌面（离 CP 最远）优先；同距离按受损重的优先。"""
-            def key(w):
-                d = _dist(w.pos, cp) if cp is not None else 0
-                return (-d, w.health / WALL_MAX_HP[min(max(w.level, 1), 3) - 1])
-            return sorted(walls, key=key)
+            """迎敌面（离 CP 最远）优先。"""
+            return sorted(walls, key=lambda w: (-dist_cp(w), w.pos.x, w.pos.y))
+
+        def ratio(w):
+            return w.health / WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
 
         weapons = sorted(turn.weapons(), key=lambda w: (w.level, w.unit_id))
         all_walls = list(turn.walls())
         any_l1_wall = any(w.level == 1 for w in all_walls)
-        # 优先升级防御塔：仍有武器没到 L2 时，为武器券(100金)攒钱，暂停"健康墙"升级（受损墙修复除外）
-        weapons_need_l2 = any(w.level < 2 for w in weapons)
+        # FRONT 方向墙 = 离 CP 最远的一半（迎敌面）
+        ordered = front_first(all_walls)
+        front_walls = set(id(w) for w in ordered[: max(1, len(ordered) // 2)])
 
-        # 1. 武器全部 L2（最高优先，金币向它倾斜）
+        # 1. 武器全部 L2（最高优先）
         for w in weapons:
             if w.level == 1:
                 v, c = voucher_for("weapon", 1)
                 add(v, c, w.pos, "weapon", 10)
-        # 2. 受损墙（升级=回血，生存刚需）FRONT 优先
-        #    武器未到 L2 时为武器券攒钱：仅修临界受损墙（ratio<0.3，生存兜底），轻度受损暂缓
-        wall_repair_ratio = WALL_DAMAGE_RATIO if not weapons_need_l2 else CRITICAL_WALL_RATIO
-        for wall in front_first([w for w in all_walls if 1 <= w.level <= 2]):
-            if wall.health / WALL_MAX_HP[wall.level - 1] < wall_repair_ratio:
-                v, c = voucher_for("wall", wall.level)
-                add(v, c, wall.pos, "wall", 20)
-        # 3. 健康墙 L1→L2（廉价大收益）FRONT 优先——**仅在所有武器到 L2 后**（否则金币留给武器）
-        if not weapons_need_l2:
-            for wall in front_first([w for w in all_walls if w.level == 1]):
-                v, c = voucher_for("wall", 1)
-                add(v, c, wall.pos, "wall", 25)
+        # 2. 受损 L1 墙 → 升 L2（升级=回血：修复+推进，且不会造成 L3 邻 L1）
+        #    受损 L2/L3 墙交夜间修墙岗用 WallFixer 修补（避免过早升 L3 出现 3/1/1 相邻）
+        damaged_l1 = sorted(
+            (w for w in all_walls if w.level == 1 and ratio(w) < WALL_DAMAGE_RATIO),
+            key=lambda w: (ratio(w), -dist_cp(w)),
+        )
+        for wall in damaged_l1:
+            v, c = voucher_for("wall", 1)
+            add(v, c, wall.pos, "wall", 20)
+        # 3. FRONT 方向健康墙 L1→L2（迎敌面先加固）
+        for wall in front_first([w for w in all_walls if w.level == 1 and id(w) in front_walls]):
+            v, c = voucher_for("wall", 1)
+            add(v, c, wall.pos, "wall", 25)
         # 4. 武器 L3
         for w in weapons:
             if w.level == 2:
                 v, c = voucher_for("weapon", 2)
                 add(v, c, w.pos, "weapon", 30)
-        # 5. 墙 L3 —— 门控：仍有 L1 墙时不升任何墙到 L3（先把正面都拉到 L2）
+        # 5. 墙全 L2（剩余非 FRONT 墙）
+        for wall in front_first([w for w in all_walls if w.level == 1]):
+            v, c = voucher_for("wall", 1)
+            add(v, c, wall.pos, "wall", 35)
+        # 6. 墙 L3 —— 门控：仍有 L1 墙时不升 L3（杜绝相邻 L3/L1/L1）
         if not any_l1_wall:
             for wall in front_first([w for w in all_walls if w.level == 2]):
                 v, c = voucher_for("wall", 2)
-                add(v, c, wall.pos, "wall", 35)
-        # 6. 基地：金币富余时
+                add(v, c, wall.pos, "wall", 40)
+        # 7. 基地：金币富余时
         station = turn.station()
         if station is not None and 1 <= station.level <= 2 and turn.gold >= RICH_GOLD:
             v, c = voucher_for("station", station.level)
-            add(v, c, station.pos, "station", 40)
-        # 7. Day3+（BOSS 夜）备货 WallFixer：任何工人背包没有且金够
+            add(v, c, station.pos, "station", 45)
+        # 8. Day3+（BOSS 夜）备货 WallFixer
         if turn.day_index >= 3 and turn.gold >= RESERVE_GOLD + 60:
             has_fixer = any(
                 "WallFixer" in u.backpack
@@ -119,5 +128,5 @@ class UpgradePlanner:
                 if u.kind in ("worker", "pioneer")
             )
             if not has_fixer:
-                missions.append(UpgradeMission("WallFixer", 10, None, "stock", 45))
+                missions.append(UpgradeMission("WallFixer", 10, None, "stock", 50))
         return sorted(missions, key=lambda m: m.priority)

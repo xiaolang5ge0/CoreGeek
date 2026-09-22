@@ -100,24 +100,38 @@ class TestBigWaveNight1(unittest.TestCase):
 
 
 class TestWorkerRecall(unittest.TestCase):
-    def test_recall_on_critical(self):
-        """CRITICAL 夜：工人进入 CRITICAL_DEFENSE 并回撤到基地邻域。"""
+    def test_recall_only_when_robot_close(self):
+        """新语义（事实：机器人主攻基地、顺路才杀工人）：仅机器人贴近工人(≤3)才召回，
+        远处打基地的兵潮不召回工人（避免过度召回震荡）。"""
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
         brain = Brain()
         run_rounds(brain, sim, DAY1)
+        # 6 BOSS 在远处（距工人 >3）打基地 → 工人不应被召回
         for i in range(6):
-            sim.spawn_robot(15 + i % 3, 22 + i // 3, "bossRobot", hp=800, rid=30100 + i)
-        history = run_rounds(brain, sim, 10)
-        states = set()
-        for _, trace in history:
-            for info in trace.get("workers", {}).values():
-                if info.get("state") == "CRITICAL_DEFENSE":
-                    states.add("CRITICAL_DEFENSE")
-        self.assertIn("CRITICAL_DEFENSE", states)
-        # 工人已回撤到基地附近
-        for rid in (W1, W2):
-            pos = sim.role(rid)["pos"]
-            self.assertLessEqual(distance(Pos(pos["x"], pos["y"]), Pos(10, 23)), 6)
+            sim.spawn_robot(16 + i % 3, 22 + i // 3, "bossRobot", hp=800, rid=30100 + i)
+        response, trace = brain.decide(sim.payload())
+        states = {info.get("state") for info in (trace.get("workers") or {}).values()}
+        self.assertNotIn("CRITICAL_DEFENSE", states, "远处兵潮不应召回工人")
+
+    def test_recall_when_robot_adjacent(self):
+        """机器人贴到工人 ≤3 格 → 该工人进入 CRITICAL_DEFENSE 召回。"""
+        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
+        sim.add_mine((8, 20), "copper", remaining=30)
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        run_rounds(brain, sim, 5)  # 进入夜间，工人在外采矿
+        miner = sim.role(W2)
+        mx, my = miner["pos"]["x"], miner["pos"]["y"]
+        sim.spawn_robot(mx + 1, my, "middleRobot", hp=60, rid=30201)  # 贴脸
+        recalled = False
+        for _ in range(4):
+            response, trace = brain.decide(sim.payload())
+            info = (trace.get("workers") or {}).get(str(W2)) or {}
+            if info.get("state") == "CRITICAL_DEFENSE":
+                recalled = True
+            sim.apply(response)
+            sim.advance()
+        self.assertTrue(recalled, "机器人贴脸时工人应被召回")
 
 
 class TestEvade(unittest.TestCase):

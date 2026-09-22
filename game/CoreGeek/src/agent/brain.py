@@ -35,11 +35,12 @@ from .protocol import (
 from .rules import LegalityGuard
 from .threat import SAFE, ThreatEstimator
 
-NIGHT_SAFE_DIST = 10        # 夜间矿/小贩安全半径（机器人距离）
-SPAWN_AVOID_DIST = 8        # 历史出生点走廊避让半径
-WORKER_DANGER_DIST = 8      # 工人召回半径
+NIGHT_SAFE_DIST = 5         # 夜间矿/小贩安全半径（机器人主攻基地不绕路杀工人，阈值取小）
+SPAWN_AVOID_DIST = 4        # 历史出生点走廊避让半径
+WORKER_DANGER_DIST = 3      # 工人召回半径（≈机器人攻击射程；仅贴脸才召回，避免过度召回震荡）
 BUILD_TRAVEL_BUFFER = 6     # 建墙预留回程缓冲（预留回合 = 待建墙数 + 缓冲）
 DUSK_AVOID_WINDOW = 12      # 白天临近入夜此回合数内，提前避开出生走廊矿/小贩
+COST_PER_WALL_BASE = 2      # 每墙基础回合（采集1+建造1）
 DAY1_RUSH_DEADLINE = 50     # Day1 双工人建墙冲刺截止回合（预留收尾）
 DAY1_WALL_TARGET = 12       # Day1 目标墙数
 PIONEER_FLEE_DIST = 1       # 机器人贴到 CP 才撤离（过早撤离=整夜哑火，实战权衡）
@@ -233,16 +234,16 @@ class Brain:
         ctx.walls_missing = bool(walls_missing)
         ctx.need_gold = bool(turrets_missing) and turn.gold < WEAPON_BUILD_COST
 
-        # 岗位：Day1——1 号工人专职石料+建墙，2 号工人全力经济（挖矿卖钱供升级）；
-        # 仅当"墙按当前进度来不及在入夜前建完"时，2 号工人才临时转石料帮建（可调度）。
+        # 岗位：Day1 必须建满 14 墙环（不能有缺口）。实测单工人 70 回合只能建 ~12 墙，
+        # 故 Day1 双工人齐采石+建墙直到墙环完成（share_mines 共享石矿，assigned/reserved 防冲突）；
+        # 墙建完后 walls_missing 为空 → 双工人自动转经济。超过截止回合则仅 1 号收尾、2 号转经济。
         walls_left = len(walls_missing)
-        stone_finishable = walls_left <= max(0, turn.rounds_until_night - BUILD_TRAVEL_BUFFER)
+        stone_mines = turn.mines("stone")
         day1_rush = (
             turn.day_index == 1
             and walls_missing
-            and not stone_finishable        # 来不及才双开
             and turn.round_in_day < DAY1_RUSH_DEADLINE
-            and bool(turn.mines("stone"))
+            and bool(stone_mines)
         )
         ctx.share_mines = day1_rush
         for index, worker in enumerate(workers):

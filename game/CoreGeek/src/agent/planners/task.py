@@ -189,9 +189,17 @@ class TaskSession:
     param_fixes: int = 0
     tried_params: set = field(default_factory=set)
     timeout_rounds: int = 0  # 由 brain 从 PlayerTask.timeoutRounds 注入
+    error_log: list = field(default_factory=list)  # 累积去重的错误信息（送 LLM 推理识别）
 
     def reset(self) -> None:
         self.__init__()
+
+    def add_error(self, msg: str) -> None:
+        msg = (msg or "").strip()[:200]
+        if msg and msg not in self.error_log:
+            self.error_log.append(msg)
+            if len(self.error_log) > 8:
+                self.error_log.pop(0)
 
 
 @dataclass
@@ -318,8 +326,19 @@ class TaskPlanner:
             session.cmd_fails = 0
         else:
             session.cmd_fails += 1
+            # 累积错误信息送 LLM 推理识别（用户要求#3）
+            m = re.search(r"\[exitCode:(-?\d+)\]\s*(.{0,160})", result, re.S)
+            session.add_error(f"exit{m.group(1) if m else '?'}: {(m.group(2) if m else result)[:160]}")
         if "[FAIL]" in result:
             session.soft_fails += 1
+        # 提取服务端语义错误（认证/参数）入 error_log，供 LLM 兜底识别
+        for em in re.finditer(
+            r"(Authentication failed[^\"]{0,80}|Missing required parameter[^\"]{0,40}"
+            r"|Missing 'Authorization'[^\"]{0,60}|Expected format[^\"]{0,60}"
+            r"|No such file[^\"]{0,40}|not found[^\"]{0,40})",
+            result,
+        ):
+            session.add_error(em.group(1).strip())
         token = re.search(r"TOKEN[:\s]+([A-Za-z0-9_\-]{4,64})", result)
         if token and session.best_answer is None:
             session.best_answer = {"token": token.group(1)}
@@ -487,6 +506,8 @@ class TaskPlanner:
     # ---- LLM 循环 ----
     def _llm_prompt(self, turn: Turn, session: TaskSession, out: PlannerOutput, *, refine: bool) -> None:
         evidence = "\n".join(f"$ {c}\n{r}" for c, r in session.evidence[-6:])[:4000]
+        # 累积错误清单（用户要求#3：把错误信息都送给 LLM 推理识别）
+        errors = "\n".join(f"- {e}" for e in session.error_log[-8:])
         if refine:
             out.prompt = (
                 REFINE_PROMPT.replace("{task}", _clip(session.task_text, 1500))
@@ -499,6 +520,8 @@ class TaskPlanner:
             sop = ""
             if self.api_facts:
                 sop = "已知 API 经验：" + json.dumps(self.api_facts, ensure_ascii=False) + "\n"
+            if errors:
+                sop += "已遇到的错误（请据此推理修正，勿重复同样错误）：\n" + errors + "\n"
             out.prompt = (
                 LLM_PROMPT.replace("{task}", _clip(session.task_text, 1500))
                 .replace("{desc}", _clip(session.task_desc, 2000))
