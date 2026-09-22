@@ -36,11 +36,15 @@ from .rules import LegalityGuard
 from .threat import SAFE, ThreatEstimator
 
 NIGHT_SAFE_DIST = 5         # 夜间矿/小贩安全半径（机器人主攻基地不绕路杀工人，阈值取小）
-SPAWN_AVOID_DIST = 4        # 历史出生点走廊避让半径
-WORKER_DANGER_DIST = 3      # 工人召回半径（≈机器人攻击射程；仅贴脸才召回，避免过度召回震荡）
+SPAWN_AVOID_DIST = 4        # 历史出生点直接避让半径
+CORRIDOR_WIDTH = 5          # 机器人行军走廊半宽（出生点→我方基地连线附近）——B 方案安全矿定义
+CORRIDOR_BASE_MARGIN = 8    # 走廊只算距基地 > 此值 的部分（近基地处有墙/炮塔保护，不算危险）
+BASE_DANGER_DIST = 4        # 机器人逼近基地此距离内 → 基地有危险（工人撤内圈而非迎面避让）
+WORKER_DANGER_DIST = 3      # 工人规避半径（≈机器人攻击射程）
 BUILD_TRAVEL_BUFFER = 6     # 建墙预留回程缓冲（预留回合 = 待建墙数 + 缓冲）
 DUSK_AVOID_WINDOW = 12      # 白天临近入夜此回合数内，提前避开出生走廊矿/小贩
 COST_PER_WALL_BASE = 2      # 每墙基础回合（采集1+建造1）
+WALL_ROUNDS_PER = 5         # 单工人每墙约需回合（采集+建造+挪位）；用于判断是否需第二工人帮建
 DAY1_RUSH_DEADLINE = 50     # Day1 双工人建墙冲刺截止回合（预留收尾）
 DAY1_WALL_TARGET = 12       # Day1 目标墙数
 PIONEER_FLEE_DIST = 1       # 机器人贴到 CP 才撤离（过早撤离=整夜哑火，实战权衡）
@@ -77,14 +81,19 @@ class _Ctx:
     share_mines: bool = False
     robot_cells: tuple = ()
     spawn_cells: tuple = ()   # 历史夜间出生点（全局固定，首夜起累积）
+    corridor_cells: tuple = ()  # 出生点→我方基地 的行军走廊采样格（B 方案）
+    base_in_danger: bool = False  # 机器人逼近基地 → 工人撤内圈；否则直接避让
     dusk_avoid: bool = False  # 夜间 或 白天临近入夜 → 提前避开出生走廊
+    walls_left: int = 0       # 剩余待建墙数（石料岗按此收敛采集量，防过量）
 
     def mine_unsafe(self, pos) -> bool:
-        """位置处于机器人危险圈：当前活机器人或历史出生走廊 SPAWN_AVOID_DIST 内。"""
+        """位置处于危险区：当前活机器人 / 出生点 / 行军走廊（B 方案）。"""
         from .protocol import distance as _d
         if any(_d(pos, rc) <= NIGHT_SAFE_DIST for rc in self.robot_cells):
             return True
-        return any(_d(pos, sc) <= SPAWN_AVOID_DIST for sc in self.spawn_cells)
+        if any(_d(pos, sc) <= SPAWN_AVOID_DIST for sc in self.spawn_cells):
+            return True
+        return any(_d(pos, cc) <= CORRIDOR_WIDTH for cc in self.corridor_cells)
 
     def note(self, unit_id: int, msg: str) -> None:
         self.trace["workers"].setdefault(str(unit_id), {}).setdefault("notes", []).append(msg)
@@ -159,6 +168,8 @@ class Brain:
         ctx.spawn_cells = tuple(
             Pos(x, y) for entry in self.robot_spawn_log for (x, y) in entry["spawns"]
         )
+        # B 方案安全矿定义：出生点→我方基地的行军走廊
+        ctx.corridor_cells = self._corridor_cells(turn)
         # 白天临近入夜也提前避开出生走廊（用户要求：接近晚上时避开历史出生位置）
         ctx.dusk_avoid = turn.is_night or (0 < turn.rounds_until_night <= DUSK_AVOID_WINDOW)
         self._record_news(turn, trace)
@@ -234,26 +245,30 @@ class Brain:
         ctx.walls_missing = bool(walls_missing)
         ctx.need_gold = bool(turrets_missing) and turn.gold < WEAPON_BUILD_COST
 
-        # 岗位：Day1 必须建满 14 墙环（不能有缺口）。实测单工人 70 回合只能建 ~12 墙，
-        # 故 Day1 双工人齐采石+建墙直到墙环完成（share_mines 共享石矿，assigned/reserved 防冲突）；
-        # 墙建完后 walls_missing 为空 → 双工人自动转经济。超过截止回合则仅 1 号收尾、2 号转经济。
+        # 岗位：Day1——**1 号工人专职石料+建墙，2 号工人采矿+卖钱**（用户指定）。
+        # 仅当"按进度一个工人建不完 14 墙"时，2 号才临时帮建（用户：可两个一起建）。
         walls_left = len(walls_missing)
+        ctx.walls_left = walls_left
         stone_mines = turn.mines("stone")
-        day1_rush = (
+        # 单工人建墙产能：每墙约 WALL_ROUNDS_PER 回合（采集+建造+挪位）；不共享矿 → 各采各的更快
+        capacity = max(0.0, turn.rounds_until_night - BUILD_TRAVEL_BUFFER) / WALL_ROUNDS_PER
+        stone_finishable = walls_left <= capacity
+        day1_helper = (
             turn.day_index == 1
             and walls_missing
+            and not stone_finishable
             and turn.round_in_day < DAY1_RUSH_DEADLINE
             and bool(stone_mines)
         )
-        ctx.share_mines = day1_rush
+        ctx.share_mines = False  # 不共享矿：双工人各选各的（共享=互相抢同一矿，更慢）
         for index, worker in enumerate(workers):
             fsm = self._worker_fsm(worker)
             if index == 0 and walls_missing:
                 fsm.ore_role = ORE_STONE          # 1 号：石料岗（墙建完自动转经济）
-            elif day1_rush:
+            elif day1_helper:
                 fsm.ore_role = ORE_STONE          # 墙来不及：2 号临时帮建
             else:
-                fsm.ore_role = ORE_MONEY          # 2 号：经济岗（挖矿卖钱）
+                fsm.ore_role = ORE_MONEY          # 2 号：经济岗（采矿+卖钱）
 
         # 建造分配：武器优先于墙；已被认领的格/工人不重复分配
         assigned = {
@@ -284,12 +299,14 @@ class Brain:
             if fsm.build is not None:
                 continue
             stones = worker.backpack.count("stone")
-            # 批量建造：采够一批进入 build_phase 后连续建完该批（不采一个建一个）
-            if stones >= STONE_BATCH:
+            # 批量建造：采够一批进入 build_phase 后连续建完该批（不采一个建一个）；
+            # 批量随剩余墙数收敛（只剩 2 墙就采 2 块，不采满 6，防过量采集）
+            batch = min(STONE_BATCH, max(1, walls_left))
+            if stones >= batch:
                 fsm.build_phase = True
             if stones == 0:
                 fsm.build_phase = False
-            can_build = stones >= 1 and (fsm.build_phase or urgent)
+            can_build = stones >= 1 and (fsm.build_phase or urgent or stones >= walls_left)
             if not walls_missing or not can_build:
                 continue
             # 按布局优先级派单（正面迎敌侧优先），不按离工人远近
@@ -303,7 +320,8 @@ class Brain:
                 busy.add(worker.unit_id)
 
         # 升级任务分配：派给空闲工人（武器>墙>基地，券费已含预算保留；同一建筑不重复派单）
-        # 墙升级/备货优先派给"固定修墙工"（ID 最小），使其背包自持修复物料供夜间使用
+        # 墙升级/备货优先派给"固定修墙工"（ID 最小），使其背包自持修复物料供夜间使用。
+        # **每回合最多派 1 个升级任务**（用户：始终留一个工人在外挖矿卖钱，升级不占用两人）
         repair_id = min((w.unit_id for w in workers), default=None)
         free_workers = [w for w in workers if w.unit_id not in busy]
         if free_workers:
@@ -311,16 +329,25 @@ class Brain:
                 fsm.upgrade[0] for fsm in self.worker_fsms.values()
                 if fsm.upgrade and fsm.upgrade[0] is not None
             }
+            assigned_upgrade = any(
+                fsm.upgrade is not None for fsm in self.worker_fsms.values()
+            )
             for mission in self.upgrades.plan(turn, cp=layout.control_point):
+                if assigned_upgrade:
+                    break  # 已有工人在做升级 → 其余工人继续挖矿
                 if mission.target is not None and mission.target in taken_targets:
                     continue
                 candidates = [
                     w for w in free_workers
                     if self._worker_fsm(w).upgrade is None
-                    and self._worker_fsm(w).mine is None  # 升级不得打断采矿锁（#11）
+                    # 升级不得打断采矿锁（#11），但武器升级是最高优先 → 可抢占
+                    and (mission.kind == "weapon" or self._worker_fsm(w).mine is None)
                 ]
                 if not candidates:
                     break
+                if mission.kind == "weapon":
+                    # 抢占：释放该工人矿锁，优先升级武器
+                    self._worker_fsm(candidates[0]).mine = None
                 wall_side = mission.kind in ("wall", "stock")
                 if wall_side and any(w.unit_id == repair_id for w in candidates):
                     worker = next(w for w in candidates if w.unit_id == repair_id)
@@ -337,6 +364,7 @@ class Brain:
                 else:
                     self._worker_fsm(worker).upgrade = (mission.target, mission.kind)
                     taken_targets.add(mission.target)
+                assigned_upgrade = True  # 本回合已派 1 个升级任务 → 不再派第二个
                 ctx.trace.setdefault("upgrade_assigned", []).append(
                     {"worker": worker.unit_id, "kind": mission.kind,
                      "target": mission.target.dump() if mission.target is not None else None,
@@ -368,6 +396,11 @@ class Brain:
                     self.task_session.timeout_rounds = task.timeout_rounds
             # 任务求解：仅驻留任务点且任务进行中（submit 不覆盖走位指令）
             if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
+                # submit 拒收检测：上回合 pioneer 发的是 submitAnswer 且被判 False → 标记重发
+                last_cmd = self.last_commands.get(pioneer.unit_id)
+                if last_cmd and last_cmd.get("action") == "submitAnswer":
+                    if turn.last_action_results.get(pioneer.unit_id, True) is False:
+                        self.task_session.submit_rejected = True
                 out = self.task_planner.work(turn, self.task_session)
                 ctx.prompt = out.prompt
                 ctx.execute_cmd = out.execute_cmd
@@ -393,6 +426,15 @@ class Brain:
             w.unit_id for w in turn.workers()
             if any(distance(w.pos, rc) <= WORKER_DANGER_DIST for rc in ctx.robot_cells)
         }
+        # 基地是否有危险（机器人逼近基地）→ 决定工人是"撤内圈"还是"直接避让"
+        station = turn.station()
+        ctx.base_in_danger = bool(
+            station is not None and any(
+                distance(r.pos, cell) <= BASE_DANGER_DIST
+                for r in turn.robots if r.alive
+                for cell in station_footprint(station.pos)
+            )
+        )
         # 修墙岗仅限：Day4+（BOSS 夜）或 墙严重受损（≥3 面掉血 或 有墙<50%）。
         # Night1-3 相对轻松（事实：机器人主攻基地、顺路才杀工人）→ 不设岗，双工人全力采矿。
         hurt_walls = [
@@ -446,6 +488,30 @@ class Brain:
                 commands[worker.unit_id] = cmd
             ctx.reserve_from(cmd)
         self._maybe_medicine(turn, commands)
+
+    def _corridor_cells(self, turn: Turn) -> tuple:
+        """出生点质心 → 我方基地 的行军走廊采样格（B 方案安全矿定义）。
+
+        只取**远离我方基地**的部分（距基地 > CORRIDOR_BASE_MARGIN）——近基地处有墙/炮塔保护，
+        否则基地附近的矿会被误判为"走廊内"而无矿可采。
+        """
+        if not self.robot_spawn_log or turn.station() is None:
+            return ()
+        spawns = [Pos(x, y) for entry in self.robot_spawn_log for (x, y) in entry["spawns"]]
+        if not spawns:
+            return ()
+        sx = round(sum(p.x for p in spawns) / len(spawns))
+        sy = round(sum(p.y for p in spawns) / len(spawns))
+        base = turn.station().pos
+        bx, by = base.x, base.y
+        steps = max(abs(bx - sx), abs(by - sy))
+        cells = []
+        for i in range(steps + 1):
+            px = round(sx + (bx - sx) * i / max(1, steps))
+            py = round(sy + (by - sy) * i / max(1, steps))
+            if distance(Pos(px, py), base) > CORRIDOR_BASE_MARGIN:
+                cells.append(Pos(px, py))
+        return tuple(cells)
 
     def _record_news(self, turn: Turn, trace: dict[str, Any]) -> None:
         """每回合存档 worldNews（官方消息+民间传闻），供后续推理与召唤宝藏。"""

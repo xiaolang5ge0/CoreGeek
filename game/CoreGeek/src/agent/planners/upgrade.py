@@ -79,6 +79,8 @@ class UpgradePlanner:
         weapons = sorted(turn.weapons(), key=lambda w: (w.level, w.unit_id))
         all_walls = list(turn.walls())
         any_l1_wall = any(w.level == 1 for w in all_walls)
+        # 武器未到 L2 → 为武器券(100金)预留金币：暂停墙升级（仅修临界受损墙），避免廉价墙券吃光金币
+        weapons_need_l2 = any(w.level < 2 for w in weapons)
         # FRONT 方向墙 = 离 CP 最远的一半（迎敌面）
         ordered = front_first(all_walls)
         front_walls = set(id(w) for w in ordered[: max(1, len(ordered) // 2)])
@@ -88,28 +90,30 @@ class UpgradePlanner:
             if w.level == 1:
                 v, c = voucher_for("weapon", 1)
                 add(v, c, w.pos, "weapon", 10)
-        # 2. 受损 L1 墙 → 升 L2（升级=回血：修复+推进，且不会造成 L3 邻 L1）
-        #    受损 L2/L3 墙交夜间修墙岗用 WallFixer 修补（避免过早升 L3 出现 3/1/1 相邻）
-        damaged_l1 = sorted(
-            (w for w in all_walls if w.level == 1 and ratio(w) < WALL_DAMAGE_RATIO),
+        # 2. 受损墙 → 升级回血。武器未到 L2 时仅修临界受损(ratio<0.3)，其余攒钱升武器
+        repair_line = WALL_DAMAGE_RATIO if not weapons_need_l2 else CRITICAL_WALL_RATIO
+        damaged = sorted(
+            (w for w in all_walls if w.level == 1 and ratio(w) < repair_line),
             key=lambda w: (ratio(w), -dist_cp(w)),
         )
-        for wall in damaged_l1:
+        for wall in damaged:
             v, c = voucher_for("wall", 1)
             add(v, c, wall.pos, "wall", 20)
-        # 3. FRONT 方向健康墙 L1→L2（迎敌面先加固）
-        for wall in front_first([w for w in all_walls if w.level == 1 and id(w) in front_walls]):
-            v, c = voucher_for("wall", 1)
-            add(v, c, wall.pos, "wall", 25)
+        # 3. FRONT 方向健康墙 L1→L2 —— 仅当武器已全部 L2（否则金币留给武器）
+        if not weapons_need_l2:
+            for wall in front_first([w for w in all_walls if w.level == 1 and id(w) in front_walls]):
+                v, c = voucher_for("wall", 1)
+                add(v, c, wall.pos, "wall", 25)
         # 4. 武器 L3
         for w in weapons:
             if w.level == 2:
                 v, c = voucher_for("weapon", 2)
                 add(v, c, w.pos, "weapon", 30)
-        # 5. 墙全 L2（剩余非 FRONT 墙）
-        for wall in front_first([w for w in all_walls if w.level == 1]):
-            v, c = voucher_for("wall", 1)
-            add(v, c, wall.pos, "wall", 35)
+        # 5. 墙全 L2（剩余非 FRONT 墙）—— 同样仅在武器已全部 L2 后
+        if not weapons_need_l2:
+            for wall in front_first([w for w in all_walls if w.level == 1]):
+                v, c = voucher_for("wall", 1)
+                add(v, c, wall.pos, "wall", 35)
         # 6. 墙 L3 —— 门控：仍有 L1 墙时不升 L3（杜绝相邻 L3/L1/L1）
         if not any_l1_wall:
             for wall in front_first([w for w in all_walls if w.level == 2]):

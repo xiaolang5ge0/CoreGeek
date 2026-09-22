@@ -51,7 +51,8 @@ DUSK_URGENT_ROUNDS = 12
 SELL_NEAR_VENDOR_DIST = 3   # 小贩近在咫尺
 SELL_NEAR_MIN_VALUE = 8     # 顺路最低货值（金）
 SELL_RICH_MIN_VALUE = 25    # 值得专程跑一趟的货值
-SELL_RICH_MAX_DIST = 15     # 专程跑的最大距离
+SELL_RICH_MAX_DIST = 20     # 专程跑的最大距离
+SELL_FULL_RATIO = 0.6       # 背包达容量此比例 → 立即去卖（不限距离，防溢出浪费采集）
 
 STUCK_LIMIT = 5             # 连续移动意图但位置未变的上限
 STUCK_COLLECT_LIMIT = 3     # 连续 collect 但背包不涨 → 矿已空/封矿，解锁拉黑
@@ -120,17 +121,25 @@ class WorkerFSM:
             elif nearest >= WORKER_DANGER_DIST + 2:
                 self._evading = False
             if self._evading:
-                cell = getattr(ctx, "safe_anchor", None) or ctx.recall_cell(self.unit_id)
-                if cell is not None and unit.pos != cell:
-                    self.mine = None
-                    self.build = None
-                    self.sell_vendor = None
+                self.mine = None
+                self.build = None
+                self.sell_vendor = None
+                if getattr(ctx, "base_in_danger", False):
+                    # 基地有危险 → 撤向内圈（协助防守/避险）
+                    cell = getattr(ctx, "safe_anchor", None) or ctx.recall_cell(self.unit_id)
+                    if cell is not None and unit.pos != cell:
+                        self.state = STATE_CRITICAL
+                        step = next_step(turn, unit, cell, ctx.reserved)
+                        if step is not None:
+                            return self._move(step, ctx)
                     self.state = STATE_CRITICAL
-                    step = next_step(turn, unit, cell, ctx.reserved)
-                    if step is not None:
-                        return self._move(step, ctx)
-                self.state = STATE_CRITICAL
-                return None  # 危险未解除，暂避内圈
+                    return None
+                # 基地安全 → 直接避让（远离机器人，而非撤向基地：兵潮方向就是基地方向，迎面会撞上）
+                self.state = STATE_EVADE
+                step = self._flee_step(turn, unit, ctx)
+                if step is not None:
+                    return self._move(step, ctx)
+                return None
         # 0c. 夜间修墙岗：有墙需修且持有物料 → 就地修复；否则落到采矿逻辑（不空蹲）
         if is_repair:
             cmd = self._repair_cmd(turn, unit, ctx)
@@ -147,10 +156,13 @@ class WorkerFSM:
         if self.upgrade is not None and turn.is_day:
             self.state = STATE_UPGRADE
             return self._upgrade_cmd(turn, unit, ctx)
-        # 2. 背包满 → 卖矿（解除矿锁，卖完重选，可能回到同一矿）
-        if unit.backpack_full:
+        # 2. 背包满（或达 60% 批量阈值）→ 卖矿（解除矿锁，卖完重选，可能回到同一矿）
+        batch_full = bool(
+            unit.capacity and len(unit.backpack) >= SELL_FULL_RATIO * unit.capacity
+        )
+        if unit.backpack_full or batch_full:
             if self.mine is not None:
-                ctx.note(self.unit_id, "release_lock_backpack_full")
+                ctx.note(self.unit_id, "release_lock_batch_full")
                 self.mine = None
             return self._sell_chain(turn, unit, ctx, mandatory=True)
         # 3. 采矿锁（SELL 不得抢占 —— 采完再走）
@@ -302,6 +314,27 @@ class WorkerFSM:
         # 无修复需求/无物料 → 返回 None，落回采矿逻辑（不空蹲内圈）
         return None
 
+    # ---- 直接避让（基地安全时）----
+    def _flee_step(self, turn: Turn, unit: Unit, ctx) -> Pos | None:
+        """远离兵潮：选能最大化"与最近机器人距离"的相邻格；不能拉开距离则原地不动。"""
+        robots = [
+            r.pos for r in turn.robots
+            if r.alive and r.target_team in ("", turn.team_type)
+        ]
+        if not robots:
+            return None
+        blocked = turn.blocked(unit)
+        cur_gap = min(distance(unit.pos, rp) for rp in robots)
+        best: Pos | None = None
+        best_gap = cur_gap
+        for nb in unit.pos.neighbours():
+            if not turn.land(nb) or nb in blocked or nb in ctx.reserved:
+                continue
+            gap = min(distance(nb, rp) for rp in robots)
+            if gap > best_gap:
+                best, best_gap = nb, gap
+        return best
+
     # ---- 采矿 ----
     def _mine_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
         # 锁定矿进入机器人危险圈/出生走廊（夜间或临近入夜）→ 放弃
@@ -310,10 +343,16 @@ class WorkerFSM:
             self.mine = None
             self.state = STATE_FREE
             return None
-        # 锁定矿距我方基地超出近矿半径 → 释放（实战：跑远侧矿区被兵潮顺路打死）
+        # 锁定矿位于敌方侧/超近矿半径 → 释放（实战：跑对方矿区被兵潮顺路打死）
         station = turn.station()
         if station is not None and distance(station.pos, self.mine) > MAX_MINE_DIST:
             ctx.note(self.unit_id, "mine_too_far_release")
+            self.mine = None
+            self.state = STATE_FREE
+            return None
+        # 经济岗锁定了石矿（低价值）→ 释放改采铜/铁（实战：切 money 后仍采石到背包溢出）
+        if self.ore_role == ORE_MONEY and turn.zones.get(self.mine) == "stone":
+            ctx.note(self.unit_id, "money_role_release_stone")
             self.mine = None
             self.state = STATE_FREE
             return None
@@ -341,6 +380,7 @@ class WorkerFSM:
         enemy_station = next((u for u in turn.enemy if u.kind == "station"), None)
         # 两遍：先在我方基地 MAX_MINE_DIST 内的矿中选；没有才放宽（避免舍近求远深入对方侧）
         valid: list[tuple[Pos, str, int, int]] = []
+        stone_fallback: list[tuple[Pos, str, int, int]] = []
         for pos in turn.mines():
             if pos in other_locks:
                 continue
@@ -351,10 +391,14 @@ class WorkerFSM:
             kind = turn.zones.get(pos)
             if self.ore_role == ORE_STONE and kind != "stone":
                 continue
-            if self.ore_role == ORE_MONEY and kind == "stone" and ctx.walls_missing:
-                continue
             our_dist = distance(station.pos, pos) if station is not None else distance(unit.pos, pos)
-            valid.append((pos, kind, distance(unit.pos, pos), our_dist))
+            entry = (pos, kind, distance(unit.pos, pos), our_dist)
+            if self.ore_role == ORE_MONEY and kind == "stone":
+                stone_fallback.append(entry)  # 经济岗：石矿仅当无铜/铁时兜底（低价值）
+            else:
+                valid.append(entry)
+        if not valid:
+            valid = stone_fallback  # 无铜/铁 → 才退而采石
         if not valid:
             return None
         near = [m for m in valid if m[3] <= MAX_MINE_DIST]
@@ -439,6 +483,9 @@ class WorkerFSM:
             return False
         if ctx.need_gold:
             return True  # 急用金（重建武器等）
+        # 背包快满 → 立即去卖（不限距离；实战：从不卖货致背包溢出、金币停滞）
+        if unit.capacity and len(unit.backpack) >= SELL_FULL_RATIO * unit.capacity:
+            return True
         dist = distance(unit.pos, vendor)
         if dist <= SELL_NEAR_VENDOR_DIST and value >= SELL_NEAR_MIN_VALUE:
             return True  # 顺路

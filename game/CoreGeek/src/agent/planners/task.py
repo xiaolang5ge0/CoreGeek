@@ -162,6 +162,13 @@ REFINE_PROMPT = (
 MAX_LLM_LOOPS = 4       # 振荡降级阈值
 MAX_CMD_FAILS = 4       # 连续命令失败上限
 EVIDENCE_LIMIT = 30000
+SUBMIT_RETRY_CAP = 2    # submitAnswer 被拒后的重发预算（参考实现：拒收常为瞬时性，重发可挽回）
+TOKEN_HINT = re.compile(r"\bTOKEN\s*[:：]?\s*([0-9a-fA-F]{8,})")  # token 类任务直提（hex≥8）
+REFUSAL_HINT = re.compile(
+    r"(无法(直接)?(作答|回答|获取|读取|完成)|cannot (answer|determine)|unable to|"
+    r"no such file or directory|not found|permission denied|command not found|"
+    r"无法确定|信息不足|缺少(必要)?信息)"
+)
 
 
 @dataclass
@@ -190,6 +197,8 @@ class TaskSession:
     tried_params: set = field(default_factory=set)
     timeout_rounds: int = 0  # 由 brain 从 PlayerTask.timeoutRounds 注入
     error_log: list = field(default_factory=list)  # 累积去重的错误信息（送 LLM 推理识别）
+    submit_retries: int = 0        # submitAnswer 已重发次数
+    submit_rejected: bool = False  # 上回合 submit 被判拒（由 brain 注入）
 
     def reset(self) -> None:
         self.__init__()
@@ -225,6 +234,35 @@ def _extract_json(text: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _quotes_open(cmd: str) -> bool:
+    """命令末尾是否停在未闭合的引号里（shell 引号状态机，参考实现同款）。
+    正确处理 `'` 在双引号内、`"` 在单引号内都是字面量的语义。"""
+    in_sq = in_dq = False
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c == "\\" and not in_sq:  # 单引号内反斜杠不转义
+            i += 2
+            continue
+        if c == "'" and not in_dq:
+            in_sq = not in_sq
+        elif c == '"' and not in_sq:
+            in_dq = not in_dq
+        i += 1
+    return in_sq or in_dq
+
+
+def _is_answer_like(text: str) -> bool:
+    """这段文本能否当答案提交？（参考实现 _not_an_answer：所有出口统一过此闸）
+    拒绝：空壳/纯符号、shell 报错、散文拒答。"""
+    t = (text or "").strip()
+    if not t or not re.search(r"[0-9A-Za-z\u4e00-\u9fa5]", t):
+        return False  # 空壳/纯符号（如 "/"）不是答案
+    if REFUSAL_HINT.search(t):
+        return False  # shell 报错/拒答不是答案
+    return True
+
+
 class TaskPlanner:
     def __init__(self) -> None:
         self.api_facts: dict[str, str] = {}  # 跨任务复用：认证方式/参数名等
@@ -251,6 +289,12 @@ class TaskPlanner:
         if any(code == 2 for code, _ in turn.errors):
             session.need_refine = True
             session.submitted = False
+        # submit 被判拒 → 清 submitted 允许重发（参考实现：拒收常瞬时性，重发可挽回；限 2 次）
+        if session.submit_rejected:
+            session.submit_rejected = False
+            if session.submit_retries < SUBMIT_RETRY_CAP:
+                session.submit_retries += 1
+                session.submitted = False
 
         # 2. LLM 刚给的命令优先下发
         if session.pending_llm_cmd is not None:
@@ -350,8 +394,11 @@ class TaskPlanner:
             result,
         ):
             session.add_error(em.group(1).strip())
-        token = re.search(r"TOKEN[:\s]+([A-Za-z0-9_\-]{4,64})", result)
-        if token and session.best_answer is None:
+        # token 直提：任务提到 token，或 ./check 通过（[ OK ]/全部通过）且输出含 hex TOKEN
+        token = TOKEN_HINT.search(result)
+        check_passed = bool(re.search(r"(\[ OK \]|全部通过|all .{0,10}pass)", result, re.I))
+        task_mentions_token = "token" in (session.task_text or "").lower()
+        if token and (task_mentions_token or check_passed) and session.best_answer is None:
             session.best_answer = {"token": token.group(1)}
         for line in result.splitlines():
             if line.startswith("__API "):
@@ -551,18 +598,16 @@ class TaskPlanner:
         ans_idx = text.find("ANSWER:")
         cmd_idx = text.find("CMD:")
         if ans_idx >= 0 and (cmd_idx < 0 or ans_idx < cmd_idx):
-            answer = _extract_json(text[ans_idx + 7:])
-            if answer:
-                session.best_answer = answer
-                return
+            body = text[ans_idx + 7:].strip()
+            if _is_answer_like(body):
+                answer = _extract_json(body)
+                if answer:
+                    session.best_answer = answer
+                    return
         if cmd_idx >= 0:
             cmd = text[cmd_idx + 4:].strip().splitlines()[0].strip()
-            # 命令消毒：多行/引号不配对会在沙盒 bash 里爆炸（实战 EOF 报错），直接拒收
-            if (
-                cmd
-                and cmd.count('"') % 2 == 0
-                and not cmd.startswith("cat ")
-            ):
+            # 命令消毒：引号不闭合（状态机判定）会在沙盒 bash 里爆炸（参考实现 _quotes_open）
+            if cmd and not _quotes_open(cmd) and not cmd.startswith("cat "):
                 session.pending_llm_cmd = cmd
                 return
         # 兜底：LLM 直接给了 JSON 对象 → 当作答案

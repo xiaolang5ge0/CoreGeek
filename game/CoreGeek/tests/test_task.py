@@ -109,18 +109,18 @@ class TestWsTask(unittest.TestCase):
                     "__CHECK__\n[FAIL] DIR data — 期望 exists,755"
                 )
             if "mkdir" in cmd:
-                return "[exitCode:0]\n[PASS] all checks passed\nTOKEN: abc123token"
+                return "[exitCode:0]\n[PASS] all checks passed\nTOKEN: fc1e78eb2a5a"
             return "[exitCode:0]\n"
 
         sim = make_sim(
             tasks=[TASK],
             cmd_handler=ws_handler,
-            expected_answer="abc123token",
+            expected_answer="fc1e78eb2a5a",
         )
         brain = Brain()
         run_rounds(brain, sim, DAY1)
         self.assertGreaterEqual(sim.score, 50)
-        self.assertTrue(any("abc123token" in s for s in sim.submissions))
+        self.assertTrue(any("fc1e78eb2a5a" in s for s in sim.submissions))
         self.assertEqual(sim.prompts_seen, [])  # 确定性修复零 LLM
 
 

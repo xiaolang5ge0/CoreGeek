@@ -147,10 +147,10 @@ class TestWallRebuild(unittest.TestCase):
         destroyed = sim.walls()[:3]
         sim.roles = [r for r in sim.roles if r not in destroyed]
         self.assertEqual(len(sim.walls()), 11)
-        # 次日白天补矿重建
+        # 次日白天补矿重建（跑满夜+一整天 = 130 回合，确保有足够白天回合）
         sim.add_mine((6, 22), "stone", remaining=40)
         sim.add_mine((7, 26), "stone", remaining=40)
-        run_rounds(brain, sim, DAY1)
+        run_rounds(brain, sim, 130)
         self.assertGreaterEqual(len(sim.walls()), 13, "被拆的墙应重建")
 
 

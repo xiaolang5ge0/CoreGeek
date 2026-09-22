@@ -113,8 +113,8 @@ class TestWorkerRecall(unittest.TestCase):
         states = {info.get("state") for info in (trace.get("workers") or {}).values()}
         self.assertNotIn("CRITICAL_DEFENSE", states, "远处兵潮不应召回工人")
 
-    def test_recall_when_robot_adjacent(self):
-        """机器人贴到工人 ≤3 格 → 该工人进入 CRITICAL_DEFENSE 召回。"""
+    def test_evade_when_robot_adjacent(self):
+        """机器人贴到工人 ≤3 格且基地安全 → 工人直接避让（远离机器人，而非撤向基地方向）。"""
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
         sim.add_mine((8, 20), "copper", remaining=30)
         brain = Brain()
@@ -122,16 +122,23 @@ class TestWorkerRecall(unittest.TestCase):
         run_rounds(brain, sim, 5)  # 进入夜间，工人在外采矿
         miner = sim.role(W2)
         mx, my = miner["pos"]["x"], miner["pos"]["y"]
-        sim.spawn_robot(mx + 1, my, "middleRobot", hp=60, rid=30201)  # 贴脸
-        recalled = False
+        robot = (mx + 1, my)
+        sim.spawn_robot(robot[0], robot[1], "middleRobot", hp=60, rid=30201)  # 贴脸
+        evaded = False
         for _ in range(4):
             response, trace = brain.decide(sim.payload())
             info = (trace.get("workers") or {}).get(str(W2)) or {}
-            if info.get("state") == "CRITICAL_DEFENSE":
-                recalled = True
+            if info.get("state") in ("EVADE", "CRITICAL_DEFENSE"):
+                evaded = True
             sim.apply(response)
             sim.advance()
-        self.assertTrue(recalled, "机器人贴脸时工人应被召回")
+        self.assertTrue(evaded, "机器人贴脸时工人应规避")
+        # 且应与机器人拉开距离（远离而非迎面）
+        pos = sim.role(W2)["pos"]
+        self.assertGreaterEqual(
+            max(abs(pos["x"] - robot[0]), abs(pos["y"] - robot[1])), 2,
+            "工人应远离机器人（而非撤向基地方向与兵潮迎面）",
+        )
 
 
 class TestEvade(unittest.TestCase):
