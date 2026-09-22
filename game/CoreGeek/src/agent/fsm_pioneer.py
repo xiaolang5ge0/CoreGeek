@@ -45,6 +45,7 @@ class PioneerFSM:
         self.task_point: Pos | None = None
         self.accept_retries = 0
         self.failed_task_points: set = set()
+        self.last_task_type: str | None = None   # 上次接取的任务类型（用于交替）
         self.upgrade_target: tuple | None = None  # (weapon Pos, level)
 
     # ================= 夜间 =================
@@ -215,11 +216,18 @@ class PioneerFSM:
         return len(path) - 1 if path else distance(pioneer.pos, cp)
 
     def _choose_task_point(self, turn: Turn, pioneer: Unit) -> Pos | None:
+        """§12.7：两任务点交替（优先与上次不同类型）+ 最近可用点。"""
         cands = [
             t for t in turn.tasks
             if t.is_valid and t.cooldown_rounds == 0 and t.pos not in self.failed_task_points
         ]
         if not cands:
             return None
-        cands.sort(key=lambda t: (distance(pioneer.pos, t.pos), -t.score_reward))
-        return cands[0].pos
+        cands.sort(key=lambda t: (
+            t.task_type == self.last_task_type,     # 与上次同类型 → 排后
+            distance(pioneer.pos, t.pos),
+            -t.score_reward,
+        ))
+        chosen = cands[0]
+        self.last_task_type = chosen.task_type
+        return chosen.pos
