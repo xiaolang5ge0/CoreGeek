@@ -132,7 +132,7 @@
 | **正面墙防御死线** | **D3 入夜前正面+转角 ≥6 面 L2**；**D5 入夜前 ≥6 面 L3**；优先级 **8（高于武器升级 10）**；其余墙升级最低 | 用户 2026-09-23 | CONFIRMED |
 | **白天可升级墙** | 修理工白天也允许用券升级围墙（不闲置等晚上）；缺口补建优先于升级 | 用户 2026-09-23 | CONFIRMED |
 | **墙券限购 + 武器预留** | 墙券批量**上限 6**（只备正面+转角，`WALL_VOUCHER_BATCH`）；购买/预算环节在武器未 L2 时为武器券**预留 100 金**（`weapon_need_l2`，防一次买 13 张饿死炮手） | IKHYSK/IKHYTB | CONFIRMED |
-| **正面墙券/修复包备货** | D3+ 按正面墙等级备 ≥6 张对应升级券（L1→V1、L2→V2）；**D4+ WallFixer ≥5**；金币不足则不要求；武器+墙全满后不设上限 | 用户 2026-09-23 | CONFIRMED |
+| **正面墙券/修复包备货** | D3+ 按正面墙等级备 ≥6 张对应升级券（L1→V1、L2→V2）；**D4+ WallFixer ≥5（实际 `FRONT_STOCK_TARGET=6`）**；金币不足则不要求；武器+墙全满后不设上限 | 用户 2026-09-23 | CONFIRMED |
 | **LLM 循环/命令预算** | 按任务 `timeoutRounds` 动态：`budget = max(2, (timeout-4)//2)`（timeout15→5，timeout10→3），循环上限与命令预算同值；timeout 未知时用默认 8 | 用户：按 timeout 校准 | CONFIRMED |
 | **到点强制要答案** | 距任务超时 ≤ `FORCE_ANSWER_MARGIN=2` 回合（或循环/命令预算用尽）→ 发"**只准给 answer、不得再 cmd**"的强制 prompt；再不给答案才放弃 | 用户：到点强制提交 | CONFIRMED |
 | **答案判错重试** | 提交被判错（errorCode=2）→ **stage 拉回 LLM 重试**（此前停在 DONE 干等到超时，IKHYQC/IKHYQB 根因）；错误原因注入 prompt；重试回退 2 次循环余量 | issue IKHYQC/IKHYQB | CONFIRMED |

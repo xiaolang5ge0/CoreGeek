@@ -178,6 +178,14 @@
 | 同上 | 任务失败 | LLM 兜底解析脆弱（仅取首行）+ 到点放弃 | LLM 响应**全段搜索** CMD:/ANSWER:（兼容多行/前缀）；deadline-2 最后向 LLM 要最佳猜测答案 |
 | 同上 | 任务预算 | timeout 通常 10-15 回合 | 任务求解必须快（定位2+执行2+提交1），LLM 严格单行 CMD:/ANSWER: |
 | 同上 | 任务类型 | 工程修复类（ws_N/ + ./check）/ API 类（localhost http）/ 通用 | 确定性修复优先于 LLM：sed/mkdir 解析 + harvest 探测，零 LLM 可完成工程类 |
+| 2026-09-23 PK(IKHYHT) | 武器上限死锁 | 已有3武器但布局差1个"未对齐"炮位格 → 每回合派第4座被 `weapon_limit` 拒 → 修理工被占死、从不建墙（14石头闲置） | **武器达上限（3）时不得再派布局未对齐炮位格**；武器派单不得抢占在途建造任务 |
+| 2026-09-23 PK(IKHYNS) | 异常红线 | 基地+墙+武器全毁但仍有机器人 → `threat.evaluate` 的 `min(空序列)` 崩 → 每回合 fatal → 无指令、站桩 | `threat` 空防御圈返回 nearest=99；`brain.decide` 顶层 try/except 兜底 |
+| 2026-09-23 PK(IKHYSK) | 开拓者归位震荡 | 白天 TASK_TRAVEL↔RETURN_HOME 来回（A\* travel 抖动）→ 夜里没到 CP | 开拓者加**归位粘性**；炮手 DUSK_MARGIN=5 |
+| 2026-09-23 PK(IKHYTB) | 夜末工人无谓回防 | D6 夜间返程死线在夜末触发（机器人已清空仍回防），影响采集 | 返程死线**仅白天生效** |
+| 2026-09-23 PK(IKHYTB) | 墙券饿死炮手 | r275 修理工一次买 13 张墙券（按全部14墙数）→ 炮手无钱升火箭 | 墙券批量**上限6**（只备正面+转角）+ 购买环节**为武器券预留100金** |
+| 2026-09-23 PK(IKHYTB) | 世界新闻关键词 | 确定性解析可用（iron 塌方→D3 售卖窗口）；但 `复工` 误匹配 `修复工程` 清空预测 | 修 RESUME 关键词（去裸"复工/复产"）+ 扩充停工词 + 时间词；预测入 trace |
+| 2026-09-23 PK(IKHYQC/QB) | 任务答案判错 | 提交被判错(errorCode=2)后停在 DONE 干等到超时（不重试） | errorCode=2 → stage 拉回 LLM 重试；错误注入 prompt |
+| 2026-09-23 PK(IKHYQC/QB/YSK/TB) | 无硬编码时 API 横跳 | HARDCODED_ASSIST=False 时 LLM 在 认证×参数 横跳到超时 | SOP 按类型固化 + 跨任务 api_facts 注入 prompt；PK 稳分需开硬编码 |
 
 ### 实战必查清单（首场 PK 逐项核对）
 
