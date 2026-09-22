@@ -244,5 +244,29 @@ class TestStockMissionNoCrash(unittest.TestCase):
         self.assertFalse(crashed, "stock 任务不得让 decide/trace 崩溃")
 
 
+class TestWorldNewsCapture(unittest.TestCase):
+    def test_news_saved_each_change(self):
+        """用户要求#6：每回合存档 worldNews（去重），供后续宝藏推断。"""
+        import json as _json
+        base = _json.loads(_bootstrap.FIXTURE.read_text(encoding="utf-8"))
+        brain = Brain()
+        # 第1回合：注入官方消息+民间传闻
+        base["worldNews"] = {"officialNews": "铁矿塌方明日停工", "folkLegends": "西部有石门，门需三钥"}
+        brain.decide(base)
+        self.assertEqual(len(brain.news_log), 1)
+        self.assertIn("铁矿塌方", brain.news_log[0]["official"])
+        self.assertIn("三钥", brain.news_log[0]["folk"])
+        # 第2回合：新闻不变 → 去重不重复存
+        base["roundNo"] = 2
+        brain.decide(base)
+        self.assertEqual(len(brain.news_log), 1)
+        # 第3回合：新闻变化 → 追加
+        base["roundNo"] = 3
+        base["worldNews"] = {"officialNews": "铜价上涨", "folkLegends": "圆圈里三道杠"}
+        brain.decide(base)
+        self.assertEqual(len(brain.news_log), 2)
+        self.assertIn("铜价上涨", brain.news_log[1]["official"])
+
+
 if __name__ == "__main__":
     unittest.main()
