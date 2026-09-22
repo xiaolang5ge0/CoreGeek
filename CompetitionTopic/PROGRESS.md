@@ -64,6 +64,18 @@
 | P5 | 任务求解器依赖赛事 LLM 质量；prompt 模板/探索命令序列为通用默认 | 任务通过率不确定 | 首场实战观察真实任务形态后迭代模板 |
 | P5 | Multi Submit 频率保守（提交→错误→修正循环） | 极端任务下可能超时 | 观察真实通过率结算后调频 |
 
+## 实战修复记录·第九轮（2026-09-22 issue#28–#32 复盘：二级文档未读 / LLM 抢主路径）
+
+> 复盘方法见 `LOG_ANALYSIS_PLAYBOOK.md`；一键脚本 `py game/CoreGeek/tools/analyze_issue_log.py --issue 28 29 30 31 32`。
+
+| 问题 | 根因（解密日志实锤） | 处理计划 |
+|---|---|---|
+| 5 局全 0 分，两任务皆失败 | 见下 | — |
+| 读任务书后不读其引用的二级文档 | `pt→正则取文档名→健壮 find+cat task_*.md` 已稳定，但未再取任务书引用的 `API_DOCS.md` / `spec.md` 并读取 | 解析任务书内容，提取其引用的文档名并读取（缺则 LLM 兜底） |
+| API 任务上来就 curl、横跳超时 | r15 起直接 curl，`Bearer`/`X-API-Key` × `city`/`location` 逐回合横跳，**从未同时拨对 `Bearer + location`**，15 回合超时 | 确定性优先：先按文档调用；纠错时变量组合要遍历（勿每次只改一个、另一个退回）；收敛即锁定 |
+| 401 被解析成“空数据”（假成功） | #32 r17 解析脚本把 401 错误体吞成 `{"total_count":0,…}`，误判为查到空结果 | 错误响应（非 2xx / `status:error`）禁止解析成 0/空；显式失败 |
+| 工程任务提交占位 token | 读完 `task_1_alpha.md` 后未读 `spec.md`、未跑 `check`，直接 `submitAnswer {"token":"xxx"}` → `键值比对不通过 $/token 值不符` | 工程类 SOP：读 spec → 修复 → 去 CRLF → 跑 check 取真实 TOKEN → 再提交；禁止占位/猜测答案 |
+
 ## 实战修复记录·第八轮（2026-09-22 issue#18/#19 复盘：自进化任务2未提交）
 
 > 复盘方法见 `LOG_ANALYSIS_PLAYBOOK.md`；一键脚本 `py game/CoreGeek/tools/analyze_issue_log.py --issue 18 19`。

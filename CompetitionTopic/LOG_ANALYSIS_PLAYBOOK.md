@@ -62,14 +62,16 @@ py game/CoreGeek/tools/analyze_issue_log.py --file logs/match_20260922_061319.js
 按回合还原后逐项核对：
 
 1. **接取**：`acceptTask` 是否成功、是否出现 `phaseTask`；FAIL 是否触发终身回避（防封号）。
-2. **定位**：LOCATE 是否找到 `task_*.md` 与 `API_DOCS.md`；是否误把 `phaseTask` 文本当参数值（见坑 4）。
-3. **分类**：工程修复类 vs API 类；是否走了确定性路径。
-4. **执行**：`executeCmd` 是否有效；工程类是否处理 CRLF（`/bin/sh^M`）；API 类是否命中正确的 URL/路径。
-5. **参数/认证纠错**：是否在 `city`/`location`、`Bearer`/`X-API-Key` 之间反复横跳；纠错是否收敛。
-6. **收割**：是否从响应中提取到答案字段（如 `total_count` / `world_heritage_count` / `oldest_era`）。
-7. **提交（最关键）**：拿到答案后是否出现 `submitAnswer`；**没有提交 = 任务失败**，即使答案已算出。
-8. **时限**：`timeoutRounds`（任务书为 15）内是否完成；超时后 `phaseTask` 清空、`isValid=false`。
-9. **LLM 用量**：任务期 LLM 不限次且不占每日额度，但应尽量确定性优先、LLM 仅兜底。
+2. **定位任务书**：从 `phaseTask` 正则提取文档名，用健壮命令（`find … -iname …` 而非固定路径）定位 `task_*.md`；是否误把 `phaseTask` 文本当参数值（见坑 4）。
+3. **读任务书**：是否真正拿到任务书内容（输出里应有 `=== TASK ===` / 原文片段）。
+4. **读二级文档（易漏）**：任务书里引用的 `API_DOCS.md` / `spec.md` 是否被**再提取文档名并读取**；只读任务书、不读它引用的文档 = 后面必然靠猜。
+5. **分类**：工程修复类 vs API 类；是否走了确定性路径。
+6. **确定性执行优先**：工程类是否读 `spec.md` → 修复 → 去 CRLF（`/bin/sh^M`）→ 跑 `check` 拿真实 TOKEN；API 类是否按文档一次性拨对认证×参数。
+7. **参数/认证纠错收敛**：是否在 `city`/`location`、`Bearer`/`X-API-Key` 之间反复横跳；**正确组合是否被尝试**（注意别每次只改一个变量、另一个退回旧值）；纠错是否收敛。
+8. **收割**：是否从响应中提取到答案字段（如 `total_count` / `world_heritage_count` / `oldest_era`）；**401/400 是否被误解析成“空数据/0”**（假成功，见坑 6）。
+9. **提交（最关键）**：拿到答案后是否出现 `submitAnswer`；提交的是**真实 token/答案**还是占位符（如 `{"token":"xxx"}`）；**没有提交 = 任务失败**，即使答案已算出。
+10. **时限**：`timeoutRounds`（任务书为 15）内是否完成；超时后 `phaseTask` 清空、`isValid=false`。
+11. **LLM 用量与兜底顺序**：任务期 LLM 不限次且不占每日额度，但**确定性优先、LLM 仅兜底**；重点看是否把 LLM 当主路径（逐回合生成 curl/命令）。
 
 ## 6. 案例结论（2026-09-22，issue #18 teamB / #19 teamA）
 
@@ -79,6 +81,15 @@ py game/CoreGeek/tools/analyze_issue_log.py --file logs/match_20260922_061319.js
 - 参数/认证纠错未生效：r26–r35 在 `city`/`location`、`Bearer`/`X-API-Key` 间横跳；teamA 额外浪费 r33–r34（又用回 `X-API-Key` 得空结果）。
 - 待办候选（择机进 `PROGRESS.md`）：① 收割后**强制提交**答案；② API 参数/认证纠错收敛策略；③ 禁止把 `phaseTask` 文本当参数值。
 
+### 2026-09-22 第二批（issue #28–#32，改任务逻辑后）
+
+- 5 局全部 **0 分**，两个任务都没过。
+- **进步**：`pt → 正则提取文档名 → 健壮命令读任务书` 已稳定（出现 `f=$(find … -iname "task_*.md" …)` + `=== TASK ===`）。
+- **新缺口**：读任务书后**没有读它引用的二级文档**（`API_DOCS.md` / `spec.md`），紧接着就 curl / 直接提交。
+- **API 类**：r15 起直接 curl，认证×参数逐回合横跳，**从未同时拨对 `Bearer + location`**，15 回合超时；#32 还把 401 解析成 `total_count:0`（假成功）。
+- **工程类**：读完任务书后**未读 spec、未跑 check**，直接 `submitAnswer {"token":"xxx"}` → `键值比对不通过 $/token 值不符`。
+- 待办候选：④ 任务书引用的二级文档必须读取；⑤ LLM 仅兜底、确定性优先；⑥ 错误响应禁止解析成空数据；⑦ 禁止提交占位 token。
+
 ## 7. 已知坑
 
 1. **中文乱码**：控制台 GBK 导致，写 UTF-8 文件再读即可。
@@ -86,3 +97,5 @@ py game/CoreGeek/tools/analyze_issue_log.py --file logs/match_20260922_061319.js
 3. **末条记录被截断**：issue 正文最后一条 `round_record` 的 base64 不完整，解密后 JSON 残缺；工具会标记 `[truncated]` 跳过，其余回合不受影响。
 4. **参数污染**：日志里出现 `location=请阅读`，说明把任务书文本误当城市名——分析时优先看这类“值来自 phaseTask”的异常。
 5. **只读分析**：分析脚本不得改动决策代码；结论先进本文档/PROGRESS，再走证据驱动变更。
+6. **假成功**：解析脚本把 401/400 错误体吞成 `total_count:0 / []`，日志上看起来“查到了但为空”，比直接报错更隐蔽——核对时务必把 `lcr` 原文与解析输出对照。
+7. **网络受限时的取数**：Python `urllib` 在本机可能 SSL 失败（`UNEXPECTED_EOF`），改用 `curl.exe`（走系统代理）拉取 issue 正文到本地 JSON，再用 `analyze_issue_log.py --file <json>` 分析。
