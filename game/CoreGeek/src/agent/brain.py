@@ -394,16 +394,8 @@ class Brain:
             # 新任务确认 → 重置求解会话（同文本任务重复接取也必须全新开始）
             if self.pioneer_fsm.state == STATE_TASK_WORK and prev_state != STATE_TASK_WORK:
                 self.task_session.reset()
-                tp = self.pioneer_fsm.task_point
-                task = next((t for t in turn.tasks if t.pos == tp), None)
-                if task is not None:
-                    self.task_session.timeout_rounds = task.timeout_rounds
             # 任务求解：仅驻留任务点且任务进行中（submit 不覆盖走位指令）
             if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
-                last_cmd = self.last_commands.get(pioneer.unit_id)
-                if last_cmd and last_cmd.get("action") == "submitAnswer":
-                    if turn.last_action_results.get(pioneer.unit_id, True) is False:
-                        self.task_session.submit_rejected = True
                 out = self.task_planner.work(turn, self.task_session)
                 # 每日 LLM 上限 3 次（超出则不发 prompt）
                 if out.prompt and self._llm_budget_ok(turn):
@@ -488,10 +480,6 @@ class Brain:
                 if self.pioneer_fsm.state == STATE_TASK_WORK and prev != STATE_TASK_WORK:
                     self.task_session.reset()
                 if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
-                    last_cmd = self.last_commands.get(pioneer.unit_id)
-                    if last_cmd and last_cmd.get("action") == "submitAnswer":
-                        if turn.last_action_results.get(pioneer.unit_id, True) is False:
-                            self.task_session.submit_rejected = True
                     out = self.task_planner.work(turn, self.task_session)
                     if out.prompt and self._llm_budget_ok(turn):
                         ctx.prompt = out.prompt

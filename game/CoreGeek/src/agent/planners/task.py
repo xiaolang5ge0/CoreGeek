@@ -1,214 +1,92 @@
-"""L3 TaskPlanner：自进化任务求解器 v2（参照《自进化策略.md》实战版重构）。
+"""L3 TaskPlanner：自进化任务（严格按 issue#21《自进化任务策略》重构）。
 
-核心原则（来自真实 PK 经验）：
-1. acceptTask FAIL 立即放弃不重试（FAIL 计 errorCode 4，5 次异常封号）——由 PioneerFSM 执行
-2. 确定性 LOCATE 优先于 LLM：find 任务文档 + cat 全部 .md（__FILE/__DIR/__DOC 标记）
-3. 任务分类处理：工程修复类（_ws 确定性修复）/ API 类（harvest 探测）/ 通用 LLM
-4. LLM 严格单行协议：CMD: <命令> 或 ANSWER: <答案>
-5. 防振荡（LLM 循环≥4 提交保底）、命令失败计数、Multi Submit
-6. 跨任务经验：persisted_api_facts（认证头/参数名）
+7 阶段 FSM：
+  FIND_FILES → READ_FILES → LLM_LOOP → WAIT_CMD_RESULT / WAIT_LLM → SUBMIT_ANSWER → COMPLETED
+
+要点：
+- 文件递归读取：从 phase_task 提取 .md 文件名 → find 定位 → cat 读取 → 若内容引用其他 .md → 继续查找
+- LLM 交互：每回合把 任务描述+文件内容+命令历史+SOP 组装成 prompt，要求 LLM 只返回 JSON
+      {"cmd": "", "answer": "", "isFinished": true|false}
+  循环：有 cmd → 沙盒执行 → 带结果回到 LLM；有 answer/isFinished → 提交；空 JSON → 重试（超 3 次强制结束）
+- 容错：连续 3 次非 JSON → 强制结束（不提交）；错误回复回传下次 prompt；JSON 解析容忍（先 loads 再正则提 {...}）
+- SOP 自进化：第一天完成前 2 个任务后提取 SOP；第二天起 prompt 附带匹配 SOP
 """
 from __future__ import annotations
 
-import base64
 import json
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..protocol import Turn, submit_answer_command
 
-# ---- 确定性命令模板 ----
-LOCATE_CMD = (
-    'f=$(ls task_*.md 2>/dev/null | head -1); '
-    '[ -z "$f" ] && f=$(find /tmp /home /workspace /root /data -maxdepth 5 -name "task_*.md" 2>/dev/null | head -1); '
-    'd=$(dirname "$f"); echo "__FILE:$f"; echo "__DIR:$d"; '
-    'for x in "$d"/*.md; do echo "__DOC:$x"; cat "$x"; done; echo "__END"'
-)
+# ---- 阶段 ----
+ST_FIND = "FIND_FILES"
+ST_READ = "READ_FILES"
+ST_LLM = "LLM_LOOP"
+ST_WAIT_CMD = "WAIT_CMD_RESULT"
+ST_WAIT_LLM = "WAIT_LLM"
+ST_SUBMIT = "SUBMIT_ANSWER"
+ST_DONE = "COMPLETED"
 
-WS_PROBE_CMD = (
-    'cd "{dir}" && find . -maxdepth 2 | head -40; '
-    'echo "__SPEC__"; cat spec.md 2>/dev/null; echo "__CHECK__"; '
-    "sed -i 's/\\r$//' check 2>/dev/null; chmod +x check 2>/dev/null; ./check"
-)
+MAX_NON_JSON = 3       # 连续非 JSON 上限 → 强制结束
+MAX_LLM_LOOPS = 14     # LLM 循环上限（防死循环）
 
-# API 收割脚本 v2（探测 认证×路径×参数名×城市；400 错误信息作为事实输出）
-# 实战教训：服务端要 Authorization: Bearer + 参数名是 location 而非 city；
-# 中文城市名从任务原文（TASK_B64）与文档中提取候选，逐一实测。
-HARVEST_PY = r'''
-import base64, json, re, glob, urllib.request, urllib.error, urllib.parse
+_MD_NAME = re.compile(r"[A-Za-z0-9_\-/]+\.md")
+_JSON_BLOCK = re.compile(r"\{.*\}", re.S)
 
-TASK_TEXT = base64.b64decode("__TASK_B64__").decode("utf-8", "ignore")
-docs = " ".join(open(f, encoding="utf-8", errors="ignore").read() for f in glob.glob("**/*.md", recursive=True) + glob.glob("*.md"))
-m = re.search(r"(https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[A-Za-z0-9_\-/\.]*)", docs)
-base = m.group(1).rstrip("/") if m else ""
-paths = [p for p in dict.fromkeys(re.findall(r"(/[a-zA-Z0-9_\-/]{2,40})", docs)) if "{" not in p][:6]
-keys = re.findall(r"(?:api[-_]?key|token|secret|key)\s*[:=：]\s*[\"']?([A-Za-z0-9_\-]{6,40})", docs, re.I)
-STOP = "查询 今天 明日 天气 数据 接口 返回 任务 城市 所有 全部 相关 统计 列出 给出 需要 通过 调用 结果 数量 类型 名称 今日 本地 获取 搜索 帮我 请问".split()
-cities = []
-for src in (TASK_TEXT, docs):
-    cleaned = src
-    for w in STOP:
-        cleaned = cleaned.replace(w, " ")
-    for c in re.findall(r"[\u4e00-\u9fa5]{2,3}", cleaned):
-        if c not in cities:
-            cities.append(c)
-cities = cities[:6]
 
-def fetch(url, headers):
+def _extract_md_names(text: str) -> list[str]:
+    out = []
+    for m in _MD_NAME.findall(text or ""):
+        name = m.rsplit("/", 1)[-1]      # 只要文件名
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def _parse_llm_json(text: str) -> dict | None:
+    """JSON 解析容忍：先直接 loads，失败再用正则提 {...} 块。"""
+    t = (text or "").strip()
+    if not t:
+        return None
     try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as r:
-            return r.status, r.read().decode("utf-8", "ignore")
-    except urllib.error.HTTPError as e:
+        obj = json.loads(t)
+        return obj if isinstance(obj, dict) else None
+    except (json.JSONDecodeError, ValueError):
+        pass
+    for blk in _JSON_BLOCK.findall(t):
         try:
-            return e.code, e.read().decode("utf-8", "ignore")[:300]
-        except Exception:
-            return e.code, ""
-    except Exception:
-        return -1, ""
-
-def auths():
-    k = keys[0] if keys else "token"
-    yield "none", {}
-    yield "bearer", {"Authorization": "Bearer " + k}
-    yield "x-api-key", {"X-API-Key": k}
-
-hints = set()
-best = None
-for path in paths or ["/"]:
-    for auth_name, headers in auths():
-        for param in ("", "city", "location", "cityName", "q", "name"):
-            for city in ([""] if not param else cities or [""]):
-                url = base + path
-                if param:
-                    url += "?" + param + "=" + urllib.parse.quote(city)
-                status, text = fetch(url, headers)
-                if status in (400, 401, 403) and text:
-                    hm = re.search(r"(Missing required parameter[^\"]{0,60}|Authentication failed[^\"]{0,60}|Expected format[^\"]{0,60})", text)
-                    if hm:
-                        hints.add(hm.group(1)[:90])
-                if status == 200 and text.strip():
-                    recs, total = [], 0
-                    try:
-                        data = json.loads(text)
-                        if isinstance(data, dict):
-                            for v in data.values():
-                                if isinstance(v, list):
-                                    recs = v
-                                    break
-                            total = data.get("total") or data.get("total_count") or data.get("count") or len(recs)
-                        elif isinstance(data, list):
-                            recs, total = data, len(data)
-                    except Exception:
-                        continue
-                    if recs or (isinstance(total, int) and total > 0):
-                        print("__API status=OK base=%s path=%s auth=%s param=%s city=%s records=%d total=%s" % (base, path, auth_name, param, city, len(recs), total))
-                        if recs and isinstance(recs[0], dict):
-                            print("__API_KEYS %s" % json.dumps(sorted(recs[0].keys()), ensure_ascii=False))
-                        # 直接合成答案（零 LLM）：city + total_count + 类型分布 + 世界遗产计数
-                        ans = {}
-                        if city:
-                            ans["city"] = city
-                        try:
-                            ans["total_count"] = int(total) if total else len(recs)
-                        except Exception:
-                            ans["total_count"] = len(recs)
-                        if recs and isinstance(recs[0], dict):
-                            tk = next((k for k in recs[0] if str(k).lower() in ("type", "category", "类型", "level")), None)
-                            if tk:
-                                dist = {}
-                                for rr in recs:
-                                    tv = str(rr.get(tk, ""))
-                                    if tv:
-                                        dist[tv] = dist.get(tv, 0) + 1
-                                ans["types"] = dist
-                            wh = sum(1 for rr in recs if any(("世界" in str(v) or "遗产" in str(v)) for v in rr.values()))
-                            ans["world_heritage_count"] = wh
-                        print("__ANSWER %s" % json.dumps(ans, ensure_ascii=False))
-                        if recs:
-                            print("__ANSWER_CANDIDATE %s" % json.dumps(recs[:60], ensure_ascii=False))
-                        best = True
-                        break
-            if best: break
-        if best: break
-    if best: break
-for h in list(hints)[:4]:
-    print("__API_HINT %s" % h)
-if not best:
-    print("__API status=FAIL base=%s paths=%d keys=%d cities=%s" % (base, len(paths), len(keys), ",".join(cities)))
-'''
-
-# LLM prompt（严格单行协议）
-LLM_PROMPT = (
-    "你在生存塔防比赛中用沙盒完成探索任务，每回合只能给一条指令。\n"
-    "任务原文：\n{task}\n"
-    "已读取的任务文档：\n{desc}\n"
-    "沙盒证据（命令+输出）：\n{evidence}\n"
-    "{sop}"
-    "规则：只输出一行，二选一：\n"
-    "CMD: <单行shell命令>   （还需要探索时）\n"
-    "ANSWER: <JSON答案>     （能作答时，字段完整，不要多余文字）\n"
-    "禁止输出 cat 已读过的文档；命令不超过 300 字符；无把握就给最佳猜测 ANSWER。"
-)
-
-REFINE_PROMPT = (
-    "你在生存塔防比赛中完成探索任务。只输出一行：CMD: <命令> 或 ANSWER: <JSON答案>。\n"
-    "任务原文：\n{task}\n"
-    "上次提交被判错：{last_answer}\n错误反馈：{error}\n"
-    "沙盒证据：\n{evidence}\n"
-    "请修正后输出完整 ANSWER。"
-)
-
-MAX_LLM_LOOPS = 4       # 振荡降级阈值
-MAX_CMD_FAILS = 4       # 连续命令失败上限
-EVIDENCE_LIMIT = 30000
-SUBMIT_RETRY_CAP = 2    # submitAnswer 被拒后的重发预算（参考实现：拒收常为瞬时性，重发可挽回）
-TOKEN_HINT = re.compile(r"\bTOKEN\s*[:：]?\s*([0-9a-fA-F]{8,})")  # token 类任务直提（hex≥8）
-REFUSAL_HINT = re.compile(
-    r"(无法(直接)?(作答|回答|获取|读取|完成)|cannot (answer|determine)|unable to|"
-    r"no such file or directory|not found|permission denied|command not found|"
-    r"无法确定|信息不足|缺少(必要)?信息)"
-)
+            obj = json.loads(blk)
+            if isinstance(obj, dict):
+                return obj
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return None
 
 
 @dataclass
 class TaskSession:
-    """Task Memory：单任务会话全部上下文。"""
-
+    stage: str = ST_FIND
     task_text: str = ""
-    stage: str = "LOCATE"          # LOCATE / WS_PROBE / WS_FIX / API_HARVEST / LLM / SUBMITTED
-    task_dir: str = ""
-    task_desc: str = ""
-    task_kind: str = ""            # ws / api / llm
-    evidence: list = field(default_factory=list)   # [(cmd, result)]
+    task_key: str = ""                                   # SOP 匹配键
+    find_queue: list = field(default_factory=list)       # 待 find 的 .md 文件名
+    read_queue: list = field(default_factory=list)       # 待 cat 的 .md 文件名
+    files: dict = field(default_factory=dict)            # 文件名 → 内容
+    pending_find: str | None = None
+    pending_read: str | None = None
     pending_cmd: str | None = None
-    pending_llm_cmd: str | None = None
+    cmd_history: list = field(default_factory=list)      # [(cmd, result)]
     llm_pending: bool = False
-    best_answer: dict | None = None
+    last_llm_raw: str = ""
+    non_json: int = 0
+    llm_loops: int = 0
+    answer: Any = None
     submitted: bool = False
     need_refine: bool = False
-    llm_loops: int = 0
-    cmd_fails: int = 0
-    soft_fails: int = 0
-    ws_fix_count: int = 0
-    quiet_rounds: int = 0
-    auth_retried: bool = False
-    param_fixes: int = 0
-    tried_params: set = field(default_factory=set)
-    timeout_rounds: int = 0  # 由 brain 从 PlayerTask.timeoutRounds 注入
-    error_log: list = field(default_factory=list)  # 累积去重的错误信息（送 LLM 推理识别）
-    submit_retries: int = 0        # submitAnswer 已重发次数
-    submit_rejected: bool = False  # 上回合 submit 被判拒（由 brain 注入）
 
     def reset(self) -> None:
         self.__init__()
-
-    def add_error(self, msg: str) -> None:
-        msg = (msg or "").strip()[:200]
-        if msg and msg not in self.error_log:
-            self.error_log.append(msg)
-            if len(self.error_log) > 8:
-                self.error_log.pop(0)
 
 
 @dataclass
@@ -218,54 +96,10 @@ class PlannerOutput:
     submit: dict | None = None
 
 
-def _clip(text: str, n: int) -> str:
-    return (text or "")[:n]
-
-
-def _extract_json(text: str) -> dict | None:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        data = json.loads(text[start:end + 1])
-    except (json.JSONDecodeError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def _quotes_open(cmd: str) -> bool:
-    """命令末尾是否停在未闭合的引号里（shell 引号状态机，参考实现同款）。
-    正确处理 `'` 在双引号内、`"` 在单引号内都是字面量的语义。"""
-    in_sq = in_dq = False
-    i, n = 0, len(cmd)
-    while i < n:
-        c = cmd[i]
-        if c == "\\" and not in_sq:  # 单引号内反斜杠不转义
-            i += 2
-            continue
-        if c == "'" and not in_dq:
-            in_sq = not in_sq
-        elif c == '"' and not in_sq:
-            in_dq = not in_dq
-        i += 1
-    return in_sq or in_dq
-
-
-def _is_answer_like(text: str) -> bool:
-    """这段文本能否当答案提交？（参考实现 _not_an_answer：所有出口统一过此闸）
-    拒绝：空壳/纯符号、shell 报错、散文拒答。"""
-    t = (text or "").strip()
-    if not t or not re.search(r"[0-9A-Za-z\u4e00-\u9fa5]", t):
-        return False  # 空壳/纯符号（如 "/"）不是答案
-    if REFUSAL_HINT.search(t):
-        return False  # shell 报错/拒答不是答案
-    return True
-
-
 class TaskPlanner:
     def __init__(self) -> None:
-        self.api_facts: dict[str, str] = {}  # 跨任务复用：认证方式/参数名等
+        self.sop: dict[str, str] = {}       # task_key → SOP 文本（跨任务复用）
+        self.completed: int = 0             # 已完成任务数（用于第一天提取 SOP）
 
     # ---- 主入口 ----
     def work(self, turn: Turn, session: TaskSession) -> PlannerOutput:
@@ -273,361 +107,229 @@ class TaskPlanner:
         if not turn.phase_task:
             session.reset()
             return out
-        if turn.phase_task != session.task_text:  # 新任务 → 重置会话
+        if turn.phase_task != session.task_text:      # 新任务 → 重置
             session.reset()
             session.task_text = turn.phase_task
+            session.task_key = self._task_key(turn.phase_task)
+            session.find_queue = _extract_md_names(turn.phase_task)
+            session.stage = ST_FIND
 
         # 1. 回收异步结果
         if session.pending_cmd is not None:
             result = turn.last_cmd_result or ""
-            session.evidence.append((session.pending_cmd, _clip(result, 3000)))
+            session.cmd_history.append((session.pending_cmd, result))
             self._on_cmd_result(session, session.pending_cmd, result)
             session.pending_cmd = None
         if session.llm_pending:
             self._on_llm_result(session, turn.llm_resp or "")
             session.llm_pending = False
-        if any(code == 2 for code, _ in turn.errors):
+        if any(code == 2 for code, _ in turn.errors):   # 答案错 → 重新作答
             session.need_refine = True
             session.submitted = False
-        # submit 被判拒 → 清 submitted 允许重发（参考实现：拒收常瞬时性，重发可挽回；限 2 次）
-        if session.submit_rejected:
-            session.submit_rejected = False
-            if session.submit_retries < SUBMIT_RETRY_CAP:
-                session.submit_retries += 1
-                session.submitted = False
+            session.answer = None
 
-        # 2. LLM 刚给的命令优先下发
-        if session.pending_llm_cmd is not None:
-            cmd = session.pending_llm_cmd
-            session.pending_llm_cmd = None
-            out.execute_cmd = cmd
-            session.pending_cmd = cmd
+        # 2. 阶段推进
+        return self._advance(turn, session, out)
+
+    def _advance(self, turn: Turn, session: TaskSession, out: PlannerOutput) -> PlannerOutput:
+        # LLM 给的命令 → 下发沙盒执行
+        pend = getattr(session, "_pending_llm_cmd", None)
+        if pend:
+            session._pending_llm_cmd = None  # type: ignore[attr-defined]
+            out.execute_cmd = pend
+            session.pending_cmd = pend
+            session._pending_kind = "llm"  # type: ignore[attr-defined]
+            session.stage = ST_WAIT_CMD
             return out
-
-        # 3. 有可提交答案（TOKEN / LLM ANSWER / 振荡降级保底）
-        if session.best_answer and not session.submitted:
-            out.submit = self._submit(session)
-            return out
-
-        # 4. 认证/参数纠错：确定性重试优先于 LLM（实战：Bearer 头 + location 参数）
-        retry = self._auth_retry_cmd(session) or self._param_fix_cmd(session)
-        if retry is not None:
-            out.execute_cmd = retry
-            session.pending_cmd = retry
-            return out
-
-        # 4b. 超时预算：任务 timeout（实战=15 回合）逼近 → 最后一次向 LLM 要最佳猜测答案，否则停止浪费
-        if session.timeout_rounds > 0:
-            deadline = session.started_round + session.timeout_rounds
-            if turn.round_no >= deadline - 2:
-                if session.best_answer and not session.submitted:
-                    out.submit = self._submit(session)
-                elif not session.llm_pending and session.quiet_rounds >= 1:
-                    # 最后一搏：把已收集证据+错误喂给 LLM，要求直接给最佳猜测 ANSWER
-                    out.prompt = (
-                        "时间即将耗尽，必须立刻作答。只输出一行 ANSWER: <JSON答案>。\n"
-                        f"任务原文：{_clip(session.task_text, 800)}\n"
-                        f"沙盒证据：\n{_history(session)}\n"
-                        f"遇到的错误：{'; '.join(session.error_log[-4:])}\n"
-                        "即使信息不全，也请给出字段尽量完整的最佳猜测 JSON。"
-                    )
-                    session.llm_pending = True
-                    session.llm_loops += 1
-                return out
-
-        # 5. 阶段推进
-        session.quiet_rounds += 1
-        if session.stage == "LOCATE":
-            out.execute_cmd = LOCATE_CMD
-            session.pending_cmd = LOCATE_CMD
-        elif session.stage == "WS_PROBE":
-            cmd = WS_PROBE_CMD.replace("{dir}", session.task_dir or ".")
-            out.execute_cmd = cmd
-            session.pending_cmd = cmd
-        elif session.stage == "WS_FIX":
-            cmd = self._ws_fix_cmd(session)
-            if cmd is None:
-                session.stage = "LLM"
+        # 提交
+        if session.stage == ST_SUBMIT:
+            if session.answer is None:
+                session.stage = ST_LLM
             else:
-                out.execute_cmd = cmd
-                session.pending_cmd = cmd
-        elif session.stage == "API_HARVEST":
-            cmd = self._harvest_cmd(session)
-            out.execute_cmd = cmd
-            session.pending_cmd = cmd
-        elif session.stage == "LLM":
+                out.submit = submit_answer_command(
+                    session.answer if isinstance(session.answer, str)
+                    else json.dumps(session.answer, ensure_ascii=False)
+                )
+                session.submitted = True
+                session.stage = ST_DONE
+                self.completed += 1
+                self._maybe_extract_sop(session)
+                return out
+        if session.stage == ST_DONE:
+            return out
+        # 等待中
+        if session.stage in (ST_WAIT_CMD, ST_WAIT_LLM):
+            return out
+        # FIND_FILES
+        if session.stage == ST_FIND:
+            if session.pending_find is None:
+                if session.find_queue:
+                    session.pending_find = session.find_queue.pop(0)
+                else:
+                    session.stage = ST_READ
+                    return self._advance(turn, session, out)
+            name = session.pending_find
+            session.stage = ST_WAIT_CMD
+            out.execute_cmd = f'find / -maxdepth 10 -name "{name}" 2>/dev/null | head -5'
+            session.pending_cmd = out.execute_cmd
+            session._pending_kind = "find"  # type: ignore[attr-defined]
+            return out
+        # READ_FILES
+        if session.stage == ST_READ:
+            if session.pending_read is None:
+                if session.read_queue:
+                    session.pending_read = session.read_queue.pop(0)
+                else:
+                    session.stage = ST_LLM
+                    return self._advance(turn, session, out)
+            name = session.pending_read
+            session.stage = ST_WAIT_CMD
+            out.execute_cmd = f'cat "$(find / -maxdepth 10 -name "{name}" 2>/dev/null | head -1)"'
+            session.pending_cmd = out.execute_cmd
+            session._pending_kind = "read"  # type: ignore[attr-defined]
+            return out
+        # LLM_LOOP
+        if session.stage == ST_LLM:
             if session.llm_loops >= MAX_LLM_LOOPS:
-                return out  # 振荡降级：无保底答案，放弃本任务（PioneerFSM 会带我回家）
-            self._llm_prompt(turn, session, out, refine=session.need_refine)
-        elif session.stage == "SUBMITTED":
-            if session.need_refine:
-                session.stage = "LLM"
-                session.llm_loops = 0
-                self._llm_prompt(turn, session, out, refine=True)
-            elif session.quiet_rounds >= MAX_LLM_LOOPS:
-                # 部分正确等待中：继续让 LLM 提升通过率
-                session.stage = "LLM"
-                session.llm_loops = 1
-                self._llm_prompt(turn, session, out, refine=False)
+                session.stage = ST_DONE
+                return out
+            out.prompt = self._build_prompt(session)
+            session.llm_pending = True
+            session.llm_loops += 1
+            session.stage = ST_WAIT_LLM
+            return out
         return out
 
-    # ---- 命令结果处理 ----
+    # ---- 命令结果 ----
     def _on_cmd_result(self, session: TaskSession, cmd: str, result: str) -> None:
-        session.quiet_rounds = 0
-        if cmd == LOCATE_CMD:
-            self._classify(session, result)
+        kind = getattr(session, "_pending_kind", None)
+        session._pending_kind = None  # type: ignore[attr-defined]
+        if kind == "find":
+            paths = [p for p in (result or "").splitlines() if p.strip().endswith(".md")]
+            name = session.pending_find
+            session.pending_find = None
+            if name and name not in session.read_queue and name not in session.files:
+                session.read_queue.append(name)
+            session.stage = ST_FIND  # 继续找下一个
             return
-        if "[exitCode:0]" in result:
-            session.cmd_fails = 0
-        else:
-            session.cmd_fails += 1
-            # 累积错误信息送 LLM 推理识别（用户要求#3）
-            m = re.search(r"\[exitCode:(-?\d+)\]\s*(.{0,160})", result, re.S)
-            session.add_error(f"exit{m.group(1) if m else '?'}: {(m.group(2) if m else result)[:160]}")
-        if "[FAIL]" in result:
-            session.soft_fails += 1
-        # 提取服务端语义错误（认证/参数）入 error_log，供 LLM 兜底识别
-        for em in re.finditer(
-            r"(Authentication failed[^\"]{0,80}|Missing required parameter[^\"]{0,40}"
-            r"|Missing 'Authorization'[^\"]{0,60}|Expected format[^\"]{0,60}"
-            r"|No such file[^\"]{0,40}|not found[^\"]{0,40})",
-            result,
-        ):
-            session.add_error(em.group(1).strip())
-        # token 直提：任务提到 token，或 ./check 通过（[ OK ]/全部通过）且输出含 hex TOKEN
-        token = TOKEN_HINT.search(result)
-        check_passed = bool(re.search(r"(\[ OK \]|全部通过|all .{0,10}pass)", result, re.I))
-        task_mentions_token = "token" in (session.task_text or "").lower()
-        if token and (task_mentions_token or check_passed) and session.best_answer is None:
-            session.best_answer = {"token": token.group(1)}
-        for line in result.splitlines():
-            if line.startswith("__API "):
-                session.evidence.append(("__api_fact__", line[:300]))
-                m = re.search(r"auth=(\S+)", line)
-                if m and m.group(1) != "none":
-                    self.api_facts["auth"] = m.group(1)
-            elif line.startswith("__ANSWER "):
-                ans = _extract_json(line[len("__ANSWER "):])
-                if ans and session.best_answer is None:
-                    session.best_answer = ans  # HARVEST 直接合成答案 → 零 LLM 提交
-            elif line.startswith("__ANSWER_CANDIDATE "):
-                session.evidence.append(("__candidate__", line[:800]))
-        # WS 流程推进：probe 完 → 尝试确定性修复
-        if session.stage == "WS_PROBE":
-            session.stage = "WS_FIX"
-        elif session.stage == "API_HARVEST":
-            # 已直接合成答案则保持阶段（work() 第3步会提交），否则交 LLM 组答
-            if session.best_answer is None:
-                session.stage = "LLM"
-        if session.cmd_fails >= MAX_CMD_FAILS:
-            session.stage = "LLM"
+        if kind == "read":
+            name = session.pending_read
+            session.pending_read = None
+            if name:
+                session.files[name] = (result or "")[:4000]
+                # 递归：内容引用其他 .md → 加入查找队列
+                for ref in _extract_md_names(result):
+                    if ref != name and ref not in session.files and ref not in session.find_queue:
+                        session.find_queue.append(ref)
+            session.stage = ST_READ if not session.find_queue else ST_FIND
+            return
+        # LLM 命令结果 → 回 LLM 循环
+        session.stage = ST_LLM
 
-    def _classify(self, session: TaskSession, result: str) -> None:
-        m = re.search(r"__DIR:(\S+)", result)
-        if m:
-            session.task_dir = m.group(1)
-        body = result[:8000]
-        session.task_desc = _clip(body, 2000)
-        docs = re.findall(r"__DOC:(\S+)", result)
-        if ("ws_" in body and "./check" in body) or ("ws_" in session.task_text and "check" in session.task_text):
-            session.task_kind = "ws"
-            session.stage = "WS_PROBE"
-        elif "localhost" in body or "http://" in body or "https://" in body:
-            session.task_kind = "api"
-            session.stage = "API_HARVEST"
-        else:
-            session.task_kind = "llm"
-            session.stage = "LLM"  # 定位失败/其他 → LLM 兜底
+    # ---- LLM 结果 ----
+    def _on_llm_result(self, session: TaskSession, text: str) -> None:
+        session.last_llm_raw = text or ""
+        obj = _parse_llm_json(text)
+        if obj is None:                                  # 非 JSON
+            session.non_json += 1
+            if session.non_json >= MAX_NON_JSON:
+                session.stage = ST_DONE                  # 强制结束（不提交）
+            else:
+                session.stage = ST_LLM
+            return
+        session.non_json = 0
+        cmd = str(obj.get("cmd") or "").strip()
+        answer = obj.get("answer")
+        finished = bool(obj.get("isFinished"))
+        if answer not in (None, "", {}):
+            session.answer = answer
+            session.stage = ST_SUBMIT
+            return
+        if cmd and not cmd.startswith("cat "):
+            session.stage = ST_WAIT_CMD
+            session._pending_llm_cmd = cmd  # type: ignore[attr-defined]
+            return
+        if finished:
+            session.stage = ST_DONE
+            return
+        session.stage = ST_LLM
 
-    def _auth_retry_cmd(self, session: TaskSession) -> str | None:
-        """服务端报 Missing 'Authorization' header → 用 Bearer 重发上次的请求（实战教训）。"""
-        if session.auth_retried:
-            return None
-        # 证据需含命令本身（密钥与 URL 在命令里，错误在输出里）
-        text = "\n".join(c + "\n" + r for c, r in session.evidence[-3:])
-        if "Missing 'Authorization' header" not in text and "Expected format" not in text:
-            return None
-        key = None
-        for pat in (
-            r"(?:api[-_]?key|token|secret|key)\s*[:=：]\s*[\"']?([A-Za-z0-9_\-]{6,40})",
-            r"X-API-Key:\s*([A-Za-z0-9_\-]{6,40})",
-            r"Bearer\s+([A-Za-z0-9_\-]{6,40})",
-        ):
-            m = re.search(pat, session.task_desc + "\n" + text, re.I)
-            if m:
-                key = m.group(1)
-                break
-        if key is None:
-            return None
-        urls = re.findall(r'"(https?://[^"]+)"', text)
-        if not urls:
-            return None
-        session.auth_retried = True
-        return f'curl -s -H "Authorization: Bearer {key}" "{urls[-1]}"'
+    # ---- prompt 组装（严格按 MD 格式）----
+    def _build_prompt(self, session: TaskSession) -> str:
+        parts = ["=== 任务描述 ===", session.task_text or ""]
+        for name, content in list(session.files.items())[-6:]:
+            parts += [f"=== 文件: {name} ===", content[:2000]]
+        if session.cmd_history:
+            cmd, result = session.cmd_history[-1]
+            parts += ["=== 命令执行结果 ===", f"命令: {cmd}", f"结果: {(result or '')[:2000]}"]
+        sop = self.sop.get(session.task_key)
+        if sop:
+            parts += ["=== 参考 SOP（历史任务沉淀） ===", sop[:1500]]
+        if session.non_json > 0:
+            parts.append("你上一次的返回未按要求仅返回JSON，请勿再犯。")
+        parts.append(
+            "请只返回 JSON: {\"cmd\": \"\", \"answer\": \"\", \"isFinished\": true|false}\n"
+            "说明：cmd=要执行的 shell 命令（如 curl API 调用，为空则不执行）；"
+            "answer=最终答案(JSON字符串，为空则未完成)；isFinished=任务是否结束。\n"
+            "分页提示：关注分页参数有效性，优先用 limit/offset 或对齐响应字段。"
+        )
+        return "\n".join(parts)
 
-    # ---- 工程修复类 ----
-    def _ws_fix_cmd(self, session: TaskSession) -> str | None:
-        if session.ws_fix_count >= 2:
-            return None  # 超过 2 次修复尝试 → 交 LLM
-        fixes = self._spec_fixes(session)
-        if not fixes:
-            return None
-        session.ws_fix_count += 1
-        body = " && ".join(fixes + ["./check"])
-        return f'cd {session.task_dir or "."} && {body}'
-
-    def _spec_fixes(self, session: TaskSession) -> list[str]:
-        """从 spec/check 输出解析确定性修复指令（mkdir/chmod/sed 行替换）。"""
-        text = session.task_desc + "\n" + "\n".join(r for _, r in session.evidence[-3:])
-        fixes: list[str] = []
-        for m in re.finditer(r"\[FAIL\]\s*DIR\s*([/\w.\-]+)[^\d]*(\d{3})", text):
-            fixes.append(f'mkdir -p "{m.group(1)}" && chmod {m.group(2)} "{m.group(1)}"')
-        for m in re.finditer(r"\[FAIL\]\s*LINE\s*([\w.\-]+):(\d+)\s*期望\s*([^\s]+)", text):
-            fixes.append(f"sed -i '{m.group(2)}s/.*/{m.group(3)}/' {m.group(1)}")
-        for m in re.finditer(r"(?:目录|文件)\s*[：: ]*\s*([/\w.\-]+)[^\n]*?(?:权限|mode)\s*[:： ]?\s*(\d{3})", text):
-            fixes.append(f'mkdir -p "{m.group(1)}" && chmod {m.group(2)} "{m.group(1)}"')
-        # 实战格式："- logs/alpha/ 必须存在，权限为 755"
-        for m in re.finditer(r"-\s*([/\w.\-]+/)\s*必须存在[，,]?\s*权限为\s*(\d{3})", text):
-            fixes.append(f'mkdir -p "{m.group(1)}" && chmod {m.group(2)} "{m.group(1)}"')
-        for m in re.finditer(r"第\s*(\d+)\s*行[：:]\s*`([^`]+)`", text):
-            target = re.search(r"([\w.\-]+\.(?:conf|cfg|ini|txt|yaml|yml|json))", text)
-            fname = target.group(1) if target else "config.conf"
-            fixes.append(f"sed -i '{m.group(1)}s/.*/{m.group(2)}/' {fname}")
-        for m in re.finditer(r"第\s*(\d+)\s*行[^\n]*?(?:改为|应为|->)\s*[`'\"]?([^\n`'\"]+)", text):
-            target = re.search(r"([\w.\-]+\.(?:conf|cfg|ini|txt|yaml|yml|json))", text)
-            fname = target.group(1) if target else "config.conf"
-            fixes.append(f"sed -i '{m.group(1)}s/.*/{m.group(2).strip()}/' {fname}")
-        return list(dict.fromkeys(fixes))
-
-    # ---- API 类 ----
-    def _harvest_cmd(self, session: TaskSession) -> str:
-        task_b64 = base64.b64encode(session.task_text.encode("utf-8")).decode()
-        script = HARVEST_PY.replace("__TASK_B64__", task_b64)
-        encoded = base64.b64encode(script.encode()).decode()
-        return (
-            f"cd {session.task_dir or '.'} 2>/dev/null; "
-            f"python3 -c \"import base64;exec(base64.b64decode('{encoded}').decode())\" "
-            f"|| python -c \"import base64;exec(base64.b64decode('{encoded}').decode())\""
+    # ---- SOP 提取（第一天完成前 2 个任务后）----
+    def _maybe_extract_sop(self, session: TaskSession) -> None:
+        if self.completed > 2:
+            return
+        cmds = " ; ".join(c for c, _ in session.cmd_history[-5:])
+        ans = (session.answer if isinstance(session.answer, str)
+               else json.dumps(session.answer, ensure_ascii=False))
+        self.sop[session.task_key] = (
+            f"任务：{session.task_text[:200]}\n命令序列：{cmds[:600]}\n最终答案：{ans[:400]}"
         )
 
-    def _param_fix_cmd(self, session: TaskSession) -> str | None:
-        """'Missing required parameter: X' → 用任务原文里的城市名确定性重试（不耗 LLM）。"""
-        if session.param_fixes >= 2:
-            return None
-        text = "\n".join(c + "\n" + r for c, r in session.evidence[-2:])
-        m = re.search(r"Missing required parameter[:\s'\"]*([A-Za-z_]\w{0,20})", text)
-        if not m:
-            return None
-        param = m.group(1)
-        if param in session.tried_params:
-            return None
-        city = self._extract_city(session.task_text, session.task_desc)
-        if not city:
-            return None
-        url = None
-        urls = re.findall(r'"(https?://[^"]+)"', text)
-        if urls:
-            url = urls[-1].split("?")[0]
-        if url is None:
-            m2 = re.search(r"base=(\S+)", text)
-            if m2:
-                url = m2.group(1)
-        if url is None:
-            return None
-        key = None
-        for pat in (
-            r"Bearer\s+([A-Za-z0-9_\-]{6,40})",
-            r"(?:api[-_]?key|token|secret|key)\s*[:=：]\s*[\"']?([A-Za-z0-9_\-]{6,40})",
-        ):
-            km = re.search(pat, session.task_desc + "\n" + text, re.I)
-            if km:
-                key = km.group(1)
-                break
-        session.tried_params.add(param)
-        session.param_fixes += 1
-        auth = f'-H "Authorization: Bearer {key}" ' if key else ""
-        return f'curl -s {auth}"{url}?{param}={city}"'
-
     @staticmethod
-    def _extract_city(task_text: str, extra: str = "") -> str | None:
-        stop = ("查询", "今天", "明日", "天气", "数据", "接口", "返回", "任务",
-                "城市", "所有", "全部", "相关", "统计", "列出", "给出", "需要",
-                "通过", "调用", "结果", "数量", "类型", "名称", "今日", "本地",
-                "获取", "搜索", "帮我", "请问", "请阅读", "阅读", "信息", "作业",
-                "文化遗产", "遗产", "请", "读取", "查看", "完成", "回答")
-        text = (task_text or "") + " " + (extra or "")
-        # 去掉指针文件名 task_1_beijing.md → 提取 pinyin 城市名（beijing/nanjing/chengdu…）
-        for w in stop:
-            text = text.replace(w, " ")
-        # 1) 文件名里的 pinyin 城市 → 中文
-        pin = re.search(r"task_\d+_([a-z]{3,12})", text + " " + (extra or ""))
-        if pin:
-            PY = {"beijing": "北京", "nanjing": "南京", "chengdu": "成都",
-                  "shanghai": "上海", "guangzhou": "广州", "xian": "西安",
-                  "hangzhou": "杭州", "suzhou": "苏州", "luoyang": "洛阳"}
-            city = PY.get(pin.group(1).lower())
-            if city:
-                return city
-        for cand in re.findall(r"[\u4e00-\u9fa5]{2,3}", text):
-            return cand
-        return None
+    def _task_key(task_text: str) -> str:
+        """任务类型指纹（用于 SOP 匹配）：取任务文本里的关键词/文件名。"""
+        names = _extract_md_names(task_text)
+        if names:
+            return names[0].rsplit("_", 1)[-1].replace(".md", "")  # task_1_alpha.md → alpha
+        return (task_text or "")[:20]
 
-    # ---- LLM 循环 ----
-    def _llm_prompt(self, turn: Turn, session: TaskSession, out: PlannerOutput, *, refine: bool) -> None:
-        evidence = "\n".join(f"$ {c}\n{r}" for c, r in session.evidence[-6:])[:4000]
-        # 累积错误清单（用户要求#3：把错误信息都送给 LLM 推理识别）
-        errors = "\n".join(f"- {e}" for e in session.error_log[-8:])
-        if refine:
-            out.prompt = (
-                REFINE_PROMPT.replace("{task}", _clip(session.task_text, 1500))
-                .replace("{last_answer}", json.dumps(session.best_answer or {}, ensure_ascii=False))
-                .replace("{error}", ";".join(d for c, d in turn.errors if c == 2))
-                .replace("{evidence}", evidence)
-            )
-            session.need_refine = False
-        else:
-            sop = ""
-            if self.api_facts:
-                sop = "已知 API 经验：" + json.dumps(self.api_facts, ensure_ascii=False) + "\n"
-            if errors:
-                sop += "已遇到的错误（请据此推理修正，勿重复同样错误）：\n" + errors + "\n"
-            out.prompt = (
-                LLM_PROMPT.replace("{task}", _clip(session.task_text, 1500))
-                .replace("{desc}", _clip(session.task_desc, 2000))
-                .replace("{evidence}", evidence)
-                .replace("{sop}", sop)
-            )
-        session.llm_pending = True
-        session.llm_loops += 1
 
-    def _on_llm_result(self, session: TaskSession, text: str) -> None:
-        session.quiet_rounds = 0
-        text = (text or "").strip()
-        if not text:
-            return
-        # 兼容 LLM 输出前后缀说明/多行：在整段文本中定位 ANSWER:/CMD:（实战 LLM 常带解释文字）
-        ans_idx = text.find("ANSWER:")
-        cmd_idx = text.find("CMD:")
-        if ans_idx >= 0 and (cmd_idx < 0 or ans_idx < cmd_idx):
-            body = text[ans_idx + 7:].strip()
-            if _is_answer_like(body):
-                answer = _extract_json(body)
-                if answer:
-                    session.best_answer = answer
-                    return
-        if cmd_idx >= 0:
-            cmd = text[cmd_idx + 4:].strip().splitlines()[0].strip()
-            # 命令消毒：引号不闭合（状态机判定）会在沙盒 bash 里爆炸（参考实现 _quotes_open）
-            if cmd and not _quotes_open(cmd) and not cmd.startswith("cat "):
-                session.pending_llm_cmd = cmd
-                return
-        # 兜底：LLM 直接给了 JSON 对象 → 当作答案
-        answer = _extract_json(text)
-        if answer and not session.best_answer:
-            session.best_answer = answer
+def _iter_json_objects(text: str):
+    """迭代文本里所有平衡的 {...} 子串并尝试解析。"""
+    depth, start = 0, -1
+    for i, ch in enumerate(text or ""):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    try:
+                        yield json.loads(text[start:i + 1])
+                    except (json.JSONDecodeError, ValueError):
+                        pass
 
-    # ---- 提交 ----
-    def _submit(self, session: TaskSession) -> dict:
-        session.submitted = True
-        session.stage = "SUBMITTED"
-        return submit_answer_command(json.dumps(session.best_answer, ensure_ascii=False))
+
+_ANSWER_KEYS = {
+    "token", "total_count", "totalcount", "world_heritage_count", "types",
+    "oldest_era", "city", "answer", "result", "value", "count", "total",
+}
+_ERROR_KEYS = {"status", "error", "message", "code"}
+
+
+def _looks_like_answer(obj, task_text: str) -> bool:
+    """命令输出里的 JSON 是否"像答案"（防误收 API 原始记录/错误报文）。"""
+    if not isinstance(obj, dict) or not obj:
+        return False
+    keys = {str(k).lower() for k in obj}
+    if "status" in keys and str(obj.get("status", "")).lower() in ("error", "fail", "failed"):
+        return False
+    if keys & _ERROR_KEYS and "message" in keys and not (keys & _ANSWER_KEYS):
+        return False
+    if keys & _ANSWER_KEYS:
+        return True
+    low = (task_text or "").lower()
+    return any(len(k) >= 2 and k in low for k in keys)

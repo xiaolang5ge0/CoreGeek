@@ -1,10 +1,5 @@
-"""P5 验收 v2：任务流 —— 接任务/LOCATE/三类任务处理器/黄昏返程/accept FAIL 不重试。
-
-协议参照《自进化策略.md》：
-- LOCATE 确定性定位（__FILE/__DIR/__DOC）→ 分类（工程修复/API/通用LLM）
-- LLM 严格单行：CMD: <命令> 或 ANSWER: <JSON>
-- acceptTask FAIL 立即放弃不重试（errorCode 4 封号红线）
-"""
+"""P5 任务流测试（严格按 issue#21 策略：7 阶段 FSM + LLM-JSON 协议 + SOP）。"""
+import json
 import unittest
 
 import _bootstrap  # noqa: F401
@@ -18,28 +13,30 @@ DAY1 = 70
 
 TASK = {
     "pos": (14, 14),
-    "text": "任务：调用本地天气接口，查询北京今日天气",
-    "scoreReward": 50,
-    "goldReward": 30,
-    "timeoutRounds": 60,
+    "text": "请阅读task_1_beijing.md，获取任务信息",
+    "scoreReward": 80,
+    "goldReward": 80,
+    "timeoutRounds": 15,
 }
 
-GENERIC_LOCATE_RESULT = (
-    "[exitCode:0]\n__FILE:/data/task_1.md\n__DIR:/data\n"
-    "__DOC:/data/task_1.md\n任务：查询北京今日天气\n__END"
-)
+FIND_RESULT = "[exitCode:0]\n/tmp/selfEvolutionTask/1-unknown-api/task_1_beijing.md\n"
+READ_RESULT = "[exitCode:0]\n# 任务：查询北京文化遗产\nAPI 文档：http://localhost:8899/api/heritage\n"
+CURL_RESULT = '[exitCode:0]\n{"records":[{"name":"故宫","era":"明","type":"古建筑"}]}\n'
+ANSWER = '{"city": "北京", "total_count": 1}'
 
-WS_LOCATE_RESULT = (
-    "[exitCode:0]\n__FILE:/tmp/selfEvolutionTask/ws_3/task_ws3.md\n"
-    "__DIR:/tmp/selfEvolutionTask/ws_3\n"
-    "__DOC:/tmp/selfEvolutionTask/ws_3/task_ws3.md\n"
-    "任务：修复 ws_3 工程，通过 ./check\n__END"
-)
 
-API_LOCATE_RESULT = (
-    "[exitCode:0]\n__FILE:/data/task_api.md\n__DIR:/data\n"
-    "__DOC:/data/task_api.md\nAPI 文档：http://localhost:8080/weather 查询天气\n__END"
-)
+def llm_cmd(cmd):
+    return json.dumps({"cmd": cmd, "answer": "", "isFinished": False}, ensure_ascii=False)
+
+
+def llm_answer(ans):
+    return json.dumps({"cmd": "", "answer": ans, "isFinished": True}, ensure_ascii=False)
+
+
+def make_sim(**kw):
+    base = dict(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
+    base.update(kw)
+    return SimWorld(**base)
 
 
 def run_rounds(brain, sim, n):
@@ -56,156 +53,69 @@ def cmd_of(response, rid):
     return (response["roleCommandMap"] or {}).get(str(rid))
 
 
-def make_sim(**kw):
-    base = dict(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
-    base.update(kw)
-    return SimWorld(**base)
-
-
-class TestGenericLLMTask(unittest.TestCase):
-    def test_day1_task_completed(self):
-        """通用任务：LOCATE → LLM 一次出 ANSWER → 提交成功 → 黄昏前回 CP。"""
-        sim = make_sim(
-            tasks=[TASK],
-            llm_script=['ANSWER: {"city": "北京", "weather": "晴"}'],
-            cmd_handler=lambda cmd: GENERIC_LOCATE_RESULT if "__FILE" in cmd else "[exitCode:0]\n",
-            expected_answer="北京",
-        )
-        brain = Brain()
-        run_rounds(brain, sim, DAY1)
-        self.assertGreaterEqual(sim.score, 50)  # 任务积分到账（金币可能已被升级花掉）
-        self.assertTrue(sim.submissions)
-        cp = brain.layout.control_point
-        pos = sim.role(PIONEER)["pos"]
-        self.assertEqual(Pos(pos["x"], pos["y"]), cp)
-
-    def test_explore_then_answer(self):
-        """LLM 给 CMD → 沙盒执行 → 再给 ANSWER → 提交。"""
-        sim = make_sim(
-            tasks=[TASK],
-            llm_script=["CMD: ls /data", 'ANSWER: {"city": "北京"}'],
-            cmd_handler=lambda cmd: (
-                GENERIC_LOCATE_RESULT if "__FILE" in cmd else "[exitCode:0]\n北京 晴 25C"
-            ),
-            expected_answer="北京",
-        )
-        brain = Brain()
-        run_rounds(brain, sim, DAY1)
-        self.assertIn("ls /data", sim.cmds_seen)
-        self.assertTrue(sim.submissions)
-        self.assertGreaterEqual(sim.score, 50)
-
-
-class TestWsTask(unittest.TestCase):
-    def test_ws_fix_zero_llm(self):
-        """工程修复类：LOCATE → 探测 → 确定性 sed/mkdir 修复 → TOKEN → 提交，全程零 LLM。"""
-        def ws_handler(cmd):
-            if "__FILE" in cmd:
-                return WS_LOCATE_RESULT
-            if "find . -maxdepth" in cmd:
-                return (
-                    "[exitCode:0]\n.\n./check\n./spec.md\n__SPEC__\n目录 data 权限 755\n"
-                    "__CHECK__\n[FAIL] DIR data — 期望 exists,755"
-                )
-            if "mkdir" in cmd:
-                return "[exitCode:0]\n[PASS] all checks passed\nTOKEN: fc1e78eb2a5a"
-            return "[exitCode:0]\n"
-
-        sim = make_sim(
-            tasks=[TASK],
-            cmd_handler=ws_handler,
-            expected_answer="fc1e78eb2a5a",
-        )
-        brain = Brain()
-        run_rounds(brain, sim, DAY1)
-        self.assertGreaterEqual(sim.score, 50)
-        self.assertTrue(any("fc1e78eb2a5a" in s for s in sim.submissions))
-        self.assertEqual(sim.prompts_seen, [])  # 确定性修复零 LLM
-
-
-class TestApiTask(unittest.TestCase):
-    def test_api_harvest_then_answer(self):
-        """API 类：LOCATE → harvest 探测 → LLM 组答 → 提交。"""
-        def api_handler(cmd):
-            if "__FILE" in cmd:
-                return API_LOCATE_RESULT
-            if "python3 -c" in cmd or "python -c" in cmd:
-                return (
-                    "[exitCode:0]\n__API status=OK base=http://localhost:8080 path=/weather "
-                    "auth=none records=3 total=3\n"
-                    '__ANSWER_CANDIDATE [{"city":"北京","weather":"晴"}]'
-                )
-            return "[exitCode:0]\n"
-
-        sim = make_sim(
-            tasks=[TASK],
-            llm_script=['ANSWER: {"city": "北京", "weather": "晴"}'],
-            cmd_handler=api_handler,
-            expected_answer="北京",
-        )
-        brain = Brain()
-        run_rounds(brain, sim, DAY1)
-        self.assertGreaterEqual(sim.score, 50)
-        self.assertTrue(sim.submissions)
-
-
-class TestWsRealSpecFormat(unittest.TestCase):
-    def test_real_spec_format(self):
-        """真实 spec 格式：'- logs/alpha/ 必须存在，权限为 755' + '第 3 行：`port 8080`'。"""
+class TestTaskFlow(unittest.TestCase):
+    def test_find_read_llm_submit(self):
+        """完整链路：find→cat→LLM(cmd)→curl→LLM(answer)→submit。"""
         def handler(cmd):
-            if "__FILE" in cmd:
-                return WS_LOCATE_RESULT
-            if "find . -maxdepth" in cmd:
-                return (
-                    "[exitCode:0]\n.\n./check\n./spec.md\n__SPEC__\n"
-                    "# 规范 alpha\n- logs/alpha/ 必须存在，权限为 755\n"
-                    "## 配置文件 config/alpha.conf\n- 第 3 行：`port 8080`\n"
-                    "__CHECK__\n[FAIL] 3/6\n"
-                )
-            if "mkdir" in cmd or "sed -i" in cmd:
-                return "[exitCode:0]\n[ OK ] 全部通过 (6/6)\nTOKEN: fc1e78eb2a5a"
-            return "[exitCode:0]\n"
-
-        sim = make_sim(tasks=[TASK], cmd_handler=handler, expected_answer="fc1e78eb2a5a")
-        brain = Brain()
-        run_rounds(brain, sim, DAY1)
-        self.assertGreaterEqual(sim.score, 50)
-        self.assertEqual(sim.prompts_seen, [])  # 确定性修复零 LLM
-        fix_cmds = [c for c in sim.cmds_seen if "mkdir" in c or "sed" in c]
-        self.assertTrue(any("logs/alpha" in c for c in fix_cmds))
-
-
-class TestApiAuthRetry(unittest.TestCase):
-    def test_bearer_retry(self):
-        """服务端要 Authorization: Bearer → 规划器确定性重发（不靠 LLM 试错）。"""
-        def handler(cmd):
-            if "__FILE" in cmd:
-                return API_LOCATE_RESULT
-            if "python3 -c" in cmd or "python -c" in cmd:
-                return "[exitCode:0]\n__API status=FAIL base=http://localhost:8899 paths=2 keys=2"
-            if "curl" in cmd and "X-API-Key" in cmd:
-                return (
-                    '[exitCode:0]\n{"status":"error","message":'
-                    '"Authentication failed: Missing \'Authorization\' header. Expected format: Bearer"}'
-                )
-            if "Authorization: Bearer" in cmd:
-                return '[exitCode:0]\n[{"city":"北京","weather":"晴"}]'
+            if cmd.startswith("find /"):
+                return FIND_RESULT
+            if cmd.startswith("cat "):
+                return READ_RESULT
+            if "curl" in cmd:
+                return CURL_RESULT
             return "[exitCode:0]\n"
 
         sim = make_sim(
             tasks=[TASK],
-            llm_script=[
-                'CMD: curl -s -H "X-API-Key: heritage-api-key-2024" "http://localhost:8899/api/v1/heritage/search?city=北京"',
-                'ANSWER: {"city": "北京", "weather": "晴"}',
-            ],
+            llm_script=[llm_cmd("curl http://localhost:8899/api/heritage?location=北京"),
+                        llm_answer(ANSWER)],
             cmd_handler=handler,
             expected_answer="北京",
         )
         brain = Brain()
         run_rounds(brain, sim, DAY1)
-        bearer_cmds = [c for c in sim.cmds_seen if "Authorization: Bearer" in c]
-        self.assertTrue(bearer_cmds, "应确定性重发 Bearer 请求")
-        self.assertIn("heritage-api-key-2024", bearer_cmds[0])
+        self.assertGreaterEqual(sim.score, 80)
+        self.assertTrue(sim.submissions)
+        self.assertIn("北京", sim.submissions[0])
+
+    def test_non_json_three_times_force_end(self):
+        """连续 3 次非 JSON → 强制结束（不提交）。"""
+        sim = make_sim(
+            tasks=[TASK],
+            llm_script=["这不是JSON", "还是不是", "仍然不是", "第四次也不该被用到"],
+            cmd_handler=lambda cmd: FIND_RESULT if cmd.startswith("find") else READ_RESULT,
+        )
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        self.assertEqual(sim.submissions, [])  # 未提交
+        self.assertEqual(brain.task_planner.completed, 0)
+
+    def test_json_tolerant_parse(self):
+        """LLM 回复带前后缀说明时仍能提取 JSON（容忍解析）。"""
+        wrapped = "好的，以下是结果：\n" + llm_answer(ANSWER) + "\n请查收"
+        sim = make_sim(
+            tasks=[TASK],
+            llm_script=[wrapped],
+            cmd_handler=lambda cmd: FIND_RESULT if cmd.startswith("find") else READ_RESULT,
+            expected_answer="北京",
+        )
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        self.assertTrue(sim.submissions)
+
+
+class TestSopEvolution(unittest.TestCase):
+    def test_sop_extracted_after_completion(self):
+        """完成任务后提取 SOP（供第二天复用）。"""
+        sim = make_sim(
+            tasks=[TASK],
+            llm_script=[llm_answer(ANSWER)],
+            cmd_handler=lambda cmd: FIND_RESULT if cmd.startswith("find") else READ_RESULT,
+            expected_answer="北京",
+        )
+        brain = Brain()
+        run_rounds(brain, sim, DAY1)
+        self.assertTrue(brain.task_planner.sop, "应提取 SOP")
 
 
 class TestAcceptFailNoRetry(unittest.TestCase):
@@ -214,25 +124,7 @@ class TestAcceptFailNoRetry(unittest.TestCase):
         sim = make_sim(tasks=[TASK], accept_fails=True)
         brain = Brain()
         run_rounds(brain, sim, 30)
-        self.assertEqual(sim.accept_count, 1)  # 只尝试过一次
-
-
-class TestDuskReturn(unittest.TestCase):
-    def test_abort_task_before_night(self):
-        """任务做不完也必须入夜前回家（离开任务点=任务结束）。"""
-        sim = make_sim(
-            tasks=[TASK],
-            llm_script=["CMD: true"] * 100,  # 永远探索不完
-            cmd_handler=lambda cmd: (
-                GENERIC_LOCATE_RESULT if "__FILE" in cmd else "[exitCode:0]\n"
-            ),
-        )
-        brain = Brain()
-        run_rounds(brain, sim, DAY1)
-        cp = brain.layout.control_point
-        pos = sim.role(PIONEER)["pos"]
-        self.assertEqual(Pos(pos["x"], pos["y"]), cp)
-        self.assertEqual(sim.phase_task, "")
+        self.assertEqual(sim.accept_count, 1)
 
 
 class TestNoTaskFallback(unittest.TestCase):

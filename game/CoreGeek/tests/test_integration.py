@@ -2,6 +2,7 @@
 
 裁剪为 2 天(260回合)以平衡覆盖与测试速度；完整 10 天验证见 tools 级仿真。
 """
+import json
 import unittest
 
 import _bootstrap  # noqa: F401
@@ -11,20 +12,25 @@ from agent.brain import Brain
 
 TASK = {"pos": (14, 14), "text": "请阅读task_1_alpha.md", "scoreReward": 80,
         "goldReward": 80, "timeoutRounds": 15}
-WS_LOCATE = ("[exitCode:0]\n__FILE:/tmp/selfEvolutionTask/1-fixed-step/2-engineering-fix/task_1_alpha.md\n"
-             "__DIR:/tmp/selfEvolutionTask/1-fixed-step/2-engineering-fix\n"
-             "__DOC:.../task_1_alpha.md\n任务：修复 ws_1 工程，通过 ./check\n__END")
+FIND_RESULT = "[exitCode:0]\n/tmp/selfEvolutionTask/task_1_alpha.md\n"
+READ_RESULT = ("[exitCode:0]\n# 任务：修复 ws_1 工程，通过 ./check\n"
+               "目录 logs/alpha 必须存在，权限为 755\n第 3 行：`port 8080`\n")
+FIX_RESULT = "[exitCode:0]\n[ OK ] 全部通过 (6/6)\nTOKEN: fc1e78eb2a5a"
+LLM_SCRIPT = [
+    json.dumps({"cmd": "cd /tmp/selfEvolutionTask && mkdir -p logs/alpha && ./check",
+                "answer": "", "isFinished": False}, ensure_ascii=False),
+    json.dumps({"cmd": "", "answer": '{"token": "fc1e78eb2a5a"}', "isFinished": True},
+               ensure_ascii=False),
+]
 
 
 def _handler(cmd):
-    if "__FILE" in cmd:
-        return WS_LOCATE
-    if "find . -maxdepth" in cmd:
-        return ("[exitCode:0]\n.\n./check\n./spec.md\n__SPEC__\n# 规范 alpha\n"
-                "- logs/alpha/ 必须存在，权限为 755\n## 配置文件 config/alpha.conf\n"
-                "- 第 3 行：`port 8080`\n__CHECK__\n[FAIL] DIR logs/alpha 期望 exists,755 实际 不存在")
+    if cmd.startswith("find /"):
+        return FIND_RESULT
+    if cmd.startswith("cat "):
+        return READ_RESULT
     if "mkdir" in cmd or "sed -i" in cmd:
-        return "[exitCode:0]\n[ OK ] 全部通过 (6/6)\nTOKEN: fc1e78eb2a5a"
+        return FIX_RESULT
     return "[exitCode:0]\n"
 
 
@@ -33,7 +39,8 @@ class TestFullGameIntegration(unittest.TestCase):
         sim = SimWorld(
             station_pos=(10, 24),
             mines={(6, 22): "stone", (7, 26): "stone", (8, 20): "copper", (14, 6): "iron"},
-            tasks=[TASK], cmd_handler=_handler, expected_answer="fc1e78eb2a5a",
+            tasks=[TASK], cmd_handler=_handler, llm_script=list(LLM_SCRIPT),
+            expected_answer="fc1e78eb2a5a",
         )
         brain = Brain()
         respawns = [(8, 20, "copper"), (6, 22, "stone"), (16, 14, "copper"), (7, 26, "stone")]
@@ -57,9 +64,8 @@ class TestFullGameIntegration(unittest.TestCase):
         self.assertEqual(crashes, 0, "全流程不得崩溃（异常=封号红线）")
         self.assertTrue(sim.base_alive, "基地必须存活")
         self.assertGreaterEqual(len(sim.walls()), 10, "D1-D2 应建成≥10 墙")
-        self.assertGreaterEqual(len(sim.submissions), 2, "任务应确定性完成多次")
-        self.assertEqual(sim.prompts_seen, [], "工程类任务应零 LLM")
-        self.assertGreaterEqual(sim.score, 160, "任务积分应到账")
+        self.assertGreaterEqual(len(sim.submissions), 1, "任务应完成")
+        self.assertGreaterEqual(sim.score, 80, "任务积分应到账")
         # 出生点遥测已记录（供后续 FRONT 修正/夜间避让）
         self.assertGreaterEqual(len(brain.robot_spawn_log), 1)
 

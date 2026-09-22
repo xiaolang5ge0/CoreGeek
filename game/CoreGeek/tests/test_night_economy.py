@@ -113,27 +113,35 @@ class TestMineSidePreference(unittest.TestCase):
 
 
 class TestLLMParsing(unittest.TestCase):
-    def test_answer_after_explanation(self):
-        """LLM 输出带前缀说明 + 多行时，仍能提取 ANSWER（问题3：LLM 兜底健壮性）。"""
-        planner = TaskPlanner()
-        s = TaskSession()
-        s.llm_pending = True
-        planner._on_llm_result(s, '根据证据分析如下：\nANSWER: {"city": "北京", "total_count": 12}\n完成。')
-        self.assertEqual(s.best_answer, {"city": "北京", "total_count": 12})
+    def test_json_with_explanation(self):
+        """LLM 带前缀说明 + 多行时仍能提取 JSON（容忍解析）。"""
+        from agent.planners.task import _parse_llm_json
+        obj = _parse_llm_json('好的，结果：\n{"cmd": "ls /data", "answer": "", "isFinished": false}\n完毕')
+        self.assertEqual(obj["cmd"], "ls /data")
 
-    def test_cmd_after_explanation(self):
-        planner = TaskPlanner()
-        s = TaskSession()
-        s.llm_pending = True
-        planner._on_llm_result(s, '执行：\nCMD: ls /data && cat /data/api.txt')
-        self.assertEqual(s.pending_llm_cmd, "ls /data && cat /data/api.txt")
+    def test_non_json_returns_none(self):
+        from agent.planners.task import _parse_llm_json
+        self.assertIsNone(_parse_llm_json("这不是JSON"))
 
-    def test_bare_json_as_answer(self):
+    def test_llm_result_routes_to_cmd(self):
+        """LLM 返回 cmd → 进入 WAIT_CMD 并暂存命令。"""
+        from agent.planners.task import TaskPlanner, TaskSession, ST_WAIT_CMD
         planner = TaskPlanner()
         s = TaskSession()
         s.llm_pending = True
-        planner._on_llm_result(s, '{"total_count": 5}')
-        self.assertEqual(s.best_answer, {"total_count": 5})
+        planner._on_llm_result(s, '{"cmd": "curl http://x", "answer": "", "isFinished": false}')
+        self.assertEqual(s.stage, ST_WAIT_CMD)
+        self.assertEqual(getattr(s, "_pending_llm_cmd", None), "curl http://x")
+
+    def test_llm_result_routes_to_submit(self):
+        """LLM 返回 answer+isFinished → 进入 SUBMIT。"""
+        from agent.planners.task import TaskPlanner, TaskSession, ST_SUBMIT
+        planner = TaskPlanner()
+        s = TaskSession()
+        s.llm_pending = True
+        planner._on_llm_result(s, '{"cmd": "", "answer": "{\\"n\\":1}", "isFinished": true}')
+        self.assertEqual(s.stage, ST_SUBMIT)
+        self.assertEqual(s.answer, '{"n":1}')
 
 
 class TestWallRebuild(unittest.TestCase):
