@@ -22,6 +22,7 @@ from .planners.upgrade import WALL_MAX_HP, UpgradePlanner
 from .protocol import (
     Pos,
     ROCKET,
+    ROUNDS_PER_DAY,
     Turn,
     WALL,
     WEAPON_BUILD_COST,
@@ -35,6 +36,7 @@ from .protocol import (
 )
 from .rules import LegalityGuard
 from .threat import SAFE, ThreatEstimator
+from .wall_registry import WallRegistry
 
 NIGHT_SAFE_DIST = 3         # 夜间矿/小贩安全半径（机器人攻击射程3；主攻基地不绕路杀工人）
 SPAWN_AVOID_DIST = 4        # 历史出生点直接避让半径
@@ -97,6 +99,7 @@ class _Ctx:
     need_weapon_gold: bool = False   # 有武器未 L2 且金不足 → 挖矿工去卖钱
     gunner_upgrade = None            # 炮手武器升级计划 (Pos, "weapon")
     price_boost_map: dict = {}       # 新闻预测：矿种 → 售卖加权
+    wall_registry = None             # L2 围墙状态表（跨回合，供修理工按需修复/升级）
 
     def price_boost(self, kind: str) -> float:
         return float(self.price_boost_map.get(kind, 0.0))
@@ -146,6 +149,7 @@ class Brain:
         self.robot_spawn_log: list = []
         self.news_log: list = []  # 每回合 worldNews 存档（宝藏推断用）
         self.news_economy = NewsEconomy()
+        self.wall_registry = WallRegistry()
         self.llm_day: int = 0
         self.llm_calls_today: int = 0
         self.worker_fsms: dict[int, WorkerFSM] = {}
@@ -178,10 +182,20 @@ class Brain:
                         "cp": self.layout.control_point.dump(),
                         "walls": len(self.layout.wall_cells),
                     }
+            # 围墙状态表刷新（识别攻破/补建，供修理工按需修复/升级）
+            if self.layout is not None:
+                self.wall_registry.sync(turn, self.layout)
+                rebuilt = [
+                    s for s in self.wall_registry.recently_rebuilt()
+                    if turn.round_no - s.rebuilt_round <= ROUNDS_PER_DAY
+                ]
+                if rebuilt:
+                    trace["walls_rebuilt"] = [s.pos.dump() for s in rebuilt]
 
         commands: dict[int, dict[str, Any]] = {}
         ctx = _Ctx(trace)
         ctx.fsms = self.worker_fsms
+        ctx.wall_registry = self.wall_registry
         ctx.reserved = {u.pos for u in turn.controllable()}
         ctx.mine_blacklist = self.mine_blacklist
         # 历史出生走廊（首夜起累积，全局固定）→ 夜间选矿/卖货避让
@@ -362,13 +376,15 @@ class Brain:
                 if fsm.upgrade and hasattr(fsm.upgrade[0], "dump")
             }
             if rfsm.upgrade is None and rfsm.build is None:
-                for mission in self.upgrades.plan(turn, cp=layout.control_point):
+                for mission in self.upgrades.plan(
+                    turn, cp=layout.control_point, registry=self.wall_registry
+                ):
                     if mission.kind not in ("wall", "stock"):
                         continue  # 武器/基地升级不派给工人
                     if mission.target is not None and mission.target in taken_targets:
                         continue
                     if mission.kind == "stock":
-                        rfsm.upgrade = (mission.voucher, "stock")
+                        rfsm.upgrade = (mission.voucher, "stock", mission.qty)
                     else:
                         rfsm.upgrade = (mission.target, mission.kind)
                         taken_targets.add(mission.target)

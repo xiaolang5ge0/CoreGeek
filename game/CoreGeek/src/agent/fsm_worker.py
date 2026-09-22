@@ -31,6 +31,7 @@ from .protocol import (
     sell_command,
     use_command,
 )
+from .wall_registry import REPAIR_HP_RATIO
 
 # ---- 角色 ----
 ROLE_REPAIRER = "repairer"
@@ -144,7 +145,11 @@ class WorkerFSM:
         # 夜间
         if turn.is_night:
             if getattr(ctx, "repair_triggered", False):
-                return self._repair_cmd(turn, unit, ctx)
+                cmd = self._repair_cmd(turn, unit, ctx)
+                if cmd is not None:
+                    return cmd
+                # 无达标修复需求（<50%）或手上无券/修复包 → 不空蹲，落回采矿
+                return self._miner(turn, unit, ctx)
             # 无威胁 → 可外出采矿
             return self._miner(turn, unit, ctx)
         # 白天
@@ -444,14 +449,17 @@ class WorkerFSM:
         return self._upgrade_cmd(turn, unit, ctx)
 
     def _upgrade_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        target, kind = self.upgrade
+        target, kind = self.upgrade[0], self.upgrade[1]
+        qty = self.upgrade[2] if len(self.upgrade) > 2 else 1
         if kind == "stock":
             item = target if isinstance(target, str) else "WallFixer"
-            if unit.backpack.count(item) >= 1:
+            if unit.backpack.count(item) >= qty:
                 self.upgrade = None
                 self.state = STATE_FREE
                 return None
-            return self._buy_item(turn, unit, ctx, item, self._stock_qty(turn, unit, item))
+            return self._buy_item(
+                turn, unit, ctx, item, self._stock_qty(turn, unit, item, qty)
+            )
         building = next(
             (u for u in turn.ours if u.pos == target and u.kind in (*TOWER_TYPES, WALL, STATION)),
             None,
@@ -484,12 +492,14 @@ class WorkerFSM:
             return None
         return self._move(step, ctx)
 
-    def _stock_qty(self, turn: Turn, unit: Unit, item: str) -> int:
+    def _stock_qty(self, turn: Turn, unit: Unit, item: str, want: int = 1) -> int:
         price = turn.shop_prices.get(item, 10)
         if price <= 0:
             return 1
+        held = unit.backpack.count(item)
+        need = max(1, want - held)
         room = (unit.capacity or 100) - len(unit.backpack)
-        return max(1, min(2, room, turn.gold // price))
+        return max(1, min(need, room, turn.gold // price))
 
     def _voucher_qty(self, turn: Turn, unit: Unit, voucher: str, cost: int, kind: str) -> int:
         """批量购买：min(刚需, 背包容量, 金币//单价)，扣除已持有（不多买）。"""
@@ -529,28 +539,44 @@ class WorkerFSM:
 
     # ---- 夜间修墙 ----
     def _repair_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        self.state = STATE_REPAIR
-        walls = list(turn.walls())
-        item = target = None
-        if walls:
-            def ratio(w):
-                return w.health / WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
-            hurt = sorted((w for w in walls if ratio(w) < 0.999), key=ratio)
-            if hurt:
-                target = hurt[0].pos
-                lv = hurt[0].level
-                voucher = f"WallUpgradeVoucher{lv}"
-                if lv <= 2 and voucher in unit.backpack:
-                    item = voucher
-                elif "WallFixer" in unit.backpack:
-                    item = "WallFixer"
-        if item is not None and target is not None:
-            if unit.pos != target and distance(unit.pos, target) <= 1:
-                return use_command(item, target)
-            step = step_toward(turn, unit, target, ctx.reserved)
-            if step is not None:
-                return self._move(step, ctx)
-        return None  # 无修复需求 → 落回（修理工夜间无威胁时外出采矿）
+        """夜间抢修（用户补充）：血量 <50% 才修；正面优先。
+
+        优先级：未满级(L1/L2) 优先用升级券（升级=回满血+提升上限）；
+        满级(L3) 升级券失效 → 只能用 WallFixer（修复包）。
+        """
+        registry = getattr(ctx, "wall_registry", None)
+        candidates: list[tuple[Pos, int, bool, float]] = []
+        if registry is not None:
+            for state in registry.damaged():
+                candidates.append((state.pos, state.level, state.is_front, state.ratio))
+        else:
+            for wall in turn.walls():
+                max_hp = WALL_MAX_HP[min(max(wall.level, 1), 3) - 1]
+                ratio = wall.health / max_hp
+                if ratio < REPAIR_HP_RATIO:
+                    candidates.append((wall.pos, wall.level, False, ratio))
+        if not candidates:
+            return None  # 无达标修复需求 → 落回（修理工夜间无威胁时外出采矿）
+        # 正面优先，其次血最少
+        candidates.sort(key=lambda c: (0 if c[2] else 1, c[3], c[0].x, c[0].y))
+        target, level, _is_front, _ratio = candidates[0]
+        item = None
+        if level <= 2:
+            voucher = f"WallUpgradeVoucher{level}"
+            if voucher in unit.backpack:
+                item = voucher
+        if item is None and "WallFixer" in unit.backpack:
+            item = "WallFixer"
+        if item is None:
+            return None
+        if unit.pos != target and distance(unit.pos, target) <= 1:
+            self.state = STATE_REPAIR
+            return use_command(item, target)
+        step = step_toward(turn, unit, target, ctx.reserved)
+        if step is not None:
+            self.state = STATE_REPAIR
+            return self._move(step, ctx)
+        return None
 
     # ---- 归位 ----
     def _path_home_len(self, turn: Turn, unit: Unit, ctx) -> int:

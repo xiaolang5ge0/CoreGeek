@@ -7,11 +7,11 @@
 
 | 项 | 状态 |
 |---|---|
-| 当前阶段 | **P0~P5 + 六轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
-| 测试 | **100/100 通过** |
+| 当前阶段 | **P0~P5 + 十轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
+| 测试 | **106/106 通过** |
 | 打包 | `game/CoreGeek/dist/CoreGeek.tar.gz`（**tar 顶层 CoreGeek/ 目录**，平台父目录解包后运行 `<root>/CoreGeek/main3.py`） |
 | 代码 | `game/CoreGeek/`，Python ≥3.11 纯标准库 |
-| 当前行为 | Day1 双工人建满14墙+3火箭；夜1-3 双工人全力采矿卖钱（无蹲防）；开拓者单人控3炮；Day4+ 修墙岗；武器优先升级；任务确定性+LLM兜底；选矿我方侧优先 |
+| 当前行为 | Day1 双工人建满14墙+3火箭；夜1-3 双工人全力采矿卖钱（无蹲防）；开拓者单人控3炮；Day4+ 修墙岗（墙血<50%才修、正面优先、L3→WallFixer、L1/L2→升级券）；WallRegistry 追踪攻破/补建并优先重升级；武器优先升级；任务确定性+LLM兜底；选矿我方侧优先 |
 | 遥测 | 每回合 stdout 精简加密 Request+Response+trace（密钥 12345678，`tools/decrypt_log.py` 解密） |
 | 事实进展 | 用户确认+实战验证多条：蓝黄区(蓝1黄2)/昼夜起算/射程表/操控占用/单出生点/两批机器人/夜采夜卖合法/机器人主攻基地顺路杀工人/夜潮规模 |
 
@@ -75,6 +75,19 @@
 | `location=请阅读` 参数污染 | 把 `phaseTask` 文本（"请阅读task_1_beijing.md…"）当成城市候选 | 参数值禁取自 `phaseTask`/提示语，只取文档/响应中的真实字段 |
 | 任务1 仍靠 LLM 三次 | 工程类确定性路径缺失（cat spec→改配置→去 CRLF 全靠 LLM） | 工程类 SOP 固化：find+cat spec → 按 spec 正则修复 → 去 CRLF → check |
 | 两局总分均 88（仅任务1的80分） | 任务2 超时失败，无 +80 | 以上修复后复测通过率 |
+
+## 实战修复记录·第十轮（2026-09-22 用户补充：围墙状态表 + L3 修复口径 + 补建墙重升级）
+
+| 变更 | 内容 |
+|---|---|
+| **WallRegistry（新 L2 模块）** | `src/agent/wall_registry.py`：Dict 维护每个墙位 `exists/level/health/is_front/breached_round/rebuilt_round`；识别"被攻破 / 补建"事件；`damaged()`(<50%,正面优先) / `upgradable()`(受损>补建>正面>其余) |
+| **L3 修复口径** | 墙/武器到 L3 后升级券失效 → 夜间抢修 L1/L2 优先升级券（升级=回满血），**L3 只能用 WallFixer** |
+| **修复阈值** | REPAIR_HP_RATIO=**0.5**（原 <0.999 任何掉血都修 → 改为 <50% 才修，省修复包） |
+| **按需备货 WallFixer** | 升级器：Day3+ 至少 1；Day4+/有 L3 墙时按 L3 墙数备货（上限 3），按持有量补差；`_stock_qty` 支持目标数量 |
+| **补建墙重升级** | 前夜被攻破→次日补建的墙回到 L1，升级队列**补建墙优先**（front_order 用 registry.rebuilt_round） |
+| **不空蹲** | 修理工夜间无达标修复需求/无券时落回采矿（不再整夜待命） |
+| **共享常量** | WALL_MAX_HP/WEAPON_MAX_HP/STATION_MAX_HP 上移到 protocol.py（单一真源，升级器 re-export） |
+| **测试** | 新增 `tests/test_wall_registry.py`（10 例：攻破/补建、50% 阈值、补建优先、L3→Fixer/L1→券、按需备货、Day4 端到端）；全量 **106/106 通过** |
 
 ## 实战修复记录·第九轮（2026-09-22 任务求解器按 issue#21 重构）
 

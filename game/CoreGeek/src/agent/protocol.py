@@ -113,6 +113,11 @@ WEAPON_ZONE_DIST = 1
 WALL_ZONE_DIST = 2
 WALL_LIMIT = 20  # 围墙数量上限（用户确认版数值表）
 
+# 建筑各等级满血（升级=回满血；L3 为最高级，之后升级券失效）
+WALL_MAX_HP = (1000, 1500, 2000)
+WEAPON_MAX_HP = (1000, 1500, 2000)
+STATION_MAX_HP = (1500, 3000, 4500)
+
 
 @dataclass(frozen=True, slots=True)
 class Unit:
