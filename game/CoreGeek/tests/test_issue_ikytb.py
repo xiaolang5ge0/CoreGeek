@@ -128,5 +128,34 @@ class TestNewsWindow(unittest.TestCase):
         self.assertFalse(ne.last_parsed)   # 未识别 → 上层走 LLM 兜底
 
 
+class TestSopByType(unittest.TestCase):
+    def test_sop_keyed_by_type_and_api_facts_reused(self):
+        """IKHYTW §12.6：SOP 按任务类型固化（非文件名），跨城市复用；成功命令沉淀 API 经验。"""
+        from agent.planners.task import TaskPlanner, TaskSession
+        p = TaskPlanner()
+        s = TaskSession()
+        s.task_type = "api"
+        s.task_text = "请阅读task_1_beijing.md"
+        s.answer = '{"city":"北京","total_count":15}'
+        s.cmd_history = [
+            ("curl -H 'Authorization: Bearer k' "
+             "'http://localhost:8899/api/v1/heritage/search?location=北京'",
+             '[exitCode:0]\n{"code":200,"data":{"records":[]}}'),
+        ]
+        p._maybe_extract_sop(s)
+        self.assertIn("api", p.sop, "SOP 应按类型固化")
+        self.assertNotIn("beijing", p.sop, "不应按任务文件名固化")
+        self.assertEqual(p.api_facts.get("auth"), "Authorization: Bearer <key>")
+        self.assertEqual(p.api_facts.get("param"), "location")
+        # 下一个 API 任务（南京）的 prompt 应带上经验（避免重新横跳）
+        s2 = TaskSession()
+        s2.task_type = "api"
+        s2.task_text = "请阅读task_1_nanjing.md"
+        prompt = p._build_prompt(s2)
+        self.assertIn("跨任务 API 经验", prompt)
+        self.assertIn("location", prompt)
+        self.assertIn("Bearer", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

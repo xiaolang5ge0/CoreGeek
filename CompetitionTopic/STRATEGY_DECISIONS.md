@@ -163,7 +163,7 @@
 | **LLM 循环上限** | `MAX_LLM_LOOPS=8`；**按任务 `timeoutRounds` 收紧**为 `min(8, timeout-2)`（留 2 回合提交） | 用户：按 timeout 设上限 | CONFIRMED |
 | **推理类兜底** | 官方消息确定性解析失败 → 非任务期 LLM（每日额度内）解析 `{ore,action,start_day,days}` → 喂 `NewsEconomy` | 用户：推理类需少量 LLM | CONFIRMED |
 | **长上下文类（宝藏）** | 逐日累积民间传闻 → LLM 推断 `{x,y,items,day,ready}`；**仅 ready 才行动**：备祭品→到祭坛→`summonTreasure`；最低优先（无任务可接时） | 用户：开始宝藏编码 | CONFIRMED(框架) |
-| **SOP 自进化** | 完成前 2 任务后提取 SOP（task_key→描述+命令序列+答案）；次日 prompt 附带匹配 SOP | 跨任务经验复用 | CONFIRMED |
+| **SOP 自进化** | 按**任务类型**（api/engineering/generic）固化 SOP（描述+命令序列+答案，IKHYTW §12.6）；**跨任务/跨城市复用**；从**成功(200)命令**沉淀 `api_facts`（认证头/参数名/path）并注入后续 prompt → 避免重复横跳 | 用户指定（IKHYTW） | CONFIRMED |
 | 接取策略 | 两任务点交替（类型 1/2 轮换）；优先与上次不同类型；最近可用点 | issue#21 §12.7 | CONFIRMED |
 | acceptTask 失败 | **立即放弃 + 终身回避该任务点**（errorCode 4 封号红线） | 绝不重试 | CONFIRMED |
 

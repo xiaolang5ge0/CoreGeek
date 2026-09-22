@@ -97,7 +97,8 @@ def _parse_llm_json(text: str) -> dict | None:
 class TaskSession:
     stage: str = ST_EXPLORE
     task_text: str = ""
-    task_key: str = ""                                   # SOP 匹配键
+    task_key: str = ""                                   # SOP 匹配键（任务文件名指纹）
+    task_type: str = ""                                  # 任务类型：api/engineering/generic（SOP 按类型固化）
     target_name: str = "task_*.md"                       # 待定位的任务文件名
     task_dir: str = ""                                   # 工作目录（工程类=ws 目录）
     explore_output: str = ""                             # 健壮探索的完整输出
@@ -142,8 +143,11 @@ class PlannerOutput:
 
 class TaskPlanner:
     def __init__(self) -> None:
-        self.sop: dict[str, str] = {}       # task_key → SOP 文本（跨任务复用）
-        self.completed: int = 0             # 已完成任务数（用于提取 SOP）
+        # SOP 自进化（IKHYTW §12.6）：**按任务类型（api/engineering/generic）固化**，
+        # 而非按任务文件名——这样"北京 API 任务"的经验能复用到"南京 API 任务"，避免重复横跳。
+        self.sop: dict[str, str] = {}          # task_type → SOP 文本（跨任务复用）
+        self.api_facts: dict[str, str] = {}    # 跨任务 API 经验（认证/参数名/path，从 200 成功命令学习）
+        self.completed: int = 0                # 已完成任务数
 
     # ---- 主入口 ----
     def work(self, turn: Turn, session: TaskSession) -> PlannerOutput:
@@ -387,6 +391,13 @@ class TaskPlanner:
             re.search(r"http://localhost:\d+", out)
             or ("/api/" in out and "API_DOCS" in out.upper())
         )
+        # 任务类型（SOP 按类型固化，IKHYTW §12.6）
+        if session.engineer:
+            session.task_type = "engineering"
+        elif api:
+            session.task_type = "api"
+        else:
+            session.task_type = "generic"
         # 硬编码能力（默认关闭）：仅当 HARDCODED_ASSIST=True 才走确定性分支
         if config.HARDCODED_ASSIST:
             if self._try_token_submit(session, result):
@@ -594,9 +605,15 @@ class TaskPlanner:
             parts += ["=== 上回合命令结果 ===", f"命令: {cmd}", f"结果: {(result or '')[:2500]}"]
         if session.task_dir:
             parts.append(f"工作目录: {session.task_dir}（命令已自动 cd 到此目录）")
-        sop = self.sop.get(session.task_key)
+        sop = self.sop.get(session.task_type) or self.sop.get(session.task_key)
         if sop:
-            parts += ["=== 参考 SOP（历史任务沉淀） ===", sop[:1500]]
+            parts += [
+                "=== 参考 SOP（历史同类型任务沉淀；命令/认证/参数可直接复用，避免重复试错） ===",
+                sop[:1500],
+            ]
+        if session.task_type == "api" and self.api_facts:
+            parts.append("=== 跨任务 API 经验（已验证成功，直接复用，勿再横跳） ===")
+            parts.append(json.dumps(self.api_facts, ensure_ascii=False))
         if session.non_json > 0:
             parts.append("你上一次的返回未按要求仅返回JSON，请勿再犯。")
         if session.last_error:
@@ -624,16 +641,34 @@ class TaskPlanner:
         )
         return "\n".join(parts)
 
-    # ---- SOP 提取（完成前 2 个任务后）----
+    # ---- SOP 提取（IKHYTW §12.6：按任务类型固化，跨任务复用）----
     def _maybe_extract_sop(self, session: TaskSession) -> None:
-        if self.completed > 2:
-            return
-        cmds = " ; ".join(c for c, _ in session.cmd_history[-5:])
+        key = session.task_type or session.task_key or "generic"
+        cmds = " ; ".join(c for c, _ in session.cmd_history[-6:])
         ans = (session.answer if isinstance(session.answer, str)
                else json.dumps(session.answer, ensure_ascii=False))
-        self.sop[session.task_key] = (
-            f"任务：{session.task_text[:200]}\n命令序列：{cmds[:600]}\n最终答案：{ans[:400]}"
+        self.sop[key] = (
+            f"任务：{session.task_text[:150]}\n命令序列：{cmds[:700]}\n最终答案：{ans[:300]}"
         )
+        if key == "api":
+            self._learn_api_facts(session)
+
+    def _learn_api_facts(self, session: TaskSession) -> None:
+        """从**成功(HTTP 200)**的命令学习认证头/参数名/路径，跨任务复用（避免重复横跳）。"""
+        for cmd, result in session.cmd_history:
+            if "200" not in (result or "")[:60]:
+                continue
+            low = cmd.lower()
+            if "bearer" in low:
+                self.api_facts["auth"] = "Authorization: Bearer <key>"
+            elif "x-api-key" in low:
+                self.api_facts["auth"] = "X-API-Key: <key>"
+            m = re.search(r"[?&](location|city|cityName|name)=", cmd)
+            if m:
+                self.api_facts["param"] = m.group(1)
+            m2 = re.search(r"(/api/[A-Za-z0-9_\-/]+)", cmd)
+            if m2:
+                self.api_facts["path"] = m2.group(1)
 
     @staticmethod
     def _task_timeout(turn: Turn) -> int:
