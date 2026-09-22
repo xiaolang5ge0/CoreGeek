@@ -157,7 +157,12 @@
 | **城市提取** | 文件名拼音映射（beijing→北京…）+ 探索输出中文城市正则 | API 探测参数值 | CONFIRMED |
 | **CRLF 确定性重试** | 工程类命令失败含 `bad interpreter/^M` → 自动转确定性探测重试 | 修实战 exit126 | CONFIRMED |
 | **LLM-JSON 协议** | prompt = 任务描述+探索结果+命令历史+SOP；要求只返回 `{"cmd","answer","isFinished"}` | 固定协议 | CONFIRMED |
-| **硬编码能力总开关** | `config.HARDCODED_ASSIST`（**默认 False**）：关闭时**只用通用能力**（健壮探索+命令锚定+LLM-JSON+SOP），禁用 API harvester/工程 FAIL 自动修复/TOKEN·__ANSWER 自动提交/城市硬编码——训练期真实衡量自进化成功率；比赛收尾改为 True（硬编码+LLM 双保障）。可用环境变量 `COREGEEK_HARDCODED=1` 开启 | 用户指定 | CONFIRMED |
+| **硬编码能力总开关** | `config.HARDCODED_ASSIST`（**默认 True，PK 稳分**，用户 2026-09-23）：关闭时只用通用能力（探索+LLM+SOP），启用 API harvester/工程 FAIL 自动修复/TOKEN·__ANSWER 自动提交；环境变量 `COREGEEK_HARDCODED=0` 可关 | 用户指定 | CONFIRMED |
+| **任务提交优先** | 开拓者**先跑任务求解**：有 `submit` 先提交（占本回合动作），未提交再让 FSM 走位/归位——防"入夜前归位"抢动作致任务终止（IKHYU3 根因） | issue IKHYU3 | CONFIRMED |
+| **修理工就位点（中间）** | `repair_post` 优先**邻接正面（迎敌侧）墙**，再取**靠基地中心（中间）**，不站拐角（IKHYU4） | 用户 2026-09-23 | CONFIRMED |
+| **矿卡死黑名单** | 移动卡死/矿不可达 → **拉黑该矿 20 回合**；移动失败反馈加速解卡看门狗（IKHYU1：矿工卡死 34 次移动失败） | issue IKHYU1 | CONFIRMED |
+| **应急道具** | Day6+ 且关键墙/炮塔升级后，余钱备炸弹；城墙危险时对机器人最密处使用（占开拓者动作） | 决策 A | CONFIRMED |
+| **矿工夜间回防** | 默认**不回防**（继续安全外采）；仅**第 9 夜起**考虑回防（`MINER_RETURN_DAY=9`） | 决策 D | CONFIRMED |
 | **任务期 LLM 不限次** | 任务执行期间 prompt **不查日限额、不计数**（接口文档 errorCode=5） | 修 issue#23/#24 根因 | CONFIRMED |
 | **容错** | 连续 **3 次非 JSON → 强制结束**（不提交）；JSON 容忍解析（先 loads 再正则提 `{...}`） | 防死循环 | CONFIRMED |
 | **LLM 循环上限** | `MAX_LLM_LOOPS=8`；**按任务 `timeoutRounds` 收紧**为 `min(8, timeout-2)`（留 2 回合提交） | 用户：按 timeout 设上限 | CONFIRMED |

@@ -173,15 +173,37 @@ def compute_layout(
     # 选在"邻接墙最多"的位置（=贴墙侧，上下走动即可覆盖整圈墙）；候选为空则退化为 CP。
     occupied_role_cells = set(turrets) | {cp}
     repair_post: Pos | None = None
-    best_score = -1
+    # 修理工就位点（IKHYU4）：优先**邻接正面（迎敌侧）墙**，再取**靠基地中心（中间）**，
+    # 避免因"拐角邻墙更多"而站到拐角。
+    base_cx = station.pos.x + 0.5
+    base_cy = station.pos.y - 0.5
+    wall_set = set(walls)
+    if front == "W":
+        axis, pext = "x", 3
+    elif front == "E":
+        axis, pext = "x", -2
+    elif front == "N":
+        axis, pext = "y", -2
+    else:
+        axis, pext = "y", 3
+
+    def _is_front_wall(p: Pos) -> bool:
+        off = (p.x - xmin) if axis == "x" else (p.y - ymin)
+        return off == pext
+
+    best_key = None
     for cell in ring1:
         if cell in occupied_role_cells or cell in base_cells:
             continue
         if not turn.land(cell):
             continue
-        adj = sum(1 for nb in cell.neighbours() if nb in set(walls))
-        if adj > best_score:
-            best_score = adj
+        front_adj = sum(
+            1 for nb in cell.neighbours() if nb in wall_set and _is_front_wall(nb)
+        )
+        center_dist = abs(cell.x - base_cx) + abs(cell.y - base_cy)
+        key = (-front_adj, center_dist, cell.x, cell.y)   # 贴正面墙优先；再靠中心
+        if best_key is None or key < best_key:
+            best_key = key
             repair_post = cell
     if repair_post is None:
         repair_post = cp

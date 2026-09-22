@@ -157,5 +157,55 @@ class TestSopByType(unittest.TestCase):
         self.assertIn("Bearer", prompt)
 
 
+class TestRepairPostCenter(unittest.TestCase):
+    def test_repair_post_prefers_middle_not_corner(self):
+        """IKHYU4：修理工就位点应在墙内**中间**（贴正面墙），而非拐角。"""
+        sim = make_sim()
+        brain = Brain()
+        brain.decide(sim.payload())
+        post = brain.layout.repair_post
+        st = sim.role(10013)["pos"]
+        anchor = (st["x"], st["y"] - 1)
+        dx, dy = post.x - anchor[0], post.y - anchor[1]
+        # 正面(front=W)列在 dx=2；中间 dy∈{0,1}（拐角为 dy∈{-1,2}）
+        self.assertEqual(dx, 2)
+        self.assertIn(dy, (0, 1), f"就位点应在中间而非拐角，实际 dy={dy}")
+
+
+class TestMineStuckBlacklist(unittest.TestCase):
+    def test_mine_stuck_blacklisted(self):
+        """IKHYU1：移动卡死导致采不到矿 → 拉黑该矿，避免清矿后立刻重选死循环。"""
+        from agent.brain import _Ctx
+        sim = make_sim(mines={(6, 22): "stone"})
+        turn = Turn.load(sim.payload())
+        unit = next(u for u in turn.ours if u.unit_id == W1)
+        fsm = WorkerFSM(W1)
+        fsm.mine = Pos(6, 22)
+        fsm._mine_cmd = lambda *a, **k: None   # 模拟移动卡死
+        ctx = _Ctx({})
+        ctx.reserved = set()
+        ctx.dusk_avoid = False
+        ctx.mine_blacklist = {}
+        fsm._mine_flow(turn, unit, ctx, prefer="money")
+        self.assertGreater(ctx.mine_blacklist.get(Pos(6, 22), 0), turn.round_no,
+                           "卡死矿应被拉黑")
+
+
+class TestWallFixerDay3(unittest.TestCase):
+    def test_day3_stocks_at_least_3(self):
+        """IKHYU3：修理工从第 3 天起至少屯 3 个围墙修复包。"""
+        from agent.planners.upgrade import UpgradePlanner
+        sim = make_sim(gold=300)
+        sim.round_no = 261  # Day3
+        for i, pos in enumerate([(9, 20), (10, 20), (9, 21)]):
+            sim.roles.append(sim._role(90000 + i, pos[0], pos[1], "rocket", 1500, level=2))
+        sim.roles.append(sim._role(91000, 12, 20, "wall", 1000, level=1))
+        turn = Turn.load(sim.payload())
+        missions = UpgradePlanner().plan(turn, cp=Pos(9, 23), front="W")
+        stock = [m for m in missions if m.kind == "stock" and m.voucher == "WallFixer"]
+        self.assertTrue(stock)
+        self.assertGreaterEqual(stock[0].qty, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

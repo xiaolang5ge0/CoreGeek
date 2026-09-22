@@ -66,6 +66,7 @@ REPAIR_MARGIN = 3           # 修理工归位余量（距天黑 ≤ 路径 + 3�
 REPAIR_STONE_KEEP = 5       # 修理工常备石头（修墙用），低于此不卖
 RETURN_STICKY_DAY = 3       # D3+ 修理工回防粘性：一旦开始返回，跨昼夜持续到进墙
 RETURN_MARGIN = 6           # 矿工返程 deadline 余量（当前回合 + 归程 + 6 ≥ 白天/夜间截止）
+MINER_RETURN_DAY = 9        # 挖矿工从第 9 夜起才考虑夜间回防（用户 2026-09-23）
 
 
 class WorkerFSM:
@@ -148,6 +149,10 @@ class WorkerFSM:
             self.state = STATE_FREE
             return use_command(med)
         return None
+
+    def note_move_failure(self) -> None:
+        """反馈：上回合移动失败（目标被占/争夺）→ 加速解卡看门狗。"""
+        self._stuck_moves += 1
 
     def _move(self, step: Pos, ctx) -> dict[str, Any] | None:
         self._stuck_moves += 1
@@ -258,9 +263,8 @@ class WorkerFSM:
                 base_threat = any(distance(r, station.pos) <= 6 for r in ctx.robot_cells)
                 if base_threat and distance(unit.pos, station.pos) <= 3:
                     return None
-        # D6：返程 deadline（仅白天，入夜前回基地附近）；**夜间不强制回防**
-        # （用户 2026-09-23：夜间无威胁时继续采矿/卖钱，返程死线只用于天黑前避险）
-        if turn.is_day and self._past_return_deadline(turn, unit, ctx):
+        # D6：返程 deadline（白天入夜前回基地附近）；夜间默认不回防，仅第 9 夜起考虑
+        if (turn.is_day or turn.day_index >= MINER_RETURN_DAY) and self._past_return_deadline(turn, unit, ctx):
             return self._go_home(
                 turn, unit, ctx,
                 getattr(ctx, "safe_anchor", None) or ctx.home_anchor,
@@ -310,7 +314,9 @@ class WorkerFSM:
                 cmd = self._mine_cmd(turn, unit, ctx)
                 if cmd is not None:
                     return cmd
+                # 移动卡死/不可达 → 拉黑该矿 20 回合，防止"清矿→立刻重选同一矿"死循环
                 ctx.note(self.unit_id, "mine_unreachable")
+                ctx.block_mine(self.mine, turn.round_no + 20)
                 self.mine = None
         # FREE：机会性卖货（需要凑武器升级费 / 路过 / 货值够）
         self.state = STATE_FREE
@@ -322,7 +328,12 @@ class WorkerFSM:
             ctx.note(self.unit_id, "no_mine")
             return None
         self.state = STATE_MINE_LOCKED
-        return self._mine_cmd(turn, unit, ctx)
+        cmd = self._mine_cmd(turn, unit, ctx)
+        if cmd is None:
+            # 移动卡死/不可达 → 拉黑该矿，防止反复重选同一矿死循环
+            ctx.block_mine(self.mine, turn.round_no + 20)
+            self.mine = None
+        return cmd
 
     def _batch_full(self, unit: Unit) -> bool:
         return bool(

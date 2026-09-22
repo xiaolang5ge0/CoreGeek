@@ -293,6 +293,11 @@ class Brain:
                 penalty = 10 if previous <= turn.round_no else 40
                 self.mine_blacklist[pos] = turn.round_no + penalty
                 trace.setdefault("mine_blocked", []).append(pos.dump())
+            elif action == "move" and not ok:
+                # 移动失败（目标被占/争夺）→ 加速解卡看门狗，尽快放弃不可达目标
+                fsm = self.worker_fsms.get(role_id)
+                if fsm is not None:
+                    fsm.note_move_failure()
         if relearn and self.layout is not None and turn.station() is not None:
             self.layout = compute_layout(turn, self.front, self.buildable)
             trace["layout_recomputed"] = True
@@ -460,24 +465,26 @@ class Brain:
         if pioneer is not None:
             ctx.home_anchor = layout.control_point
             prev_state = self.pioneer_fsm.state
-            cmd = self.pioneer_fsm.day_cmd(turn, pioneer, layout.control_point, ctx)
-            if cmd:
-                commands[pioneer.unit_id] = cmd
-                ctx.reserve_from(cmd)
-            # 新任务确认 → 重置求解会话（同文本任务重复接取也必须全新开始）
-            if self.pioneer_fsm.state == STATE_TASK_WORK and prev_state != STATE_TASK_WORK:
-                self.task_session.reset()
-            # 任务求解：仅驻留任务点且任务进行中（submit 不覆盖走位指令）
+            # 任务求解优先（IKHYU3 根因）：驻留任务点且任务进行中时先跑求解——
+            # submit 占本回合角色动作；这样"入夜前归位"不会在答案就绪时抢走动作、导致任务被终止。
             if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
                 out = self.task_planner.work(turn, self.task_session)
-                # 规则（接口文档 errorCode=5）：自进化任务执行期间 LLM 不限次且不占每日额度
                 if out.prompt:
                     ctx.prompt = out.prompt
                     ctx.trace["llm_task"] = True
                 ctx.execute_cmd = out.execute_cmd
-                if out.submit is not None and pioneer.unit_id not in commands:
+                if out.submit is not None:
                     commands[pioneer.unit_id] = out.submit
                     ctx.trace.setdefault("task", {})["submit"] = True
+            # 本回合未提交，再让 FSM 决定走位/接任务/归位
+            if pioneer.unit_id not in commands:
+                cmd = self.pioneer_fsm.day_cmd(turn, pioneer, layout.control_point, ctx)
+                if cmd:
+                    commands[pioneer.unit_id] = cmd
+                    ctx.reserve_from(cmd)
+            # 新任务确认 → 重置求解会话（同文本任务重复接取也必须全新开始）
+            if self.pioneer_fsm.state == STATE_TASK_WORK and prev_state != STATE_TASK_WORK:
+                self.task_session.reset()
         self._maybe_medicine(turn, commands)
 
     # ---- 黑夜 ----
@@ -558,21 +565,22 @@ class Brain:
             # 兵潮已清 + 天亮前有余量 → 开拓者出行动（任务/买券），不再蹲守
             if not robots_alive and turn.rounds_until_dawn > 30:
                 prev = self.pioneer_fsm.state
-                cmd = self.pioneer_fsm.day_cmd(turn, pioneer, cp, ctx)
-                if cmd:
-                    commands[pioneer.unit_id] = cmd
-                    ctx.reserve_from(cmd)
-                if self.pioneer_fsm.state == STATE_TASK_WORK and prev != STATE_TASK_WORK:
-                    self.task_session.reset()
+                # 任务求解优先：答案就绪先提交（同 _day，防走位抢动作）
                 if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
                     out = self.task_planner.work(turn, self.task_session)
-                    # 任务执行期间 LLM 不限次且不占每日额度（接口文档 errorCode=5）
                     if out.prompt:
                         ctx.prompt = out.prompt
                         ctx.trace["llm_task"] = True
                     ctx.execute_cmd = out.execute_cmd
-                    if out.submit is not None and pioneer.unit_id not in commands:
+                    if out.submit is not None:
                         commands[pioneer.unit_id] = out.submit
+                if pioneer.unit_id not in commands:
+                    cmd = self.pioneer_fsm.day_cmd(turn, pioneer, cp, ctx)
+                    if cmd:
+                        commands[pioneer.unit_id] = cmd
+                        ctx.reserve_from(cmd)
+                if self.pioneer_fsm.state == STATE_TASK_WORK and prev != STATE_TASK_WORK:
+                    self.task_session.reset()
                 if pioneer.unit_id in commands:
                     ctx.reserve_from(commands[pioneer.unit_id])
             else:
@@ -584,6 +592,14 @@ class Brain:
                 if cmd:
                     commands[pioneer.unit_id] = cmd
                     ctx.reserve_from(cmd)
+        # 应急道具（Day6+，用户）：城墙危险时用炸弹/眩晕清群（占用开拓者动作，优先于开火）
+        if (
+            pioneer is not None and pioneer.unit_id not in commands
+            and turn.day_index >= 6 and ctx.wall_danger
+        ):
+            item_cmd = self._emergency_item(turn, pioneer)
+            if item_cmd is not None:
+                commands[pioneer.unit_id] = item_cmd
         # 操控占用动作（已确认）：移动中不能控炮 → 仅当开拓者无指令时才开火
         if pioneer is not None and pioneer.unit_id not in commands:
             self.fire.plan(turn, pioneer, commands, ctx.trace)
@@ -707,6 +723,27 @@ class Brain:
             self.llm_day = turn.day_index
             self.llm_calls_today = 0
         return self.llm_calls_today < LLM_DAILY_LIMIT
+
+    def _emergency_item(self, turn: Turn, pioneer) -> dict[str, Any] | None:
+        """应急道具（Day6+）：找机器人最密的格（3×3 内最多，且靠基地），用炸弹/眩晕。"""
+        item = next((i for i in pioneer.backpack if i in ("Bomb", "DizzyWeapon")), None)
+        if item is None:
+            return None
+        station = turn.station()
+        robots = [r for r in turn.robots if r.alive]
+        if station is None or len(robots) < 3:
+            return None
+        best, best_n = None, 0
+        for r in robots:
+            n = sum(1 for o in robots if distance(r.pos, o.pos) <= 1)
+            if n > best_n or (
+                n == best_n and best is not None
+                and distance(r.pos, station.pos) < distance(best, station.pos)
+            ):
+                best, best_n = r.pos, n
+        if best is None or best_n < 3:
+            return None
+        return use_command(item, best)
 
     def _need_weapon_gold(self, turn: Turn) -> bool:
         """有武器未到 L2 且金币不足 → 挖矿工去卖钱凑升级费。"""

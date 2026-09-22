@@ -242,9 +242,8 @@ class UpgradePlanner:
             elif turn.day_index >= 4:
                 desired = min(FIXER_STOCK_MAXED, max(FRONT_STOCK_TARGET, len(l3_walls)))
             else:
-                desired = 2
-                if l3_walls:
-                    desired = min(FIXER_STOCK_MAX, max(2, len(l3_walls)))
+                # Day3+ 常备 ≥3（用户 IKHYU3：第4天墙被攻破，需提前屯修复包）
+                desired = min(FIXER_STOCK_MAX, max(3, len(l3_walls)))
             held = sum(
                 u.backpack.count("WallFixer")
                 for u in turn.ours
@@ -269,6 +268,19 @@ class UpgradePlanner:
                     missions.append(
                         UpgradeMission(voucher, cost, None, "stock", 47, qty=target)
                     )
+        # 10. 应急道具（Day6+，用户 2026-09-23）：关键围墙/炮塔升级后、有余钱时备炸弹/眩晕
+        #     （危险夜用炸弹清群/眩晕拖时间，占用开拓者动作）
+        if turn.day_index >= 6 and not weapons_need_l2:
+            front_ok = front_l2_n >= FRONT_L2_TARGET or all(
+                w.level >= 2 for w in front_wall_units
+            )
+            if front_ok and turn.gold >= RICH_GOLD:
+                held = sum(
+                    u.backpack.count("Bomb") + u.backpack.count("DizzyWeapon")
+                    for u in turn.ours
+                )
+                if held < 2:
+                    add("Bomb", 100, None, "stock", 52)
         # 去重：同一建筑只保留最高优先（小=高）的一条任务
         seen: set = set()
         uniq: list[UpgradeMission] = []
