@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""任务流场景仿真 v2（开发调试用，不打包）：WS 工程修复类任务，全程确定性零 LLM。"""
+"""任务流场景仿真 v3（开发调试用，不打包）：WS 工程修复类，健壮探索→探测→TOKEN 提交。
+
+用法：python tools/simulate_task.py [rounds]
+"""
 from __future__ import annotations
 
 import sys
@@ -20,24 +23,22 @@ TASK = {
     "timeoutRounds": 60,
 }
 
-WS_LOCATE_RESULT = (
-    "[exitCode:0]\n__FILE:/tmp/selfEvolutionTask/ws_3/task_ws3.md\n"
+ENG_EXPLORE = (
+    "[exitCode:0]\n"
+    "__FILE:/tmp/selfEvolutionTask/ws_3/task_ws3.md\n"
+    "=== TASK ===\n任务：修复 ws_3 工程，通过 ./check\n"
+    "=== FILE:/tmp/selfEvolutionTask/ws_3/spec.md ===\n目录 data 权限 755\n"
+    "=== LIST ===\n/tmp/selfEvolutionTask/ws_3/check 755\n"
     "__DIR:/tmp/selfEvolutionTask/ws_3\n"
-    "__DOC:/tmp/selfEvolutionTask/ws_3/task_ws3.md\n"
-    "任务：修复 ws_3 工程，通过 ./check\n__END"
 )
 
 
 def ws_handler(cmd: str) -> str:
-    if "__FILE" in cmd:
-        return WS_LOCATE_RESULT
-    if "find . -maxdepth" in cmd:
-        return (
-            "[exitCode:0]\n.\n./check\n./spec.md\n__SPEC__\n目录 data 权限 755\n"
-            "__CHECK__\n[FAIL] DIR data — 期望 exists,755"
-        )
-    if "mkdir" in cmd:
-        return "[exitCode:0]\n[PASS] all checks passed\nTOKEN: abc123token"
+    if "find /tmp/selfEvolutionTask" in cmd:
+        return ENG_EXPLORE
+    if "-maxdepth 3 -type f -name check" in cmd:
+        # 模拟工作区已就绪：./check 通过并输出 TOKEN → 确定性提交（零 LLM）
+        return "[exitCode:0]\n__WS:/tmp/selfEvolutionTask/ws_3\n[ OK ] 全部通过\nTOKEN: abc123token\n"
     return "[exitCode:0]\n"
 
 
@@ -45,6 +46,7 @@ WATCH = {1, 11, 14, 30, 55, 70, 71, 90, 140, 200, 260}
 
 
 def main() -> None:
+    rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 260
     sim = SimWorld(
         station_pos=(10, 24),
         mines={(6, 22): "stone", (8, 20): "copper", (14, 6): "iron"},
@@ -54,7 +56,7 @@ def main() -> None:
     )
     brain = Brain()
     respawns = [(8, 20, "copper"), (16, 14, "copper"), (6, 22, "stone"), (9, 19, "copper")]
-    for r in range(1, 261):
+    for r in range(1, rounds + 1):
         if not sim.mines and respawns:
             x, y, kind = respawns.pop(0)
             sim.add_mine((x, y), kind)
@@ -80,3 +82,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

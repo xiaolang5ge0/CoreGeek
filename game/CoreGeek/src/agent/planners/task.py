@@ -1,15 +1,16 @@
-"""L3 TaskPlanner：自进化任务（严格按 issue#21《自进化任务策略》重构）。
+"""L3 TaskPlanner：自进化任务（issue#21 7 阶段 + 健壮沙箱探索）。
 
-7 阶段 FSM：
-  FIND_FILES → READ_FILES → LLM_LOOP → WAIT_CMD_RESULT / WAIT_LLM → SUBMIT_ANSWER → COMPLETED
+关键修复（2026-09-22 issue#23/#24 复盘）：
+1. **任务期 LLM 不限次**：接口文档 errorCode=5 明确"自进化任务执行期间 LLM 不限次且
+   不计入每日 3 次额度"。brain 不再按日限额拦截任务 prompt（此前任务1用光 3 次额度 →
+   任务2 的 prompt 被静默丢弃，FSM 在空 llmResp 上空转后强制结束 = "读完文档就停摆"）。
+2. **健壮探索**：单条命令定位任务文件 + 读取同目录 README/API_DOCS/ws_*/spec.md +
+   列出目录权限，替代易失的 find→cat→find→cat 多步（用户提供的模板）。
+3. **命令执行加固**：工程类任务自动锚定工作目录（cd "$ws"）+ 主动去 CRLF + ./check；
+   从任意命令输出提取 TOKEN 直接提交；LLM 命令自动补 cd（修 teamB r17 漏 cd 的失败）。
 
-要点：
-- 文件递归读取：从 phase_task 提取 .md 文件名 → find 定位 → cat 读取 → 若内容引用其他 .md → 继续查找
-- LLM 交互：每回合把 任务描述+文件内容+命令历史+SOP 组装成 prompt，要求 LLM 只返回 JSON
-      {"cmd": "", "answer": "", "isFinished": true|false}
-  循环：有 cmd → 沙盒执行 → 带结果回到 LLM；有 answer/isFinished → 提交；空 JSON → 重试（超 3 次强制结束）
-- 容错：连续 3 次非 JSON → 强制结束（不提交）；错误回复回传下次 prompt；JSON 解析容忍（先 loads 再正则提 {...}）
-- SOP 自进化：第一天完成前 2 个任务后提取 SOP；第二天起 prompt 附带匹配 SOP
+阶段：EXPLORE_FILES → (ENGINEER_PROBE) → LLM_LOOP → WAIT_CMD_RESULT/WAIT_LLM
+      → SUBMIT_ANSWER → COMPLETED
 """
 from __future__ import annotations
 
@@ -21,28 +22,40 @@ from typing import Any
 from ..protocol import Turn, submit_answer_command
 
 # ---- 阶段 ----
-ST_FIND = "FIND_FILES"
-ST_READ = "READ_FILES"
+ST_EXPLORE = "EXPLORE_FILES"
+ST_PROBE = "ENGINEER_PROBE"
 ST_LLM = "LLM_LOOP"
 ST_WAIT_CMD = "WAIT_CMD_RESULT"
 ST_WAIT_LLM = "WAIT_LLM"
 ST_SUBMIT = "SUBMIT_ANSWER"
 ST_DONE = "COMPLETED"
+# 兼容旧名（外部引用）
+ST_FIND = ST_EXPLORE
+ST_READ = ST_EXPLORE
 
 MAX_NON_JSON = 3       # 连续非 JSON 上限 → 强制结束
-MAX_LLM_LOOPS = 14     # LLM 循环上限（防死循环）
+MAX_LLM_LOOPS = 16     # LLM 循环上限（防死循环）
+EXPLORE_LIMIT = 8000   # 探索输出保留字符数（需容纳 API_DOCS 全文/密钥）
 
-_MD_NAME = re.compile(r"[A-Za-z0-9_\-/]+\.md")
+_FILE_NAME = re.compile(r"[A-Za-z0-9_\-/]+\.(?:md|txt)", re.I)
 _JSON_BLOCK = re.compile(r"\{.*\}", re.S)
+_TOKEN = re.compile(r"TOKEN\s*[:：]\s*([A-Za-z0-9_\-]+)", re.I)
+_WS_DIR = re.compile(r"__WS:(\S+)")
+_DIR = re.compile(r"__DIR:(\S*)")
+_FILE = re.compile(r"__FILE:(\S*)")
 
 
-def _extract_md_names(text: str) -> list[str]:
+def _extract_file_names(text: str) -> list[str]:
     out = []
-    for m in _MD_NAME.findall(text or ""):
+    for m in _FILE_NAME.findall(text or ""):
         name = m.rsplit("/", 1)[-1]      # 只要文件名
         if name not in out:
             out.append(name)
     return out
+
+
+# 兼容旧名
+_extract_md_names = _extract_file_names
 
 
 def _parse_llm_json(text: str) -> dict | None:
@@ -67,14 +80,17 @@ def _parse_llm_json(text: str) -> dict | None:
 
 @dataclass
 class TaskSession:
-    stage: str = ST_FIND
+    stage: str = ST_EXPLORE
     task_text: str = ""
     task_key: str = ""                                   # SOP 匹配键
-    find_queue: list = field(default_factory=list)       # 待 find 的 .md 文件名
-    read_queue: list = field(default_factory=list)       # 待 cat 的 .md 文件名
-    files: dict = field(default_factory=dict)            # 文件名 → 内容
-    pending_find: str | None = None
-    pending_read: str | None = None
+    target_name: str = "task_*.md"                       # 待定位的任务文件名
+    task_dir: str = ""                                   # 工作目录（工程类=ws 目录）
+    explore_output: str = ""                             # 健壮探索的完整输出
+    explore_sent: bool = False
+    engineer: bool = False
+    probe_sent: bool = False
+    crlf_fixed: bool = False
+    files: dict = field(default_factory=dict)            # 文件名 → 内容（兼容旧引用）
     pending_cmd: str | None = None
     cmd_history: list = field(default_factory=list)      # [(cmd, result)]
     llm_pending: bool = False
@@ -99,7 +115,7 @@ class PlannerOutput:
 class TaskPlanner:
     def __init__(self) -> None:
         self.sop: dict[str, str] = {}       # task_key → SOP 文本（跨任务复用）
-        self.completed: int = 0             # 已完成任务数（用于第一天提取 SOP）
+        self.completed: int = 0             # 已完成任务数（用于提取 SOP）
 
     # ---- 主入口 ----
     def work(self, turn: Turn, session: TaskSession) -> PlannerOutput:
@@ -111,8 +127,9 @@ class TaskPlanner:
             session.reset()
             session.task_text = turn.phase_task
             session.task_key = self._task_key(turn.phase_task)
-            session.find_queue = _extract_md_names(turn.phase_task)
-            session.stage = ST_FIND
+            names = _extract_file_names(turn.phase_task)
+            session.target_name = names[0] if names else "task_*.md"
+            session.stage = ST_EXPLORE
 
         # 1. 回收异步结果
         if session.pending_cmd is not None:
@@ -132,12 +149,13 @@ class TaskPlanner:
         return self._advance(turn, session, out)
 
     def _advance(self, turn: Turn, session: TaskSession, out: PlannerOutput) -> PlannerOutput:
-        # LLM 给的命令 → 下发沙盒执行
+        # LLM 给的命令 → 下发沙盒执行（自动锚定工作目录）
         pend = getattr(session, "_pending_llm_cmd", None)
         if pend:
             session._pending_llm_cmd = None  # type: ignore[attr-defined]
-            out.execute_cmd = pend
-            session.pending_cmd = pend
+            cmd = self._anchor(pend, session)
+            out.execute_cmd = cmd
+            session.pending_cmd = cmd
             session._pending_kind = "llm"  # type: ignore[attr-defined]
             session.stage = ST_WAIT_CMD
             return out
@@ -160,33 +178,26 @@ class TaskPlanner:
         # 等待中
         if session.stage in (ST_WAIT_CMD, ST_WAIT_LLM):
             return out
-        # FIND_FILES
-        if session.stage == ST_FIND:
-            if session.pending_find is None:
-                if session.find_queue:
-                    session.pending_find = session.find_queue.pop(0)
-                else:
-                    session.stage = ST_READ
-                    return self._advance(turn, session, out)
-            name = session.pending_find
+        # 健壮探索（单条命令）
+        if session.stage == ST_EXPLORE:
+            if not session.explore_sent:
+                session.explore_sent = True
+                cmd = self._explore_cmd(session)
+                out.execute_cmd = cmd
+                session.pending_cmd = cmd
+                session._pending_kind = "explore"  # type: ignore[attr-defined]
+                session.stage = ST_WAIT_CMD
+                return out
+            session.stage = ST_LLM
+            return self._advance(turn, session, out)
+        # 工程类确定性探测（去 CRLF + ./check）
+        if session.stage == ST_PROBE:
+            session.probe_sent = True
+            cmd = self._probe_cmd(session)
+            out.execute_cmd = cmd
+            session.pending_cmd = cmd
+            session._pending_kind = "probe"  # type: ignore[attr-defined]
             session.stage = ST_WAIT_CMD
-            out.execute_cmd = f'find / -maxdepth 10 -name "{name}" 2>/dev/null | head -5'
-            session.pending_cmd = out.execute_cmd
-            session._pending_kind = "find"  # type: ignore[attr-defined]
-            return out
-        # READ_FILES
-        if session.stage == ST_READ:
-            if session.pending_read is None:
-                if session.read_queue:
-                    session.pending_read = session.read_queue.pop(0)
-                else:
-                    session.stage = ST_LLM
-                    return self._advance(turn, session, out)
-            name = session.pending_read
-            session.stage = ST_WAIT_CMD
-            out.execute_cmd = f'cat "$(find / -maxdepth 10 -name "{name}" 2>/dev/null | head -1)"'
-            session.pending_cmd = out.execute_cmd
-            session._pending_kind = "read"  # type: ignore[attr-defined]
             return out
         # LLM_LOOP
         if session.stage == ST_LLM:
@@ -200,31 +211,106 @@ class TaskPlanner:
             return out
         return out
 
+    # ---- 命令构造 ----
+    def _explore_cmd(self, session: TaskSession) -> str:
+        """健壮探索（用户模板）：定位任务文件 + 读同目录文档 + 列目录权限。"""
+        name = session.target_name or "task_*.md"
+        return (
+            f'f=$(find /tmp/selfEvolutionTask -type f -iname "{name}" -print -quit 2>/dev/null); '
+            f'[ -n "$f" ] || f=$(find / -maxdepth 10 -type f -iname "{name}" -print -quit 2>/dev/null); '
+            'd=$(dirname "$f"); echo "__FILE:$f"; echo "=== TASK ==="; cat "$f" 2>/dev/null; '
+            'for p in "$d/README.md" "$d/API_DOCS.md" "$d"/ws_*/spec.md; do '
+            '[ -f "$p" ] && { echo "=== FILE:$p ==="; cat "$p"; }; done; '
+            'echo "=== LIST ==="; find "$d" -maxdepth 3 -type f -printf \'%p %m\\n\' 2>/dev/null; '
+            'echo "__DIR:$d"'
+        )
+
+    def _probe_cmd(self, session: TaskSession) -> str:
+        """工程类确定性探测：定位 check → 去 CRLF → chmod → ls → ./check（拿 FAIL 清单）。"""
+        d = session.task_dir or "."
+        return (
+            f'c=$(find "{d}" -maxdepth 3 -type f -name check -print -quit 2>/dev/null); '
+            'w=$(dirname "$c"); echo "__WS:$w"; cd "$w" && sed -i \'s/\\r$//\' check 2>/dev/null; '
+            'chmod +x check 2>/dev/null; ls -la; echo "=== CHECK ==="; ./check 2>&1'
+        )
+
+    @staticmethod
+    def _anchor(cmd: str, session: TaskSession) -> str:
+        """LLM 命令锚定工作目录：未显式 cd 且未用绝对路径时补 `cd "$dir" && `。"""
+        c = (cmd or "").strip()
+        if not c or not session.task_dir:
+            return c
+        if re.search(r"(^|&&|;|\|)\s*cd\s", c) or c.startswith("/"):
+            return c
+        return f'cd "{session.task_dir}" && {c}'
+
     # ---- 命令结果 ----
     def _on_cmd_result(self, session: TaskSession, cmd: str, result: str) -> None:
         kind = getattr(session, "_pending_kind", None)
         session._pending_kind = None  # type: ignore[attr-defined]
-        if kind == "find":
-            paths = [p for p in (result or "").splitlines() if p.strip().endswith(".md")]
-            name = session.pending_find
-            session.pending_find = None
-            if name and name not in session.read_queue and name not in session.files:
-                session.read_queue.append(name)
-            session.stage = ST_FIND  # 继续找下一个
+        if kind == "explore":
+            self._on_explore(session, result)
             return
-        if kind == "read":
-            name = session.pending_read
-            session.pending_read = None
-            if name:
-                session.files[name] = (result or "")[:4000]
-                # 递归：内容引用其他 .md → 加入查找队列
-                for ref in _extract_md_names(result):
-                    if ref != name and ref not in session.files and ref not in session.find_queue:
-                        session.find_queue.append(ref)
-            session.stage = ST_READ if not session.find_queue else ST_FIND
+        if kind == "probe":
+            self._on_probe(session, result)
             return
-        # LLM 命令结果 → 回 LLM 循环
+        # LLM / 工程修复命令结果
+        if self._try_token_submit(session, result):
+            return
+        if self._maybe_crlf_fix(session, result):
+            return
         session.stage = ST_LLM
+
+    def _on_explore(self, session: TaskSession, result: str) -> None:
+        session.explore_output = (result or "")[:EXPLORE_LIMIT]
+        file_m = _FILE.search(result or "")
+        dir_m = _DIR.search(result or "")
+        path = (file_m.group(1) if file_m else "").strip()
+        if dir_m:
+            session.task_dir = dir_m.group(1).strip()
+        if path:
+            session.files[path.rsplit("/", 1)[-1]] = session.explore_output
+        # 工程类识别：存在 ws_N 工作区且含 check 脚本（题面或探索输出）
+        out = session.explore_output
+        session.engineer = bool(
+            re.search(r"ws_\d+", out) and re.search(r"\bcheck\b", out)
+        ) or (
+            "ws_" in (session.task_text or "") and "check" in (session.task_text or "")
+        )
+        if self._try_token_submit(session, result):
+            return
+        if session.engineer and not session.probe_sent:
+            session.stage = ST_PROBE
+            return
+        session.stage = ST_LLM
+
+    def _on_probe(self, session: TaskSession, result: str) -> None:
+        ws = _WS_DIR.search(result or "")
+        if ws and ws.group(1).strip() not in ("", "."):
+            session.task_dir = ws.group(1).strip()
+        if self._try_token_submit(session, result):
+            return
+        session.stage = ST_LLM
+
+    def _try_token_submit(self, session: TaskSession, result: str) -> bool:
+        """任意命令输出里的 `TOKEN: xxx` → 直接提交（零 LLM 往返）。"""
+        m = _TOKEN.search(result or "")
+        if not m:
+            return False
+        session.answer = json.dumps({"token": m.group(1)}, ensure_ascii=False)
+        session.stage = ST_SUBMIT
+        return True
+
+    def _maybe_crlf_fix(self, session: TaskSession, result: str) -> bool:
+        """工程类命令因 CRLF/相对路径失败 → 确定性重试（去 CRLF + chmod + ./check）。"""
+        if not session.engineer or session.crlf_fixed:
+            return False
+        low = (result or "").lower()
+        if "bad interpreter" not in low and "^m" not in low and "\\r" not in result:
+            return False
+        session.crlf_fixed = True
+        session.stage = ST_PROBE
+        return True
 
     # ---- LLM 结果 ----
     def _on_llm_result(self, session: TaskSession, text: str) -> None:
@@ -254,14 +340,20 @@ class TaskPlanner:
             return
         session.stage = ST_LLM
 
-    # ---- prompt 组装（严格按 MD 格式）----
+    # ---- prompt 组装 ----
     def _build_prompt(self, session: TaskSession) -> str:
         parts = ["=== 任务描述 ===", session.task_text or ""]
-        for name, content in list(session.files.items())[-6:]:
+        if session.explore_output:
+            parts += ["=== 沙箱探索结果（任务文件/文档/目录权限） ===", session.explore_output[:6000]]
+        for name, content in list(session.files.items())[-4:]:
+            if name.startswith("/") or content == session.explore_output:
+                continue
             parts += [f"=== 文件: {name} ===", content[:2000]]
         if session.cmd_history:
             cmd, result = session.cmd_history[-1]
-            parts += ["=== 命令执行结果 ===", f"命令: {cmd}", f"结果: {(result or '')[:2000]}"]
+            parts += ["=== 上回合命令结果 ===", f"命令: {cmd}", f"结果: {(result or '')[:2500]}"]
+        if session.task_dir:
+            parts.append(f"工作目录: {session.task_dir}（命令已自动 cd 到此目录）")
         sop = self.sop.get(session.task_key)
         if sop:
             parts += ["=== 参考 SOP（历史任务沉淀） ===", sop[:1500]]
@@ -269,13 +361,16 @@ class TaskPlanner:
             parts.append("你上一次的返回未按要求仅返回JSON，请勿再犯。")
         parts.append(
             "请只返回 JSON: {\"cmd\": \"\", \"answer\": \"\", \"isFinished\": true|false}\n"
-            "说明：cmd=要执行的 shell 命令（如 curl API 调用，为空则不执行）；"
+            "说明：cmd=要执行的 shell 命令（单行，如 curl API 调用，为空则不执行）；"
             "answer=最终答案(JSON字符串，为空则未完成)；isFinished=任务是否结束。\n"
-            "分页提示：关注分页参数有效性，优先用 limit/offset 或对齐响应字段。"
+            "工程修复类：按 spec.md/check 的 FAIL 清单修复（mkdir -p/chmod/sed 第N行），"
+            "完成后运行 ./check，输出含 `TOKEN: xxx` 即代表通过（直接作为 token 答案提交）。\n"
+            "API 类：用 curl 调 http://localhost:8899（文档字段可能过期，以实测为准），"
+            "认证头与参数名以文档/实测为准；分页用 limit/offset。"
         )
         return "\n".join(parts)
 
-    # ---- SOP 提取（第一天完成前 2 个任务后）----
+    # ---- SOP 提取（完成前 2 个任务后）----
     def _maybe_extract_sop(self, session: TaskSession) -> None:
         if self.completed > 2:
             return
@@ -289,9 +384,9 @@ class TaskPlanner:
     @staticmethod
     def _task_key(task_text: str) -> str:
         """任务类型指纹（用于 SOP 匹配）：取任务文本里的关键词/文件名。"""
-        names = _extract_md_names(task_text)
+        names = _extract_file_names(task_text)
         if names:
-            return names[0].rsplit("_", 1)[-1].replace(".md", "")  # task_1_alpha.md → alpha
+            return names[0].rsplit("_", 1)[-1].rsplit(".", 1)[0]  # task_1_alpha.md → alpha
         return (task_text or "")[:20]
 
 

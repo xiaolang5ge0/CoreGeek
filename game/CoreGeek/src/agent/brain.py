@@ -419,11 +419,10 @@ class Brain:
             # 任务求解：仅驻留任务点且任务进行中（submit 不覆盖走位指令）
             if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
                 out = self.task_planner.work(turn, self.task_session)
-                # 每日 LLM 上限 3 次（超出则不发 prompt）
-                if out.prompt and self._llm_budget_ok(turn):
+                # 规则（接口文档 errorCode=5）：自进化任务执行期间 LLM 不限次且不占每日额度
+                if out.prompt:
                     ctx.prompt = out.prompt
-                    self.llm_calls_today += 1
-                    ctx.trace["llm_used"] = self.llm_calls_today
+                    ctx.trace["llm_task"] = True
                 ctx.execute_cmd = out.execute_cmd
                 if out.submit is not None and pioneer.unit_id not in commands:
                     commands[pioneer.unit_id] = out.submit
@@ -510,9 +509,10 @@ class Brain:
                     self.task_session.reset()
                 if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
                     out = self.task_planner.work(turn, self.task_session)
-                    if out.prompt and self._llm_budget_ok(turn):
+                    # 任务执行期间 LLM 不限次且不占每日额度（接口文档 errorCode=5）
+                    if out.prompt:
                         ctx.prompt = out.prompt
-                        self.llm_calls_today += 1
+                        ctx.trace["llm_task"] = True
                     ctx.execute_cmd = out.execute_cmd
                     if out.submit is not None and pioneer.unit_id not in commands:
                         commands[pioneer.unit_id] = out.submit
@@ -602,7 +602,11 @@ class Brain:
         return 0 < turn.rounds_until_night <= distance(repairer.pos, home) + REPAIR_MARGIN
 
     def _llm_budget_ok(self, turn: Turn) -> bool:
-        """每日 LLM 上限 3 次（跨天重置）。"""
+        """每日 LLM 上限 3 次（跨天重置）。
+
+        注意：**仅用于非任务期 LLM**（如宝藏推断）。自进化任务执行期间 LLM 不限次且
+        不占额度（接口文档 errorCode=5），任务求解不调用本函数。
+        """
         if turn.day_index != self.llm_day:
             self.llm_day = turn.day_index
             self.llm_calls_today = 0

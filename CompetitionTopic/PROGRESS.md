@@ -7,8 +7,8 @@
 
 | 项 | 状态 |
 |---|---|
-| 当前阶段 | **P0~P5 + 十轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
-| 测试 | **106/106 通过** |
+| 当前阶段 | **P0~P5 + 十一轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
+| 测试 | **110/110 通过** |
 | 打包 | `game/CoreGeek/dist/CoreGeek.tar.gz`（**tar 顶层 CoreGeek/ 目录**，平台父目录解包后运行 `<root>/CoreGeek/main3.py`） |
 | 代码 | `game/CoreGeek/`，Python ≥3.11 纯标准库 |
 | 当前行为 | Day1 双工人建满14墙+3火箭；夜1-3 双工人全力采矿卖钱（无蹲防）；开拓者单人控3炮；Day4+ 修墙岗（墙血<50%才修、正面优先、L3→WallFixer、L1/L2→升级券）；WallRegistry 追踪攻破/补建并优先重升级；武器优先升级；任务确定性+LLM兜底；选矿我方侧优先 |
@@ -75,6 +75,20 @@
 | `location=请阅读` 参数污染 | 把 `phaseTask` 文本（"请阅读task_1_beijing.md…"）当成城市候选 | 参数值禁取自 `phaseTask`/提示语，只取文档/响应中的真实字段 |
 | 任务1 仍靠 LLM 三次 | 工程类确定性路径缺失（cat spec→改配置→去 CRLF 全靠 LLM） | 工程类 SOP 固化：find+cat spec → 按 spec 正则修复 → 去 CRLF → check |
 | 两局总分均 88（仅任务1的80分） | 任务2 超时失败，无 +80 | 以上修复后复测通过率 |
+
+## 实战修复记录·第十一轮（2026-09-22 issue#23/#24 复盘：任务期 LLM 额度误用 + 健壮探索）
+
+> 复盘方法见 `LOG_ANALYSIS_PLAYBOOK.md`；日志报告 `C:\Users\ZZL\AppData\Local\Temp\opencode\report_2324.txt`。
+
+| 问题 | 根因（解密日志实锤） | 修复 |
+|---|---|---|
+| **任务2 读完 API_DOCS 后停摆**（两局共有，未发 curl/未提交） | **LLM 日限额被误用到任务期**：任务1 用光 Day1 的 3 次额度（teamB r15/17/19，teamA r14/16/18）→ 任务2 的 prompt 被 `_llm_budget_ok` 静默丢弃 → FSM 在空 `llmResp` 上连续 3 次非 JSON 后强制结束。接口文档 errorCode=5 明确"任务执行期间 LLM 不限次且不计数" | brain 任务分支**不再查日限额、不计数**；`_llm_budget_ok` 仅用于非任务 LLM |
+| **teamB 任务1 失败（漏 cd）** | r17 LLM 命令 `sed ./check` 未带 `cd`，在默认目录执行 → `No such file`；无确定性兜底 | **命令锚定**：LLM 命令未显式 cd/非绝对路径 → 自动补 `cd "<工作目录>" && ` |
+| **工程类 CRLF 失败（exit126）** | `./check: /bin/sh^M: bad interpreter`（check 脚本 CRLF），靠 LLM 自觉去 CRLF | **工程确定性探测**：定位 check → `sed -i 's/\r$//'` → chmod → `./check`；命令失败含 `bad interpreter/^M` → 自动转探测重试 |
+| **多步 find→cat→find→cat 易失** | 每步 1 回合、依赖文件名提取与路径拼接 | **健壮探索（单命令，用户模板）**：定位任务文件 + 读同目录 README/API_DOCS/ws_*/spec.md + 列权限（`-printf '%p %m'`） |
+| **TOKEN 提交依赖 LLM** | check 通过输出 `TOKEN: xxx` 仍需 LLM 解析 | **TOKEN 自动提交**：任意命令输出命中 `TOKEN:` → 合成 `{"token":...}` 直接提交（零 LLM） |
+| 文件名提取仅 `.md` | 未覆盖 `.txt`/大小写 | 正则扩展 `.md|.txt`（`-iname` 大小写不敏感），失败回退 `task_*.md` |
+| **测试** | — | 重写 `test_task.py`（10 例：健壮探索/额度耗尽仍发 prompt/工程零 LLM TOKEN/CRLF 重试）；全量 **110/110 通过**；`simulate_task.py` 更新为零 LLM TOKEN 流程 |
 
 ## 实战修复记录·第十轮（2026-09-22 用户补充：围墙状态表 + L3 修复口径 + 补建墙重升级）
 

@@ -51,7 +51,7 @@
 
 | 参数 | 值 | 说明 |
 |---|---|---|
-| LLM_DAILY_LIMIT | **3** | 每日 LLM 调用上限（跨天重置）；任务求解也受此限 |
+| LLM_DAILY_LIMIT | **3** | 每游戏日 LLM 上限（跨天重置）；**仅约束非任务期 LLM**。自进化任务执行期间（接取→结束）LLM **不限次且不计数**（接口文档 errorCode=5）——此前误将任务求解也套日限额，导致任务1用光额度后任务2 prompt 被丢弃（issue#23/#24 根因） |
 
 ## 二、参数表（与代码常量一一对应 · 讨论/调参以此为准）
 
@@ -119,13 +119,17 @@
 
 | 参数 | 代码值 | 含义 | 状态 |
 |---|---|---|---|
-| **7 阶段 FSM** | `FIND_FILES → READ_FILES → LLM_LOOP → WAIT_CMD_RESULT/WAIT_LLM → SUBMIT_ANSWER → COMPLETED` | 同事验证过的流程 | CONFIRMED |
-| **文件递归读取** | phase_task 提取 `.md` → `find / -maxdepth 10 -name` 定位 → `cat` 读取 → 内容引用其他 `.md` 则继续查找 | 递归读全材料 | CONFIRMED |
-| **LLM-JSON 协议** | prompt = 任务描述+文件内容+命令历史+SOP；要求只返回 `{"cmd","answer","isFinished"}` | 固定协议 | CONFIRMED |
-| **循环** | 有 `cmd` → 沙盒执行 → 带结果回 LLM；有 `answer`/`isFinished` → 提交；空 JSON → 重试 | 驱动式探索 | CONFIRMED |
-| **容错** | 连续 **3 次非 JSON → 强制结束**（不提交）；错误回复回传；JSON 容忍解析（先 loads 再正则提 `{...}`）；prompt 含 curl 分页提示 | 防死循环 | CONFIRMED |
+| **任务 FSM** | `EXPLORE_FILES → (ENGINEER_PROBE) → LLM_LOOP → WAIT_CMD_RESULT/WAIT_LLM → SUBMIT_ANSWER → COMPLETED` | issue#21 7 阶段 + 健壮探索 | CONFIRMED |
+| **健壮探索（单命令）** | 一条命令：`find /tmp/selfEvolutionTask -iname <任务文件名>` 定位 → cat 任务文件 → 读同目录 `README.md/API_DOCS.md/ws_*/spec.md` → `find -printf '%p %m'` 列权限 → `__FILE:/__DIR:` 标记 | 用户模板；替代易失的多步 find→cat | CONFIRMED |
+| **文件名提取** | phase_task 提取 `.md/.txt`（大小写不敏感）；提取失败回退 `task_*.md` | 用户要求 | CONFIRMED |
+| **工程类确定性路径** | 识别 `ws_N`+`check` → 探测命令：定位 check → **去 CRLF** → chmod → `./check` 拿 FAIL 清单（零 LLM 探测） | 修实战 CRLF 失败 | CONFIRMED |
+| **命令锚定** | LLM 命令未显式 `cd` 且非绝对路径 → 自动补 `cd "<工作目录>" && ` | 修 teamB r17 漏 cd | CONFIRMED |
+| **TOKEN 自动提交** | 任意命令输出含 `TOKEN: xxx` → 直接合成 `{"token":"xxx"}` 提交（零 LLM 往返） | 确定性收割 | CONFIRMED |
+| **CRLF 确定性重试** | 工程类命令失败含 `bad interpreter/^M` → 自动转确定性探测重试 | 修实战 exit126 | CONFIRMED |
+| **LLM-JSON 协议** | prompt = 任务描述+探索结果+命令历史+SOP；要求只返回 `{"cmd","answer","isFinished"}` | 固定协议 | CONFIRMED |
+| **任务期 LLM 不限次** | 任务执行期间 prompt **不查日限额、不计数**（接口文档 errorCode=5） | 修 issue#23/#24 根因 | CONFIRMED |
+| **容错** | 连续 **3 次非 JSON → 强制结束**（不提交）；JSON 容忍解析（先 loads 再正则提 `{...}`） | 防死循环 | CONFIRMED |
 | **SOP 自进化** | 完成前 2 任务后提取 SOP（task_key→描述+命令序列+答案）；次日 prompt 附带匹配 SOP | 跨任务经验复用 | CONFIRMED |
-| **每日 LLM 上限** | `LLM_DAILY_LIMIT=3`（跨天重置） | 用户指定 | CONFIRMED |
 | 接取策略 | 两任务点交替（类型 1/2 轮换）；优先与上次不同类型；最近可用点 | issue#21 §12.7 | CONFIRMED |
 | acceptTask 失败 | **立即放弃 + 终身回避该任务点**（errorCode 4 封号红线） | 绝不重试 | CONFIRMED |
 
