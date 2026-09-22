@@ -110,21 +110,19 @@
 | 基地升级门槛 | RICH_GOLD=250 | 武器/墙之后 | CONFIRMED |
 | 升级任务时段 | 仅白天执行，夜间挂起 | 夜间出基地危险 | CONFIRMED |
 
-### 任务（task）
+### 任务（task · 严格按 issue#21《自进化任务策略》）
 
 | 参数 | 代码值 | 含义 | 状态 |
 |---|---|---|---|
-| 求解流程 | LOCATE(确定性定位) → 分类 → 工程修复(sed/mkdir 零LLM) / API(HARVEST探测) / 通用(LLM) | 确定性优先 | CONFIRMED |
+| **7 阶段 FSM** | `FIND_FILES → READ_FILES → LLM_LOOP → WAIT_CMD_RESULT/WAIT_LLM → SUBMIT_ANSWER → COMPLETED` | 同事验证过的流程 | CONFIRMED |
+| **文件递归读取** | phase_task 提取 `.md` → `find / -maxdepth 10 -name` 定位 → `cat` 读取 → 内容引用其他 `.md` 则继续查找 | 递归读全材料 | CONFIRMED |
+| **LLM-JSON 协议** | prompt = 任务描述+文件内容+命令历史+SOP；要求只返回 `{"cmd","answer","isFinished"}` | 固定协议 | CONFIRMED |
+| **循环** | 有 `cmd` → 沙盒执行 → 带结果回 LLM；有 `answer`/`isFinished` → 提交；空 JSON → 重试 | 驱动式探索 | CONFIRMED |
+| **容错** | 连续 **3 次非 JSON → 强制结束**（不提交）；错误回复回传；JSON 容忍解析（先 loads 再正则提 `{...}`）；prompt 含 curl 分页提示 | 防死循环 | CONFIRMED |
+| **SOP 自进化** | 完成前 2 任务后提取 SOP（task_key→描述+命令序列+答案）；次日 prompt 附带匹配 SOP | 跨任务经验复用 | CONFIRMED |
+| **每日 LLM 上限** | `LLM_DAILY_LIMIT=3`（跨天重置） | 用户指定 | CONFIRMED |
+| 接取策略 | 两任务点交替（类型 1/2 轮换）；优先与上次不同类型；最近可用点 | issue#21 §12.7 | CONFIRMED |
 | acceptTask 失败 | **立即放弃 + 终身回避该任务点**（errorCode 4 封号红线） | 绝不重试 | CONFIRMED |
-| LLM 协议 | 全段搜索 `CMD: <命令>` 或 `ANSWER: <JSON>`（兼容多行/前缀说明） | 兜底健壮性 | CONFIRMED |
-| **答案守卫** | 所有出口统一过 `_is_answer_like`：拒空壳/纯符号、拒 shell 报错、拒散文拒答 | 参考 issue#16（防 errorCode 2） | CONFIRMED |
-| **命令引号校验** | `_quotes_open` 状态机（正确判 `'`/`"` 嵌套）；引号不闭合的 LLM 命令拒收 | 参考 issue#16（防 bash EOF） | CONFIRMED |
-| **submit 重试** | submitAnswer 被拒 → 重发（SUBMIT_RETRY_CAP=2；拒收常为瞬时性） | 参考 issue#16（可挽回 80金+80分） | CONFIRMED |
-| token 直提 | 任务提及 token 或 `./check` 通过 且 输出含 hex≥8 的 TOKEN → 直接提交 | 参考 issue#16 | CONFIRMED |
-| LLM 限额 | 仅任务执行期调用（任务书：任务期不限次且不占每日 3 次） | 合规 | CONFIRMED |
-| 超时预算 | timeout_rounds（实战15）；deadline-2 最后向 LLM 要最佳猜测答案 | 任务预算极紧 | CONFIRMED |
-| 振荡降级 | MAX_LLM_LOOPS=4；命令连败 MAX_CMD_FAILS=4 → 转 LLM | 防死循环 | CONFIRMED |
-| 错误累积 | error_log 去重累积（exitCode/认证/参数/FAIL）送 LLM 推理 | 用户要求 | CONFIRMED |
 
 ## 三、术语定义（防歧义）
 

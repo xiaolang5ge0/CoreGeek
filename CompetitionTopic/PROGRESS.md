@@ -76,6 +76,17 @@
 | 任务1 仍靠 LLM 三次 | 工程类确定性路径缺失（cat spec→改配置→去 CRLF 全靠 LLM） | 工程类 SOP 固化：find+cat spec → 按 spec 正则修复 → 去 CRLF → check |
 | 两局总分均 88（仅任务1的80分） | 任务2 超时失败，无 +80 | 以上修复后复测通过率 |
 
+## 实战修复记录·第九轮（2026-09-22 任务求解器按 issue#21 重构）
+
+| 变更 | 内容 |
+|---|---|
+| **任务求解器重写** | 严格按同事验证过的《自进化任务策略》：7 阶段 FSM（FIND→READ→LLM_LOOP→WAIT_CMD/WAIT_LLM→SUBMIT→DONE）+ LLM-JSON 协议（`{cmd,answer,isFinished}`）+ 文件递归读取 + SOP 自进化 |
+| **容错** | 连续 3 次非 JSON 强制结束；错误回复回传；JSON 容忍解析；curl 分页提示 |
+| **SOP** | 完成前 2 任务后提取，次日 prompt 附带匹配 SOP（跨任务经验复用） |
+| **每日 LLM 限 3** | 跨天重置；任务求解也受此限 |
+| 移除 | 旧的 LOCATE/分类/确定性 HARVEST 流程与 timeout/submit_rejected 引用 |
+| 测试 | 重写 test_task.py（新协议：find→cat→LLM(cmd)→curl→LLM(answer)→submit；非 JSON 强制结束；容忍解析；SOP 提取） |
+
 ## 实战修复记录·第八轮（2026-09-22 角色固化 + 新闻经济 + 每日LLM限3）
 
 | 变更 | 内容 |
