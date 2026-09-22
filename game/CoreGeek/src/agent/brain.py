@@ -39,6 +39,7 @@ NIGHT_SAFE_DIST = 10        # 夜间矿/小贩安全半径（机器人距离）
 SPAWN_AVOID_DIST = 8        # 历史出生点走廊避让半径
 WORKER_DANGER_DIST = 8      # 工人召回半径
 BUILD_TRAVEL_BUFFER = 6     # 建墙预留回程缓冲（预留回合 = 待建墙数 + 缓冲）
+DUSK_AVOID_WINDOW = 12      # 白天临近入夜此回合数内，提前避开出生走廊矿/小贩
 DAY1_RUSH_DEADLINE = 50     # Day1 双工人建墙冲刺截止回合（预留收尾）
 DAY1_WALL_TARGET = 12       # Day1 目标墙数
 PIONEER_FLEE_DIST = 1       # 机器人贴到 CP 才撤离（过早撤离=整夜哑火，实战权衡）
@@ -75,6 +76,7 @@ class _Ctx:
     share_mines: bool = False
     robot_cells: tuple = ()
     spawn_cells: tuple = ()   # 历史夜间出生点（全局固定，首夜起累积）
+    dusk_avoid: bool = False  # 夜间 或 白天临近入夜 → 提前避开出生走廊
 
     def mine_unsafe(self, pos) -> bool:
         """位置处于机器人危险圈：当前活机器人或历史出生走廊 SPAWN_AVOID_DIST 内。"""
@@ -156,6 +158,8 @@ class Brain:
         ctx.spawn_cells = tuple(
             Pos(x, y) for entry in self.robot_spawn_log for (x, y) in entry["spawns"]
         )
+        # 白天临近入夜也提前避开出生走廊（用户要求：接近晚上时避开历史出生位置）
+        ctx.dusk_avoid = turn.is_night or (0 < turn.rounds_until_night <= DUSK_AVOID_WINDOW)
         self._record_news(turn, trace)
         ctx.prompt = ""
         ctx.execute_cmd = ""

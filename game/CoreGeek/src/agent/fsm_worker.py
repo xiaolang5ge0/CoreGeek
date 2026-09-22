@@ -318,8 +318,8 @@ class WorkerFSM:
 
     # ---- 采矿 ----
     def _mine_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        # 锁定矿进入机器人危险圈 → 放弃（夜间尤其致命）
-        if turn.is_night and ctx.mine_unsafe(self.mine):
+        # 锁定矿进入机器人危险圈/出生走廊（夜间或临近入夜）→ 放弃
+        if ctx.dusk_avoid and ctx.mine_unsafe(self.mine):
             ctx.note(self.unit_id, "mine_unsafe_release")
             self.mine = None
             self.state = STATE_FREE
@@ -351,8 +351,8 @@ class WorkerFSM:
                 continue
             if ctx.is_mine_blocked(pos, turn.round_no):
                 continue
-            # 夜间安全选矿：机器人在附近的矿一律不碰（实战教训：夜采被兵潮打死）
-            if turn.is_night and ctx.mine_unsafe(pos):
+            # 安全选矿：夜间或临近入夜时，机器人/出生走廊附近的矿一律不碰（实战教训：夜采被兵潮打死）
+            if ctx.dusk_avoid and ctx.mine_unsafe(pos):
                 continue
             kind = turn.zones.get(pos)
             if self.ore_role == ORE_STONE and kind != "stone":
@@ -421,8 +421,8 @@ class WorkerFSM:
         vendor = self._nearest_vendor(turn, unit)
         if vendor is None:
             return False
-        # 夜间卖货安全：小贩在机器人危险圈内则不去（小贩居地图心=兵潮走廊）
-        if turn.is_night and ctx.mine_unsafe(vendor):
+        # 卖货安全：夜间或临近入夜时，小贩在机器人/出生走廊危险圈内则不去（小贩居地图心=兵潮走廊）
+        if ctx.dusk_avoid and ctx.mine_unsafe(vendor):
             return False
         if ctx.need_gold:
             return True  # 急用金（重建武器等）
