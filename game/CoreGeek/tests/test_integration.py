@@ -56,7 +56,7 @@ class TestFullGameIntegration(unittest.TestCase):
         # 核心断言
         self.assertEqual(crashes, 0, "全流程不得崩溃（异常=封号红线）")
         self.assertTrue(sim.base_alive, "基地必须存活")
-        self.assertGreaterEqual(len(sim.walls()), 10, "Day1 应建成≥10 墙")
+        self.assertGreaterEqual(len(sim.walls()), 10, "D1-D2 应建成≥10 墙")
         self.assertGreaterEqual(len(sim.submissions), 2, "任务应确定性完成多次")
         self.assertEqual(sim.prompts_seen, [], "工程类任务应零 LLM")
         self.assertGreaterEqual(sim.score, 160, "任务积分应到账")

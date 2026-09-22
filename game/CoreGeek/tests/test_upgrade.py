@@ -81,8 +81,8 @@ class TestWallRepairViaUpgrade(unittest.TestCase):
         wall = sim.walls()[0]
         wall["health"] = 400  # L1 比例 0.4
         sim.gold = 60
-        run_rounds(brain, sim, 130 - DAY1 + 40)
-        # 受损墙被升级（≥L2）且回满血；经济改善后可一路升到 L3
+        run_rounds(brain, sim, 300)  # 跑到 Day3+（修理工 D3+ 才做墙升级）
+        # 受损墙被升级（≥L2）且回满血
         self.assertGreaterEqual(wall["level"], 2)
         from agent.planners.upgrade import WALL_MAX_HP
         self.assertEqual(wall["health"], WALL_MAX_HP[wall["level"] - 1])

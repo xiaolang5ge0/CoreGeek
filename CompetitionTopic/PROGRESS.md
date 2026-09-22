@@ -1,7 +1,7 @@
 # 《未来战争》PROGRESS（待完成事项 · 活文档）
 
 > **本文档 = 工程进度与待办清单**。每阶段完成/每次迭代后刷新。
-> 配套：事实列表 `RULE_ASSUMPTIONS.md`、策略列表 `STRATEGY_DECISIONS.md`。
+> 配套：事实列表 `RULE_ASSUMPTIONS.md`、策略列表 `STRATEGY_DECISIONS.md`、日志分析 SOP `LOG_ANALYSIS_PLAYBOOK.md`。
 
 ## 总览（截至第六轮实战修复）
 
@@ -63,6 +63,18 @@
 | 全程 | 模拟器为简化裁判（机器人直线趋近、无碰撞细节） | 仿真≠实战 | 遥测+Replay 校准 |
 | P5 | 任务求解器依赖赛事 LLM 质量；prompt 模板/探索命令序列为通用默认 | 任务通过率不确定 | 首场实战观察真实任务形态后迭代模板 |
 | P5 | Multi Submit 频率保守（提交→错误→修正循环） | 极端任务下可能超时 | 观察真实通过率结算后调频 |
+
+## 实战修复记录·第八轮（2026-09-22 issue#18/#19 复盘：自进化任务2未提交）
+
+> 复盘方法见 `LOG_ANALYSIS_PLAYBOOK.md`；一键脚本 `py game/CoreGeek/tools/analyze_issue_log.py --issue 18 19`。
+
+| 问题 | 根因（解密日志实锤） | 处理计划 |
+|---|---|---|
+| 任务2 拿到答案却不提交 | teamB r36 已算出 `total_count=10/world_heritage=6/oldest_era=周口店遗址`，r37/r38 开拓者只移动/建墙，无 `submitAnswer`；teamA 同 | **收割后强制提交**（拿到答案即合成提交命令），提交失败重试到 deadline |
+| API 参数/认证横跳未收敛 | r26–r35 反复 `city`/`location`、`Bearer`/`X-API-Key`；teamA r33–r34 又用回 `X-API-Key` 得空结果 | 收敛纠错：命中 `200` 即锁定 认证×参数组合，不再回退 |
+| `location=请阅读` 参数污染 | 把 `phaseTask` 文本（"请阅读task_1_beijing.md…"）当成城市候选 | 参数值禁取自 `phaseTask`/提示语，只取文档/响应中的真实字段 |
+| 任务1 仍靠 LLM 三次 | 工程类确定性路径缺失（cat spec→改配置→去 CRLF 全靠 LLM） | 工程类 SOP 固化：find+cat spec → 按 spec 正则修复 → 去 CRLF → check |
+| 两局总分均 88（仅任务1的80分） | 任务2 超时失败，无 +80 | 以上修复后复测通过率 |
 
 ## 实战修复记录·第七轮（2026-09-22 issue#17 复盘：夜经济/选矿/升级）
 

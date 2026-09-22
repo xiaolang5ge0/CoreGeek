@@ -48,16 +48,28 @@ def cmd_of(response, rid):
 
 
 class TestDay1Rush(unittest.TestCase):
-    def test_full_wall_ring_day1(self):
-        """Day1 双工人齐建：墙环 14 格建满（不能有缺口，用户要求#1）。"""
-        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (7, 26): "stone", (8, 20): "copper"})
+    def test_full_wall_ring_by_day2(self):
+        """修理工 D1-D2 建墙：墙环 14 格建满（不能有缺口）。"""
+        sim = SimWorld(station_pos=(10, 24),
+                       mines={(6, 22): "stone", (7, 26): "stone", (8, 20): "copper"})
+        sim.add_mine((6, 22), "stone", remaining=60)  # 石料充足
+        sim.add_mine((7, 26), "stone", remaining=60)
         brain = Brain()
-        run_rounds(brain, sim, DAY1)
-        self.assertEqual(len(sim.walls()), 14, "Day1 必须建满 14 墙环")
-        # 墙环无缺口：布局的 14 个墙格全部建成
+        run_rounds(brain, sim, 200)  # Day1 + Day2
         built = {(w["pos"]["x"], w["pos"]["y"]) for w in sim.walls()}
         expected = {(c.x, c.y) for c in brain.layout.wall_cells}
-        self.assertEqual(built, expected)
+        self.assertEqual(built, expected, "D1-D2 应建满 14 墙环（无缺口）")
+
+    def test_miner_does_not_overbuild(self):
+        """挖矿工专职采矿/卖钱，不乱建墙（除紧急）。"""
+        sim = SimWorld(station_pos=(10, 24),
+                       mines={(6, 22): "stone", (8, 20): "copper"})
+        brain = Brain()
+        history = run_rounds(brain, sim, 30)
+        miner_cmds = [
+            (cmd_of(resp, 10012) or {}).get("action") for resp, _ in history
+        ]
+        self.assertNotIn("build", miner_cmds, "挖矿工不应建墙")
 
     def test_rush_disabled_without_stone(self):
         """无石矿：冲刺关闭，经济岗正常采铜（不双双饿死）。"""

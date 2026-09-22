@@ -73,8 +73,7 @@ class TestGenericLLMTask(unittest.TestCase):
         )
         brain = Brain()
         run_rounds(brain, sim, DAY1)
-        self.assertGreaterEqual(sim.gold, 30)
-        self.assertGreaterEqual(sim.score, 50)
+        self.assertGreaterEqual(sim.score, 50)  # 任务积分到账（金币可能已被升级花掉）
         self.assertTrue(sim.submissions)
         cp = brain.layout.control_point
         pos = sim.role(PIONEER)["pos"]

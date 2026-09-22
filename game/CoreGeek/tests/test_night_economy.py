@@ -138,18 +138,20 @@ class TestLLMParsing(unittest.TestCase):
 
 class TestWallRebuild(unittest.TestCase):
     def test_destroyed_wall_rebuilt_next_day(self):
-        """墙被拆后，次日白天应重建（墙环不能长期缺口）。"""
+        """墙被拆后，修理工应重建（墙环不能长期缺口）。"""
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (7, 26): "stone"})
+        sim.add_mine((6, 22), "stone", remaining=80)
+        sim.add_mine((7, 26), "stone", remaining=80)
         brain = Brain()
-        run_rounds(brain, sim, DAY1)
+        run_rounds(brain, sim, 130)  # Day1 + Day2（修理工 D1-D2 建墙）
         self.assertEqual(len(sim.walls()), 14)
-        # 模拟夜战拆掉 3 面墙（直接移除角色）
+        # 模拟夜战拆掉 3 面墙
         destroyed = sim.walls()[:3]
         sim.roles = [r for r in sim.roles if r not in destroyed]
         self.assertEqual(len(sim.walls()), 11)
-        # 次日白天补矿重建（跑满夜+一整天 = 130 回合，确保有足够白天回合）
-        sim.add_mine((6, 22), "stone", remaining=40)
-        sim.add_mine((7, 26), "stone", remaining=40)
+        # 次日白天补矿重建
+        sim.add_mine((6, 22), "stone", remaining=80)
+        sim.add_mine((7, 26), "stone", remaining=80)
         run_rounds(brain, sim, 130)
         self.assertGreaterEqual(len(sim.walls()), 13, "被拆的墙应重建")
 

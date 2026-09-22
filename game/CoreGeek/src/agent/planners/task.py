@@ -521,7 +521,7 @@ class TaskPlanner:
         param = m.group(1)
         if param in session.tried_params:
             return None
-        city = self._extract_city(session.task_text)
+        city = self._extract_city(session.task_text, session.task_desc)
         if not city:
             return None
         url = None
@@ -549,14 +549,25 @@ class TaskPlanner:
         return f'curl -s {auth}"{url}?{param}={city}"'
 
     @staticmethod
-    def _extract_city(task_text: str) -> str | None:
+    def _extract_city(task_text: str, extra: str = "") -> str | None:
         stop = ("查询", "今天", "明日", "天气", "数据", "接口", "返回", "任务",
                 "城市", "所有", "全部", "相关", "统计", "列出", "给出", "需要",
                 "通过", "调用", "结果", "数量", "类型", "名称", "今日", "本地",
-                "获取", "搜索", "帮我", "请问")
-        text = task_text or ""
-        for w in stop:  # 先剔除停用词，再取剩余中文 token（防"查询南京"→"查询南"）
+                "获取", "搜索", "帮我", "请问", "请阅读", "阅读", "信息", "作业",
+                "文化遗产", "遗产", "请", "读取", "查看", "完成", "回答")
+        text = (task_text or "") + " " + (extra or "")
+        # 去掉指针文件名 task_1_beijing.md → 提取 pinyin 城市名（beijing/nanjing/chengdu…）
+        for w in stop:
             text = text.replace(w, " ")
+        # 1) 文件名里的 pinyin 城市 → 中文
+        pin = re.search(r"task_\d+_([a-z]{3,12})", text + " " + (extra or ""))
+        if pin:
+            PY = {"beijing": "北京", "nanjing": "南京", "chengdu": "成都",
+                  "shanghai": "上海", "guangzhou": "广州", "xian": "西安",
+                  "hangzhou": "杭州", "suzhou": "苏州", "luoyang": "洛阳"}
+            city = PY.get(pin.group(1).lower())
+            if city:
+                return city
         for cand in re.findall(r"[\u4e00-\u9fa5]{2,3}", text):
             return cand
         return None

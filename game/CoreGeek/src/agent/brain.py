@@ -12,10 +12,11 @@ from typing import Any
 from .buildable_map import BuildableMap
 from .fire import JointFirePlanner
 from .fsm_pioneer import STATE_TASK_WORK, PioneerFSM
-from .fsm_worker import ORE_MONEY, ORE_STONE, STONE_BATCH, DUSK_URGENT_ROUNDS, WorkerFSM
+from .fsm_worker import ROLE_MINER, ROLE_REPAIRER, STONE_BATCH, WorkerFSM
 from .path import next_step
 from .phases import PhaseManager
 from .planners.layout import BaseLayout, choose_front, compute_layout
+from .planners.news import NewsEconomy
 from .planners.task import TaskPlanner, TaskSession
 from .planners.upgrade import WALL_MAX_HP, UpgradePlanner
 from .protocol import (
@@ -45,6 +46,10 @@ BUILD_TRAVEL_BUFFER = 6     # 建墙预留回程缓冲（预留回合 = 待建�
 DUSK_AVOID_WINDOW = 12      # 白天临近入夜此回合数内，提前避开出生走廊矿/小贩
 COST_PER_WALL_BASE = 2      # 每墙基础回合（采集1+建造1）
 WALL_ROUNDS_PER = 5         # 单工人每墙约需回合（采集+建造+挪位）；用于判断是否需第二工人帮建
+REPAIR_MARGIN = 4           # 修理工提前归位余量（距天黑 ≤ 路径 + 4）
+WEAPON_L1_COST = 100        # 武器 L1→L2 券价（判断是否需要凑武器升级费）
+RESERVE_GOLD = 30           # 升级预算保留金
+LLM_DAILY_LIMIT = 3         # 每日 LLM 调用上限（用户：每天只有 3 次）
 DAY1_RUSH_DEADLINE = 50     # Day1 双工人建墙冲刺截止回合（预留收尾）
 DAY1_WALL_TARGET = 12       # Day1 目标墙数
 PIONEER_FLEE_DIST = 1       # 机器人贴到 CP 才撤离（过早撤离=整夜哑火，实战权衡）
@@ -85,6 +90,13 @@ class _Ctx:
     base_in_danger: bool = False  # 机器人逼近基地 → 工人撤内圈；否则直接避让
     dusk_avoid: bool = False  # 夜间 或 白天临近入夜 → 提前避开出生走廊
     walls_left: int = 0       # 剩余待建墙数（石料岗按此收敛采集量，防过量）
+    repair_triggered: bool = False   # 修理工夜间/临近天黑归位触发
+    need_weapon_gold: bool = False   # 有武器未 L2 且金不足 → 挖矿工去卖钱
+    gunner_upgrade = None            # 炮手武器升级计划 (Pos, "weapon")
+    price_boost_map: dict = {}       # 新闻预测：矿种 → 售卖加权
+
+    def price_boost(self, kind: str) -> float:
+        return float(self.price_boost_map.get(kind, 0.0))
 
     def mine_unsafe(self, pos) -> bool:
         """位置处于危险区：当前活机器人 / 出生点 / 行军走廊（B 方案）。"""
@@ -128,6 +140,9 @@ class Brain:
         self.mine_blacklist: dict = {}
         self.robot_spawn_log: list = []
         self.news_log: list = []  # 每回合 worldNews 存档（宝藏推断用）
+        self.news_economy = NewsEconomy()
+        self.llm_day: int = 0
+        self.llm_calls_today: int = 0
         self.worker_fsms: dict[int, WorkerFSM] = {}
         self.layout: BaseLayout | None = None
         self.front: str | None = None
@@ -173,6 +188,7 @@ class Brain:
         # 白天临近入夜也提前避开出生走廊（用户要求：接近晚上时避开历史出生位置）
         ctx.dusk_avoid = turn.is_night or (0 < turn.rounds_until_night <= DUSK_AVOID_WINDOW)
         self._record_news(turn, trace)
+        ctx.price_boost_map = self.news_economy.boosts(turn.day_index)
         ctx.prompt = ""
         ctx.execute_cmd = ""
         if turn.is_day:
@@ -261,14 +277,15 @@ class Brain:
             and bool(stone_mines)
         )
         ctx.share_mines = False  # 不共享矿：双工人各选各的（共享=互相抢同一矿，更慢）
-        for index, worker in enumerate(workers):
+        # 角色固化：worker[0]=修理工，worker[1]=挖矿工（按 ID 升序）
+        sorted_workers = sorted(workers, key=lambda w: w.unit_id)
+        for index, worker in enumerate(sorted_workers):
             fsm = self._worker_fsm(worker)
-            if index == 0 and walls_missing:
-                fsm.ore_role = ORE_STONE          # 1 号：石料岗（墙建完自动转经济）
-            elif day1_helper:
-                fsm.ore_role = ORE_STONE          # 墙来不及：2 号临时帮建
-            else:
-                fsm.ore_role = ORE_MONEY          # 2 号：经济岗（采矿+卖钱）
+            fsm.role = ROLE_REPAIRER if index == 0 else ROLE_MINER
+        # 修理工触发（夜间/临近天黑归位）：D1-D2 不触发；D3+ 距天黑≤路径+4 触发；夜间有威胁触发
+        ctx.repair_triggered = self._repair_triggered(turn, sorted_workers)
+        # 需要凑武器升级费（挖矿工去卖钱的信号）
+        ctx.need_weapon_gold = self._need_weapon_gold(turn)
 
         # 建造分配：武器优先于墙；已被认领的格/工人不重复分配
         assigned = {
@@ -299,6 +316,14 @@ class Brain:
             if fsm.build is not None:
                 continue
             stones = worker.backpack.count("stone")
+            # 只有修理工负责建墙（若修理工阵亡，则由其余工人接手）；
+            # 挖矿工仅在"第一天石头>20 且 墙<14"时紧急建墙
+            repairer_alive = any(
+                self._worker_fsm(w).role == ROLE_REPAIRER for w in workers
+            )
+            if fsm.role != ROLE_REPAIRER and repairer_alive:
+                if not (turn.day_index == 1 and stones > 20 and walls_missing):
+                    continue
             # 批量建造：采够一批进入 build_phase 后连续建完该批（不采一个建一个）；
             # 批量随剩余墙数收敛（只剩 2 墙就采 2 块，不采满 6，防过量采集）
             batch = min(STONE_BATCH, max(1, walls_left))
@@ -319,57 +344,36 @@ class Brain:
                 assigned.add(cell)
                 busy.add(worker.unit_id)
 
-        # 升级任务分配：派给空闲工人（武器>墙>基地，券费已含预算保留；同一建筑不重复派单）
-        # 墙升级/备货优先派给"固定修墙工"（ID 最小），使其背包自持修复物料供夜间使用。
-        # **每回合最多派 1 个升级任务**（用户：始终留一个工人在外挖矿卖钱，升级不占用两人）
-        repair_id = min((w.unit_id for w in workers), default=None)
-        free_workers = [w for w in workers if w.unit_id not in busy]
-        if free_workers:
+        # 升级任务分配（仅墙/备货 → 只派修理工；武器升级由炮手 pioneer 处理）
+        # 每回合最多派 1 个升级任务（始终留挖矿工在外采矿卖钱）
+        repair_worker = next(
+            (w for w in workers if self._worker_fsm(w).role == ROLE_REPAIRER), None
+        )
+        if repair_worker is not None:
+            rfsm = self._worker_fsm(repair_worker)
             taken_targets = {
                 fsm.upgrade[0] for fsm in self.worker_fsms.values()
-                if fsm.upgrade and fsm.upgrade[0] is not None
+                if fsm.upgrade and hasattr(fsm.upgrade[0], "dump")
             }
-            assigned_upgrade = any(
-                fsm.upgrade is not None for fsm in self.worker_fsms.values()
-            )
-            for mission in self.upgrades.plan(turn, cp=layout.control_point):
-                if assigned_upgrade:
-                    break  # 已有工人在做升级 → 其余工人继续挖矿
-                if mission.target is not None and mission.target in taken_targets:
-                    continue
-                candidates = [
-                    w for w in free_workers
-                    if self._worker_fsm(w).upgrade is None
-                    # 升级不得打断采矿锁（#11），但武器升级是最高优先 → 可抢占
-                    and (mission.kind == "weapon" or self._worker_fsm(w).mine is None)
-                ]
-                if not candidates:
-                    break
-                if mission.kind == "weapon":
-                    # 抢占：释放该工人矿锁，优先升级武器
-                    self._worker_fsm(candidates[0]).mine = None
-                wall_side = mission.kind in ("wall", "stock")
-                if wall_side and any(w.unit_id == repair_id for w in candidates):
-                    worker = next(w for w in candidates if w.unit_id == repair_id)
-                elif mission.kind == "stock":
-                    shops = turn.shop_positions()
-                    worker = min(
-                        candidates,
-                        key=lambda w: distance(w.pos, shops[0]) if shops else 0,
+            if rfsm.upgrade is None and rfsm.build is None:
+                for mission in self.upgrades.plan(turn, cp=layout.control_point):
+                    if mission.kind not in ("wall", "stock"):
+                        continue  # 武器/基地升级不派给工人
+                    if mission.target is not None and mission.target in taken_targets:
+                        continue
+                    if mission.kind == "stock":
+                        rfsm.upgrade = (mission.voucher, "stock")
+                    else:
+                        rfsm.upgrade = (mission.target, mission.kind)
+                        taken_targets.add(mission.target)
+                    ctx.trace.setdefault("upgrade_assigned", []).append(
+                        {"worker": repair_worker.unit_id, "kind": mission.kind,
+                         "target": mission.target.dump() if mission.target is not None else None,
+                         "voucher": mission.voucher}
                     )
-                else:
-                    worker = min(candidates, key=lambda w: distance(w.pos, mission.target))
-                if mission.kind == "stock":
-                    self._worker_fsm(worker).upgrade = (mission.voucher, "stock")
-                else:
-                    self._worker_fsm(worker).upgrade = (mission.target, mission.kind)
-                    taken_targets.add(mission.target)
-                assigned_upgrade = True  # 本回合已派 1 个升级任务 → 不再派第二个
-                ctx.trace.setdefault("upgrade_assigned", []).append(
-                    {"worker": worker.unit_id, "kind": mission.kind,
-                     "target": mission.target.dump() if mission.target is not None else None,
-                     "voucher": mission.voucher}
-                )
+                    break  # 每回合最多 1 个
+        # 炮手武器升级计划（由 fsm_pioneer 执行）
+        ctx.gunner_upgrade = self._gunner_upgrade_plan(turn)
 
         for worker in workers:
             cmd = self._worker_fsm(worker).decide(turn, worker, ctx)
@@ -396,13 +400,16 @@ class Brain:
                     self.task_session.timeout_rounds = task.timeout_rounds
             # 任务求解：仅驻留任务点且任务进行中（submit 不覆盖走位指令）
             if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
-                # submit 拒收检测：上回合 pioneer 发的是 submitAnswer 且被判 False → 标记重发
                 last_cmd = self.last_commands.get(pioneer.unit_id)
                 if last_cmd and last_cmd.get("action") == "submitAnswer":
                     if turn.last_action_results.get(pioneer.unit_id, True) is False:
                         self.task_session.submit_rejected = True
                 out = self.task_planner.work(turn, self.task_session)
-                ctx.prompt = out.prompt
+                # 每日 LLM 上限 3 次（超出则不发 prompt）
+                if out.prompt and self._llm_budget_ok(turn):
+                    ctx.prompt = out.prompt
+                    self.llm_calls_today += 1
+                    ctx.trace["llm_used"] = self.llm_calls_today
                 ctx.execute_cmd = out.execute_cmd
                 if out.submit is not None and pioneer.unit_id not in commands:
                     commands[pioneer.unit_id] = out.submit
@@ -470,15 +477,39 @@ class Brain:
         pioneer = turn.pioneer()
         if pioneer is not None and self.layout is not None:
             cp = self.layout.control_point
-            # 机器人突入 CP 3 格内 → 开拓者撤往内圈保命（活人 > 多打一炮）
-            cp_danger = any(
-                distance(rc, cp) <= PIONEER_FLEE_DIST for rc in ctx.robot_cells
-            )
-            goal = ctx.safe_anchor if (cp_danger and ctx.safe_anchor) else cp
-            cmd = self.pioneer_fsm.move_to_guard(turn, pioneer, goal, ctx)
-            if cmd:
-                commands[pioneer.unit_id] = cmd
-                ctx.reserve_from(cmd)
+            robots_alive = [r for r in turn.robots if r.alive]
+            # 兵潮已清 + 天亮前有余量 → 开拓者出行动（任务/买券），不再蹲守
+            if not robots_alive and turn.rounds_until_dawn > 30:
+                prev = self.pioneer_fsm.state
+                cmd = self.pioneer_fsm.day_cmd(turn, pioneer, cp, ctx)
+                if cmd:
+                    commands[pioneer.unit_id] = cmd
+                    ctx.reserve_from(cmd)
+                if self.pioneer_fsm.state == STATE_TASK_WORK and prev != STATE_TASK_WORK:
+                    self.task_session.reset()
+                if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
+                    last_cmd = self.last_commands.get(pioneer.unit_id)
+                    if last_cmd and last_cmd.get("action") == "submitAnswer":
+                        if turn.last_action_results.get(pioneer.unit_id, True) is False:
+                            self.task_session.submit_rejected = True
+                    out = self.task_planner.work(turn, self.task_session)
+                    if out.prompt and self._llm_budget_ok(turn):
+                        ctx.prompt = out.prompt
+                        self.llm_calls_today += 1
+                    ctx.execute_cmd = out.execute_cmd
+                    if out.submit is not None and pioneer.unit_id not in commands:
+                        commands[pioneer.unit_id] = out.submit
+                if pioneer.unit_id in commands:
+                    ctx.reserve_from(commands[pioneer.unit_id])
+            else:
+                cp_danger = any(
+                    distance(rc, cp) <= PIONEER_FLEE_DIST for rc in ctx.robot_cells
+                )
+                goal = ctx.safe_anchor if (cp_danger and ctx.safe_anchor) else cp
+                cmd = self.pioneer_fsm.move_to_guard(turn, pioneer, goal, ctx)
+                if cmd:
+                    commands[pioneer.unit_id] = cmd
+                    ctx.reserve_from(cmd)
         # 操控占用动作（已确认）：移动中不能控炮 → 仅当开拓者无指令时才开火
         if pioneer is not None and pioneer.unit_id not in commands:
             self.fire.plan(turn, pioneer, commands, ctx.trace)
@@ -513,10 +544,62 @@ class Brain:
                 cells.append(Pos(px, py))
         return tuple(cells)
 
+    def _repair_triggered(self, turn: Turn, workers) -> bool:
+        """修理工触发：D1-D2 不触发；D3+ 距天黑≤路径+4 触发；夜间有威胁触发。"""
+        if turn.day_index <= 2:
+            return False
+        if turn.is_night:
+            station = turn.station()
+            if station is None:
+                return False
+            near = any(
+                distance(r.pos, cell) <= 6
+                for r in turn.robots if r.alive
+                for cell in station_footprint(station.pos)
+            )
+            hurt = any(
+                w.health < WALL_MAX_HP[min(max(w.level, 1), 3) - 1] for w in turn.walls()
+            )
+            return near or hurt
+        repairer = next(
+            (w for w in workers if self._worker_fsm(w).role == ROLE_REPAIRER), None
+        )
+        home = self.layout.control_point if self.layout else None
+        if repairer is None or home is None:
+            return False
+        return 0 < turn.rounds_until_night <= distance(repairer.pos, home) + REPAIR_MARGIN
+
+    def _llm_budget_ok(self, turn: Turn) -> bool:
+        """每日 LLM 上限 3 次（跨天重置）。"""
+        if turn.day_index != self.llm_day:
+            self.llm_day = turn.day_index
+            self.llm_calls_today = 0
+        return self.llm_calls_today < LLM_DAILY_LIMIT
+
+    def _need_weapon_gold(self, turn: Turn) -> bool:
+        """有武器未到 L2 且金币不足 → 挖矿工去卖钱凑升级费。"""
+        weapons = turn.weapons()
+        if not weapons or all(w.level >= 2 for w in weapons):
+            return False
+        return turn.gold < WEAPON_L1_COST + RESERVE_GOLD
+
+    def _gunner_upgrade_plan(self, turn: Turn):
+        """炮手的武器升级计划 → (目标Pos, "weapon") 或 None。优先 L1→L2，再 L2→L3。"""
+        weapons = sorted(turn.weapons(), key=lambda w: (w.level, w.unit_id))
+        for w in weapons:
+            if w.level == 1:
+                return (w.pos, "weapon")
+        for w in weapons:
+            if w.level == 2:
+                return (w.pos, "weapon")
+        return None
+
     def _record_news(self, turn: Turn, trace: dict[str, Any]) -> None:
-        """每回合存档 worldNews（官方消息+民间传闻），供后续推理与召唤宝藏。"""
+        """每回合存档 worldNews（官方消息+民间传闻），并喂给新闻经济模块。"""
         official = (turn.official_news or "").strip()
         folk = (turn.folk_legends or "").strip()
+        if official:
+            self.news_economy.update(official, turn.day_index)
         if not official and not folk:
             return
         entry = {"round": turn.round_no, "day": turn.day_index,
