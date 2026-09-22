@@ -18,6 +18,7 @@ config.HARDCODED_ASSIST = True
 
 from harness import SimWorld
 from agent.brain import Brain
+from agent.protocol import Turn
 
 PIONEER = 10011
 DAY1 = 70
@@ -160,6 +161,26 @@ class TestEngineerTaskE2E(unittest.TestCase):
         self.assertTrue(sim.submissions)
         self.assertIn("fc1e78eb2a5a", sim.submissions[0])
         self.assertEqual(len(sim.prompts_seen), 0, "工程类应零 LLM")
+
+
+class TestRefineRetry(unittest.TestCase):
+    def test_error_code_2_pulls_back_to_llm(self):
+        """IKHYQC/IKHYQB 根因：提交被判错(errorCode=2)后必须回 LLM 重试，不能停在 DONE。"""
+        from agent.planners.task import ST_DONE, ST_LLM, ST_WAIT_LLM
+        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone"}, tasks=[API_TASK])
+        sim.phase_task = API_TASK["text"]
+        sim.next_errors = [{"errorCode": 2, "description": "键值比对不通过: $/types: 数组长度 9 != 7"}]
+        brain = Brain()
+        planner = brain.task_planner
+        session = brain.task_session
+        session.task_text = API_TASK["text"]
+        session.stage = ST_DONE          # 已提交 → DONE
+        session.answer = '{"types": []}'
+        turn = Turn.load(sim.payload())
+        planner.work(turn, session)
+        self.assertIn(session.stage, (ST_LLM, ST_WAIT_LLM), "判错后应回到 LLM 重试")
+        self.assertIsNone(session.answer)
+        self.assertIn("types", session.last_error)
 
 
 class TestAnswerSafety(unittest.TestCase):

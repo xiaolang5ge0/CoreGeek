@@ -120,6 +120,7 @@ class TaskSession:
     need_refine: bool = False
     max_loops: int = MAX_LLM_LOOPS                          # 本任务 LLM 循环上限（按 timeout 收紧）
     cmd_count: int = 0                                      # 已下发命令数（D7：≥8 强制提交）
+    last_error: str = ""                                    # 上次提交被判错的原因（重试时喂 LLM）
 
     def reset(self) -> None:
         self.__init__()
@@ -165,6 +166,10 @@ class TaskPlanner:
             session.need_refine = True
             session.submitted = False
             session.answer = None
+            session.last_error = "; ".join(d for c, d in turn.errors if c == 2)[:200]
+            # 关键：提交后 stage=DONE，必须拉回 LLM 重试，否则干等到超时（IKHYQC/IKHYQB 根因）
+            session.stage = ST_LLM
+            session.llm_loops = max(0, session.llm_loops - 2)  # 给重试留 2 次循环余量
 
         # 2. 阶段推进
         return self._advance(turn, session, out)
@@ -571,6 +576,8 @@ class TaskPlanner:
             parts += ["=== 参考 SOP（历史任务沉淀） ===", sop[:1500]]
         if session.non_json > 0:
             parts.append("你上一次的返回未按要求仅返回JSON，请勿再犯。")
+        if session.last_error:
+            parts += ["=== 上次提交被判错（必须据此修正答案） ===", session.last_error]
         if "API_OK" in session.explore_output:
             parts.append(
                 "API 探测已成功：`API_OK` 行给出了可用的 base/path/认证/参数/城市，"

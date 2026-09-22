@@ -5,7 +5,7 @@ import _bootstrap  # noqa: F401
 
 from harness import SimWorld
 from agent.brain import Brain
-from agent.planners.upgrade import UpgradePlanner, FIXER_STOCK_MAX
+from agent.planners.upgrade import UpgradePlanner, FIXER_STOCK_MAX, FIXER_STOCK_MAXED
 from agent.protocol import Pos, Turn
 from agent.threat import ThreatEstimator
 
@@ -64,10 +64,10 @@ class TestD4FixerStock(unittest.TestCase):
         sim.roles.append(sim._role(65000, 12, 20, "wall", 1500, level=2))
         turn = Turn.load(sim.payload())
         missions = UpgradePlanner().plan(turn, cp=Pos(9, 23), front="W")
-        stock = [m for m in missions if m.kind == "stock"]
+        stock = [m for m in missions if m.kind == "stock" and m.voucher == "WallFixer"]
         self.assertTrue(stock)
-        self.assertGreaterEqual(stock[0].qty, 3)
-        self.assertLessEqual(stock[0].qty, FIXER_STOCK_MAX)
+        self.assertGreaterEqual(stock[0].qty, 5)   # 用户：D4+ 修复券 ≥5
+        self.assertLessEqual(stock[0].qty, FIXER_STOCK_MAXED)
 
 
 if __name__ == "__main__":

@@ -90,33 +90,28 @@ class TestWallRepairViaUpgrade(unittest.TestCase):
 
 
 class TestNightWallUpgrade(unittest.TestCase):
-    def test_wall_upgrade_happens_at_night_not_day(self):
-        """用户策略：白天只采购/采集，围墙升级（=回血）留到夜间执行。"""
+    def test_wall_upgrade_happens(self):
+        """用户策略（2026-09-23 更新）：允许白天升级围墙（不闲置等晚上），夜间也升级。"""
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (7, 26): "stone"})
         sim.add_mine((6, 22), "stone", remaining=120)
         sim.add_mine((7, 26), "stone", remaining=120)
         brain = Brain()
         build_day1(brain, sim)
-        for weapon in sim.weapons():          # 武器先满级，解除"武器优先"对墙升级的门控
+        for weapon in sim.weapons():   # 武器先满级，解除"武器优先"对墙升级的门控
             weapon["level"] = 3
             weapon["health"] = 2000
         wall = sim.walls()[0]
         wall["health"] = 500                  # <60% 受损
         sim.gold = 300
-        day_uses = night_uses = 0
+        uses = 0
         for _ in range(320):
-            is_day = sim._is_day()
             response, _ = brain.decide(sim.payload())
             for cmd in response["roleCommandMap"].values():
                 if cmd.get("action") == "use" and "WallUpgrade" in str(cmd.get("name")):
-                    if is_day:
-                        day_uses += 1
-                    else:
-                        night_uses += 1
+                    uses += 1
             sim.apply(response)
             sim.advance()
-        self.assertEqual(day_uses, 0, "白天不应用券升级墙（应留给夜间）")
-        self.assertGreaterEqual(night_uses, 1, "夜间应执行围墙升级（升级=回血）")
+        self.assertGreaterEqual(uses, 1, "应执行围墙升级（升级=回血；白天/夜间均可）")
 
 
 class TestPioneerBatchPurchase(unittest.TestCase):

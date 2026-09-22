@@ -208,7 +208,11 @@ class WorkerFSM:
                 return cmd
             self.returning = False
             return self._build_mine(turn, unit, ctx, prefer="money")  # 已归位/受阻 → 就近
-        cmd = self._upgrade_flow(turn, unit, ctx, allow_use=False, allow_buy=True)
+        # 缺口补建优先（brain 派单）→ 再升级（白天也允许，用户 2026-09-23）→ 再采矿
+        if self.build is not None:
+            self.state = STATE_BUILD
+            return self._build_cmd(turn, unit, ctx)
+        cmd = self._upgrade_flow(turn, unit, ctx, allow_use=True, allow_buy=True)
         if cmd is not None:
             return cmd
         return self._build_mine(turn, unit, ctx, prefer="money")

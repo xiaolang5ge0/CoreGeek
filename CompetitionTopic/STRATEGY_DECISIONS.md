@@ -129,6 +129,10 @@
 | **归位余量** | 炮手 **5**（DUSK_MARGIN）；修理工 **3**（REPAIR_MARGIN） | D2 | CONFIRMED |
 | **修理工归位** | `ctx.home_anchor` 必须在**工人决策前**注入；归位回合数用 **A\* 实际路径长度**（非切比雪夫）；目标格被占（CP）退化到邻接格；归位失败兜底继续采集（不空转） | issue#25 卡墙外根因 | CONFIRMED |
 | **修理工修理位（repair_post）** | 布局新增 `repair_post`：内圈(ring1)非炮台/非 CP、**邻墙最多**的可站格；修理工 **D3+** 夜**就位 repair_post**（非只回家），从此上下走动抢修/升级各面墙 | issue#26：夜修理工未就位 | CONFIRMED |
+| **正面墙防御死线** | **D3 入夜前正面（迎敌侧整列，含两端拐角）≥5 面 L2**；**D5 入夜前正面 ≥5 面 L3**；优先级 12（武器 L2 之后、武器 L3 之前） | 用户 2026-09-23 | CONFIRMED |
+| **白天可升级墙** | 修理工白天也允许用券升级围墙（不闲置等晚上）；缺口补建优先于升级 | 用户 2026-09-23 | CONFIRMED |
+| **正面墙券/修复包备货** | D3+ 按正面墙等级备 ≥5 张对应升级券（L1→V1、L2→V2）；**D4+ WallFixer ≥5**；金币不足则不要求；武器未 L2 时不为墙券花钱（武器优先）；武器+墙全满后不设上限 | 用户 2026-09-23 | CONFIRMED |
+| **答案判错重试** | 提交被判错（errorCode=2）→ **stage 拉回 LLM 重试**（此前停在 DONE 干等到超时，IKHYQC/IKHYQB 根因）；错误原因注入 prompt | issue IKHYQC/IKHYQB | CONFIRMED |
 | **修理工抢修供给** | 夜间 `_repair_cmd` 用券按墙当前等级匹配（L2→V2），否则 WallFixer；**WallFixer 常备**（Day3+，只数工人背包），Day4+/有 L3 墙按 L3 数加备 | issue#26：L2 墙烧而修理工只有 V1 | CONFIRMED |
 | **购买量守卫** | `_buy_qty/_voucher_qty/_stock_qty` 买不起返回 0（不发非法 buy） | 各角色购买逻辑审计 | CONFIRMED |
 | **建造失败重试** | BuildableMap 失败格带 40 回合过期重试（`BUILD_FAIL_RETRY`），不再永久拉黑 | issue#26：(31,12) 永久缺口根因 | CONFIRMED |

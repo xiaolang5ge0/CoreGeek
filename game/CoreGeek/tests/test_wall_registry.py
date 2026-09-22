@@ -183,9 +183,9 @@ class TestFixerStockOnDemand(unittest.TestCase):
             add_wall(sim, cells[i], health=2000, level=3, rid=41000 + i)
         sim.gold = 300
         missions = self._plan(sim, brain, 391)  # Day4（BOSS 夜）
-        stock = [m for m in missions if m.kind == "stock"]
+        stock = [m for m in missions if m.kind == "stock" and m.voucher == "WallFixer"]
         self.assertTrue(stock)
-        self.assertEqual(stock[0].qty, 3, "3 面 L3 墙 → 备 3 个修复包")
+        self.assertGreaterEqual(stock[0].qty, 3, "D4+ 修复包常备 ≥5（至少 ≥3）")
 
     def test_no_stock_when_already_held(self):
         sim = make_sim()

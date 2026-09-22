@@ -7,8 +7,8 @@
 
 | 项 | 状态 |
 |---|---|
-| 当前阶段 | **P0~P5 + 十九轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
-| 测试 | **166/166 通过** |
+| 当前阶段 | **P0~P5 + 二十轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
+| 测试 | **172/172 通过** |
 | 打包 | `game/CoreGeek/dist/CoreGeek.tar.gz`（**tar 顶层 CoreGeek/ 目录**，平台父目录解包后运行 `<root>/CoreGeek/main3.py`） |
 | 代码 | `game/CoreGeek/`，Python ≥3.11 纯标准库 |
 | 当前行为 | Day1 双工人建满14墙+3火箭；夜1-3 双工人全力采矿卖钱（无蹲防）；开拓者单人控3炮；Day4+ 修墙岗（墙血<50%才修、正面优先、L3→WallFixer、L1/L2→升级券）；WallRegistry 追踪攻破/补建并优先重升级；武器优先升级；任务确定性+LLM兜底；选矿我方侧优先 |
@@ -87,6 +87,17 @@
 | `location=请阅读` 参数污染 | 把 `phaseTask` 文本（"请阅读task_1_beijing.md…"）当成城市候选 | 参数值禁取自 `phaseTask`/提示语，只取文档/响应中的真实字段 |
 | 任务1 仍靠 LLM 三次 | 工程类确定性路径缺失（cat spec→改配置→去 CRLF 全靠 LLM） | 工程类 SOP 固化：find+cat spec → 按 spec 正则修复 → 去 CRLF → check |
 | 两局总分均 88（仅任务1的80分） | 任务2 超时失败，无 +80 | 以上修复后复测通过率 |
+
+## 实战修复记录·第二十轮（2026-09-23 issue IKHYQC/IKHYQB 自进化失败 + 防线加固）
+
+> 日志：Gitee `IKHYQC`(teamA24)、`IKHYQB`(teamA23)。
+
+| 问题 | 根因（解密日志实锤） | 修复 |
+|---|---|---|
+| **API 任务答案错后干等到超时** | 提交 `__ANSWER` 被判错（`errorCode=2: types 数组长度 9 != 7`）后，`need_refine` 只置了标志，**stage 仍停在 DONE** → 不再重试 → 超时 | errorCode=2 时 **stage 拉回 `LLM_LOOP`**、清答案、`llm_loops` 回退 2 给重试余量；错误原因写入 `last_error` 并注入 prompt |
+| **harvester `types` 计数偏差** | `types` 混用 `type/category/kind` 字段 + 未严格去重 | 改为**严格 `type` 字段**、strip+去重；输出 `RECORDS` 全量记录供 LLM 重算 |
+| **围墙防御加固（用户）** | — | ① 正面墙死线：D3 前 ≥5 L2、D5 前 ≥5 L3（优先级 12）；② 修理工**白天也升级围墙**（不闲置等晚上）；③ D3+ 备正面墙对应升级券 ≥5、D4+ WallFixer ≥5（金币不足不要求）；④ 武器未 L2 时不为墙券花钱（金币充足武器优先） |
+| **测试** | — | 新增 `tests/test_defense_walls.py`（5 例）+ `TestRefineRetry`；全量 **172/172 通过** |
 
 ## 实战修复记录·第十九轮（2026-09-23 硬编码能力总开关）
 
