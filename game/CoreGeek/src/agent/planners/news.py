@@ -17,8 +17,21 @@ ORE_WORDS = {
     "铜": "copper", "铁": "iron", "石": "stone",
     "copper": "copper", "iron": "iron", "stone": "stone",
 }
-STOP_WORDS = ("停工", "停产", "塌方", "检修", "事故", "封闭", "关闭", "抢修", "加固", "受损")
-RESUME_WORDS = ("恢复", "复产", "复工", "重新开采", "恢复开采", "重新运作")
+STOP_WORDS = (
+    "停工", "停产", "塌方", "检修", "事故", "封闭", "关闭", "抢修", "加固", "受损",
+    "故障", "瘫痪", "中断", "损毁", "封锁", "无法采集", "无法开采", "停止开采", "塌陷",
+)
+# 恢复词（注意："复工/复产"会误匹配"修复工程"→ 用更长词组，用户 2026-09-23）
+RESUME_WORDS = (
+    "恢复", "重新开采", "恢复开采", "恢复生产", "恢复作业", "重新运作",
+    "已修复", "修复完成", "复产复工", "恢复运作",
+)
+# 时间词 → 生效起始日偏移（相对当天）
+START_WORDS = (
+    ("今天", 0), ("今日", 0), ("立即", 0), ("马上", 0),
+    ("明天", 1), ("明日", 1), ("次日", 1),
+    ("后天", 2), ("大后天", 3),
+)
 CN_NUM = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7}
 _JSON_BLOCK = re.compile(r"\{.*\}", re.S)
 
@@ -29,10 +42,12 @@ class NewsEconomy:
         self._seen: set = set()
         self.last_new = False     # 本回合是否收到新官方消息
         self.last_parsed = False  # 是否被确定性解析出事件
+        self.last_pred: dict = {}  # 本回合解析出的预测（供 trace 记录/调试）
 
     def update(self, official_news: str, day: int) -> None:
         self.last_new = False
         self.last_parsed = False
+        self.last_pred = {}
         text = (official_news or "").strip()
         if not text or text in self._seen:
             return
@@ -46,12 +61,22 @@ class NewsEconomy:
             self.last_parsed = True
             return
         if any(w in text for w in STOP_WORDS):
-            self.predictions[ore] = {
-                "start_day": day + 1,          # 官方多为"明天+后天"停工
+            pred = {
+                "start_day": day + self._parse_start_offset(text),
                 "days": self._parse_days(text),
-                "reason": text[:40],
+                "reason": text[:60],
             }
+            self.predictions[ore] = pred
+            self.last_pred = {ore: dict(pred)}
             self.last_parsed = True
+
+    @staticmethod
+    def _parse_start_offset(text: str) -> int:
+        """生效起始日偏移：今天→0、明天→1、后天→2；默认 1（官方多为"明天"）。"""
+        for word, off in START_WORDS:
+            if word in text:
+                return off
+        return 1
 
     @staticmethod
     def _parse_ore(text: str) -> str | None:
@@ -123,10 +148,12 @@ class NewsEconomy:
                 days = int(obj.get("days") or 2)
             except (TypeError, ValueError):
                 start, days = 0, 2
-            self.predictions[ore] = {
+            pred = {
                 "start_day": start,
                 "days": max(1, min(10, days)),
                 "reason": "llm",
             }
+            self.predictions[ore] = pred
+            self.last_pred = {ore: dict(pred)}
             return True
         return False

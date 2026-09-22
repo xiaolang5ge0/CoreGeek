@@ -100,6 +100,7 @@ class _Ctx:
     wall_danger: bool = False        # 城墙危险（问题4：预计伤害超阈值）
     night_now: bool = False          # 当前是否夜间（影响 mine_unsafe）
     need_weapon_gold: bool = False   # 有武器未 L2 且金不足 → 挖矿工去卖钱
+    weapon_need_l2: bool = False     # 有武器未 L2 → 购买墙券/修复包时预留金币
     gunner_upgrade = None            # 炮手武器升级计划 (Pos, "weapon")
     price_boost_map: dict = {}       # 新闻预测：矿种 → 售卖加权
     wall_registry = None             # L2 围墙状态表（跨回合，供修理工按需修复/升级）
@@ -357,6 +358,8 @@ class Brain:
         ctx.repair_triggered = self._repair_triggered(turn, sorted_workers)
         # 需要凑武器升级费（挖矿工去卖钱的信号）
         ctx.need_weapon_gold = self._need_weapon_gold(turn)
+        # 武器未到 L2 → 购买墙券/修复包时为其预留金币（"不能因升级围墙导致炮台不升级"）
+        ctx.weapon_need_l2 = any(w.level < 2 for w in turn.weapons())
 
         # 建造分配：武器优先于墙；已被认领的格/工人不重复分配
         assigned = {
@@ -731,6 +734,11 @@ class Brain:
         in_task = self.pioneer_fsm.state == STATE_TASK_WORK
         if official:
             self.news_economy.update(official, turn.day_index)
+            # 记录新闻解析结果（预测窗口/LLM 兜底），便于后续定位与调试
+            if self.news_economy.last_pred:
+                trace["news_pred"] = self.news_economy.last_pred
+            elif self.news_economy.predictions:
+                trace["news_pred"] = {k: dict(v) for k, v in self.news_economy.predictions.items()}
             # 确定性解析失败 → 少量每日 LLM 兜底（非任务期，不占任务额度）
             if (
                 self.news_economy.last_new

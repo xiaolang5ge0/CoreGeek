@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from .path import find_path, next_step, step_toward
-from .planners.upgrade import WALL_MAX_HP, voucher_for
+from .planners.upgrade import WALL_MAX_HP, WALL_VOUCHER_BATCH, WEAPON_L1_COST, voucher_for
 from .protocol import (
     DAY_ROUNDS,
     MINE_TYPES,
@@ -55,7 +55,7 @@ STONE_BATCH = 6
 DUSK_URGENT_ROUNDS = 12
 SELL_NEAR_VENDOR_DIST = 3
 SELL_NEAR_MIN_VALUE = 8
-SELL_RICH_MIN_VALUE = 25
+SELL_RICH_MIN_VALUE = 60    # 专程卖门槛（提高：多攒货再跑，摊薄往返；用户 2026-09-23 路线优化）
 SELL_RICH_MAX_DIST = 20
 SELL_FULL_RATIO = 0.6
 STUCK_LIMIT = 5
@@ -258,8 +258,9 @@ class WorkerFSM:
                 base_threat = any(distance(r, station.pos) <= 6 for r in ctx.robot_cells)
                 if base_threat and distance(unit.pos, station.pos) <= 3:
                     return None
-        # D6：返程 deadline（当前回合 + 归程 + 6 ≥ 白天70/夜间130）→ 先回基地附近
-        if self._past_return_deadline(turn, unit, ctx):
+        # D6：返程 deadline（仅白天，入夜前回基地附近）；**夜间不强制回防**
+        # （用户 2026-09-23：夜间无威胁时继续采矿/卖钱，返程死线只用于天黑前避险）
+        if turn.is_day and self._past_return_deadline(turn, unit, ctx):
             return self._go_home(
                 turn, unit, ctx,
                 getattr(ctx, "safe_anchor", None) or ctx.home_anchor,
@@ -383,6 +384,7 @@ class WorkerFSM:
         if not pool:
             return None
         best, best_key = None, None
+        vendors = turn.vendor_positions()
         for pos, kind, dist, our_dist in pool:
             side = 12.0 if (enemy_station is not None
                             and distance(enemy_station.pos, pos) < our_dist) else 0.0
@@ -392,10 +394,11 @@ class WorkerFSM:
                 price = turn.vendor_prices.get(kind, 1)
                 # 新闻囤货：被预测涨价的矿种优先级提高
                 boost = ctx.price_boost(kind) if hasattr(ctx, "price_boost") else 0.0
-                # 单位回合收益（issue#26：矿工跑远矿空耗往返）：
-                # rate = 一矿总收益 / (往返路程 + 采集回合)，越高越好 → 取负号做升序键。
-                # 一矿≈10 次；往返 = 2×dist（去采+回卖）。
-                rate = (price * 10.0 + boost) / (2 * dist + 10.0)
+                # 单位回合收益（含"矿→小贩"返程，用户 2026-09-23）：
+                #   rate = 一矿收益 / (去矿 + 矿→小贩 + 采集)，越高越好 → 取负号升序。
+                #   矿点越靠近小贩，卖货往返越短（修 IKHYTB 矿工 28 回合只为 50 金）。
+                vendor_dist = min((distance(pos, v) for v in vendors), default=0)
+                rate = (price * 10.0 + boost) / (dist + vendor_dist + 10.0)
                 key = (-rate, our_dist * 0.1 + side, dist, pos.x, pos.y)
             if best is None or key < best_key:
                 best, best_key = pos, key
@@ -570,7 +573,7 @@ class WorkerFSM:
                 return None
             if not allow_buy:
                 return None
-            want = self._stock_qty(turn, unit, item, qty)
+            want = self._stock_qty(turn, unit, ctx, item, qty)
             if want <= 0:
                 return None
             return self._buy_item(turn, unit, ctx, item, want)
@@ -595,7 +598,7 @@ class WorkerFSM:
                 self.upgrade = None
                 self.state = STATE_FREE
                 return None
-            want = self._voucher_qty(turn, unit, voucher, cost, kind)
+            want = self._voucher_qty(turn, unit, ctx, voucher, cost, kind)
             if want <= 0:
                 return None
             return self._buy_item(turn, unit, ctx, voucher, want)
@@ -613,7 +616,7 @@ class WorkerFSM:
         self.state = STATE_UPGRADE
         return self._move(step, ctx)
 
-    def _stock_qty(self, turn: Turn, unit: Unit, item: str, want: int = 1) -> int:
+    def _stock_qty(self, turn: Turn, unit: Unit, ctx, item: str, want: int = 1) -> int:
         price = turn.shop_prices.get(item, 10)
         if price <= 0:
             return 0
@@ -622,14 +625,17 @@ class WorkerFSM:
         if need <= 0:
             return 0
         room = (unit.capacity or 100) - len(unit.backpack)
-        afford = turn.gold // price
+        # 武器未 L2 时，修复包/墙券为武器券预留金币
+        reserve = WEAPON_L1_COST if getattr(ctx, "weapon_need_l2", False) else 0
+        afford = max(0, (turn.gold - reserve) // price)
         return max(0, min(need, room, afford))
 
-    def _voucher_qty(self, turn: Turn, unit: Unit, voucher: str, cost: int, kind: str) -> int:
+    def _voucher_qty(self, turn: Turn, unit: Unit, ctx, voucher: str, cost: int, kind: str) -> int:
         """批量购买：min(刚需, 背包容量, 金币//单价)，扣除已持有（不多买）。"""
         lvl = 1 if voucher.endswith("1") else 2
         if kind == "wall":
-            need = sum(1 for w in turn.walls() if w.level == lvl)
+            # 墙券只备正面+转角（用户 2026-09-23）：上限 6，防一次买爆饿死武器升级
+            need = min(WALL_VOUCHER_BATCH, sum(1 for w in turn.walls() if w.level == lvl))
         else:
             need = sum(1 for w in turn.weapons() if w.level == lvl)
         held = unit.backpack.count(voucher)
@@ -637,7 +643,9 @@ class WorkerFSM:
         if want <= 0:
             return 0
         room = (unit.capacity or 100) - len(unit.backpack)
-        afford = turn.gold // cost if cost > 0 else 1
+        # 武器未 L2 时，为武器券预留金币（不能因墙券导致炮台不升级）
+        reserve = WEAPON_L1_COST if (kind == "wall" and getattr(ctx, "weapon_need_l2", False)) else 0
+        afford = max(0, (turn.gold - reserve) // cost) if cost > 0 else 1
         return max(0, min(want, room, afford))
 
     def _buy_item(self, turn: Turn, unit: Unit, ctx, name: str, num: int) -> dict[str, Any] | None:

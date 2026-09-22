@@ -617,8 +617,10 @@ class TaskPlanner:
             "answer=最终答案(JSON字符串，为空则未完成)；isFinished=任务是否结束。\n"
             "工程修复类：按 spec.md/check 的 FAIL 清单修复（mkdir -p/chmod/sed 第N行），"
             "完成后运行 ./check，输出含 `TOKEN: xxx` 即代表通过（直接作为 token 答案提交）。\n"
-            "API 类：若已有 `API_OK` 探测事实，**严格按其 base/path/认证/参数** curl；"
-            "否则先探测认证(Bearer/X-API-Key)×参数名(location/city)。分页用 limit/offset。"
+            "API 类：认证与参数各有两种可能——认证试 `Authorization: Bearer <key>` 与 "
+            "`X-API-Key: <key>`；参数名试 `location` 与 `city`。**必须系统遍历 2×2 组合**"
+            "（不要每次只改一个又退回旧值导致来回横跳）；命中 HTTP 200 后**锁定**该组合不再更换。"
+            "若已有 `API_OK` 探测事实，严格按其 base/path/认证/参数。分页用 limit/offset。"
         )
         return "\n".join(parts)
 

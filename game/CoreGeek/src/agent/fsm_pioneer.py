@@ -47,6 +47,7 @@ class PioneerFSM:
         self.failed_task_points: set = set()
         self.last_task_type: str | None = None   # 上次接取的任务类型（用于交替）
         self.upgrade_target: tuple | None = None  # (weapon Pos, level)
+        self.returning = False                     # 归位粘性：一旦开始入夜前归位，不再被打断
 
     # ================= 夜间 =================
     def move_to_guard(self, turn: Turn, pioneer: Unit, cp: Pos, ctx) -> dict[str, Any] | None:
@@ -71,8 +72,12 @@ class PioneerFSM:
         # （用户：炮手做任务与买券升级互斥 → 需要任务间隙插空升级）
         in_task = self.state in (STATE_TASK_ACCEPT, STATE_TASK_WAIT_ACCEPT, STATE_TASK_WORK)
         # 4. 入夜前回归 CP（时间敏感，优先于升级/任务；避免夜里还在外面）
+        #    **归位粘性**：一旦开始归位，不再因 travel 估算抖动而切回任务（修 IKHYSK 白天震荡）
         travel = self._travel_rounds(turn, pioneer, cp, ctx)
-        if turn.rounds_until_night <= travel + DUSK_MARGIN:
+        if turn.round_in_day == 0:
+            self.returning = False       # 新的一天重置归位粘性
+        if self.returning or turn.rounds_until_night <= travel + DUSK_MARGIN:
+            self.returning = True
             if self.state in (STATE_WEAPON_BUY, STATE_WEAPON_UPGRADE):
                 self.state = STATE_GUARD
                 self.upgrade_target = None
@@ -82,6 +87,7 @@ class PioneerFSM:
                 step = next_step(turn, pioneer, cp, ctx.reserved) or next_step(turn, pioneer, cp)
                 return move_command(step) if step is not None else None
             self.state = STATE_GUARD
+            self.returning = False       # 已到 CP → 解除粘性
         # 2/3. 武器升级计划（买券 / 用券）——仅在未进行任务且非归位时
         if not in_task and self.state != STATE_RETURN_HOME:
             cmd = self._weapon_upgrade_cmd(turn, pioneer, ctx)

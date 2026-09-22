@@ -14,14 +14,16 @@ from ..protocol import STATION_MAX_HP, Turn, WALL_MAX_HP, WEAPON_MAX_HP
 
 RESERVE_GOLD = 30      # 应急金（炸弹/修墙包）
 RICH_GOLD = 250        # 基地升级门槛
+WEAPON_L1_COST = 100   # 武器 L1→L2 券价（武器金币预留用）
 WALL_DAMAGE_RATIO = 0.6
 CRITICAL_WALL_RATIO = 0.3  # 武器未到 L2 时，仅临界受损墙才修（其余攒钱升塔）
 WALL_MIN_L2 = 6            # 武器升 L3 前，先升的最小墙量（正面+侧面转角，约 6 块）
 FIXER_STOCK_MAX = 4        # WallFixer 备货上限（金币紧缺时维持 4；全升满后不设上限）
 FIXER_STOCK_MAXED = 8      # 武器+墙全 L3 后：不设上限（有余钱就多备）
-FRONT_L2_TARGET = 5       # 正面墙 L2 死线数量（D3 入夜前，用户 2026-09-23）
-FRONT_L3_TARGET = 5       # 正面墙 L3 死线数量（D5 入夜前）
-FRONT_STOCK_TARGET = 5    # 正面墙对应券/修复包备货数量（D4+，没钱则不要求）
+FRONT_L2_TARGET = 6       # 正面+转角墙 L2 死线数量（D3 入夜前，用户 2026-09-23）
+FRONT_L3_TARGET = 6       # 正面+转角墙 L3 死线数量（D5 入夜前）
+FRONT_STOCK_TARGET = 6    # 正面+转角墙对应券/修复包备货数量（D3+）
+WALL_VOUCHER_BATCH = 6    # 墙升级券批量上限（只备正面+转角，防一次买爆饿死武器）
 
 
 def wall_hp_threshold(day: int) -> int:
@@ -101,7 +103,9 @@ class UpgradePlanner:
 
         def add(voucher, cost, target, kind, priority):
             nonlocal budget
-            if budget < cost:
+            # 武器未到 L2 时，为武器券预留金币（"不能因升级围墙导致前期炮台不升级"）
+            reserve = WEAPON_L1_COST if (weapons_need_l2 and kind in ("wall", "stock")) else 0
+            if budget - cost < reserve:
                 return False
             missions.append(UpgradeMission(voucher, cost, target, kind, priority))
             budget -= cost
@@ -158,18 +162,18 @@ class UpgradePlanner:
         front_wall_units = [w for w in all_walls if rank(w) in (WALL_FRONT, WALL_CORNER)]
         front_l2_n = sum(1 for w in front_wall_units if w.level >= 2)
         front_l3_n = sum(1 for w in front_wall_units if w.level >= 3)
-        # 6a. 正面 L1→L2 死线（D2-D3 提前冲，保证扛住 D3 夜）—— 优先级 12（武器 L2 之后）
-        if not weapons_need_l2 and 2 <= turn.day_index <= 3 and front_l2_n < FRONT_L2_TARGET:
+        # 6a. 正面+转角 L1→L2 死线（D2-D3 冲，保证扛住 D3 夜）—— 优先级 8（**高于武器升级**）
+        if 2 <= turn.day_index <= 3 and front_l2_n < FRONT_L2_TARGET:
             need = FRONT_L2_TARGET - front_l2_n
             for wall in front_order([w for w in front_wall_units if w.level == 1])[:need]:
                 v, c = voucher_for("wall", 1)
-                add(v, c, wall.pos, "wall", 12)
-        # 6b. 正面 L2→L3 死线（D4-D5 冲，保证扛住 D5 夜）—— 优先级 12（武器 L2 之后）
-        if not weapons_need_l2 and 4 <= turn.day_index <= 5 and front_l3_n < FRONT_L3_TARGET:
+                add(v, c, wall.pos, "wall", 8)
+        # 6b. 正面+转角 L2→L3 死线（D4-D5 冲，保证扛住 D5 夜）—— 优先级 8
+        if 4 <= turn.day_index <= 5 and front_l3_n < FRONT_L3_TARGET:
             need = FRONT_L3_TARGET - front_l3_n
             for wall in front_order([w for w in front_wall_units if w.level == 2])[:need]:
                 v, c = voucher_for("wall", 2)
-                add(v, c, wall.pos, "wall", 12)
+                add(v, c, wall.pos, "wall", 8)
 
         # 0. 【插队 D3】墙血低于动态阈值 max(100,(day+1)×100) → 优先修复/升级（可插武器队）
         #    L1→Voucher1、L2→Voucher2（正面 L2 也能升 L3 回血，用户补充）。
