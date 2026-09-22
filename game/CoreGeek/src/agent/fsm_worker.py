@@ -16,8 +16,10 @@ from typing import Any
 from .path import find_path, next_step, step_toward
 from .planners.upgrade import WALL_MAX_HP, voucher_for
 from .protocol import (
+    DAY_ROUNDS,
     MINE_TYPES,
     Pos,
+    ROUNDS_PER_DAY,
     STATION,
     TOWER_TYPES,
     Turn,
@@ -60,9 +62,10 @@ STUCK_LIMIT = 5
 STUCK_COLLECT_LIMIT = 3
 WORKER_DANGER_DIST = 3      # 机器人贴脸(≤)才规避；脱离 +2 恢复
 MAX_MINE_DIST = 16
-REPAIR_MARGIN = 4           # 修理工归位余量（距天黑 ≤ 路径 + 4）
+REPAIR_MARGIN = 3           # 修理工归位余量（距天黑 ≤ 路径 + 3）
 REPAIR_STONE_KEEP = 5       # 修理工常备石头（修墙用），低于此不卖
-RETURN_STICKY_DAY = 4       # D4+ 修理工回防粘性：一旦开始返回，跨昼夜持续到进墙
+RETURN_STICKY_DAY = 3       # D3+ 修理工回防粘性：一旦开始返回，跨昼夜持续到进墙
+RETURN_MARGIN = 6           # 矿工返程 deadline 余量（当前回合 + 归程 + 6 ≥ 白天/夜间截止）
 
 
 class WorkerFSM:
@@ -174,7 +177,7 @@ class WorkerFSM:
                     self.returning = False
                 return cmd
             self.returning = False  # 已进墙/受阻 → 继续正常流程
-        # 夜间优先：升级（=回血，省修复包）→ 抢修 → 就位 repair_post
+        # 夜间优先：升级（=回血，省修复包）→ 抢修 → D3+ 就位 repair_post（机器人清空前不回外）
         if turn.is_night:
             cmd = self._upgrade_flow(turn, unit, ctx, allow_use=True, allow_buy=False)
             if cmd is not None:
@@ -182,8 +185,9 @@ class WorkerFSM:
             cmd = self._repair_cmd(turn, unit, ctx)
             if cmd is not None:
                 return cmd
-            if turn.day_index >= RETURN_STICKY_DAY:
-                # D4+ 夜：无事可修 → 就位 repair_post（不在外采矿，便于就近抢修）
+            robots_alive = bool(getattr(ctx, "robot_cells", ()))
+            if turn.day_index >= RETURN_STICKY_DAY and robots_alive:
+                # D3+ 且机器人未清空 → 就位 repair_post 守内圈（用户：清空前不外出采矿）
                 return self._go_home(turn, unit, ctx, anchor)
             return self._miner(turn, unit, ctx)
         # 白天
@@ -243,7 +247,30 @@ class WorkerFSM:
         cmd = self._evade_cmd(turn, unit, ctx)
         if cmd is not None or self._evading:
             return cmd
+        # D6（采纳外部）：基地受威胁 + 矿工在基地 3 格内 → 原地待命（不发命令）
+        if turn.is_night and getattr(ctx, "robot_cells", ()):
+            station = turn.station()
+            if station is not None:
+                base_threat = any(distance(r, station.pos) <= 6 for r in ctx.robot_cells)
+                if base_threat and distance(unit.pos, station.pos) <= 3:
+                    return None
+        # D6：返程 deadline（当前回合 + 归程 + 6 ≥ 白天70/夜间130）→ 先回基地附近
+        if self._past_return_deadline(turn, unit, ctx):
+            return self._go_home(
+                turn, unit, ctx,
+                getattr(ctx, "safe_anchor", None) or ctx.home_anchor,
+            )
         return self._mine_flow(turn, unit, ctx, prefer="money")
+
+    def _past_return_deadline(self, turn: Turn, unit: Unit, ctx) -> bool:
+        """D6 返程 deadline：白天截止 70、夜间截止 130（round_in_day），留 RETURN_MARGIN 余量。"""
+        anchor = getattr(ctx, "safe_anchor", None) or ctx.home_anchor
+        if anchor is None or unit.pos == anchor:
+            return False
+        deadline = DAY_ROUNDS if turn.is_day else ROUNDS_PER_DAY
+        path = find_path(turn, unit, anchor, ctx.reserved)
+        ret = len(path) - 1 if path else distance(unit.pos, anchor)
+        return turn.round_in_day + ret + RETURN_MARGIN >= deadline
 
     # ================= 采矿+卖货 循环 =================
     def _mine_flow(self, turn: Turn, unit: Unit, ctx, *, prefer: str) -> dict[str, Any] | None:

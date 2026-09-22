@@ -24,9 +24,11 @@ from .protocol import (
     Pos,
     ROCKET,
     ROUNDS_PER_DAY,
+    TOWER_TYPES,
     Turn,
     WALL,
     WEAPON_BUILD_COST,
+    WEAPON_LIMIT,
     build_response,
     distance,
     empty_response,
@@ -49,7 +51,7 @@ BUILD_TRAVEL_BUFFER = 6     # 建墙预留回程缓冲（预留回合 = 待建�
 DUSK_AVOID_WINDOW = 12      # 白天临近入夜此回合数内，提前避开出生走廊矿/小贩
 COST_PER_WALL_BASE = 2      # 每墙基础回合（采集1+建造1）
 WALL_ROUNDS_PER = 5         # 单工人每墙约需回合（采集+建造+挪位）；用于判断是否需第二工人帮建
-REPAIR_MARGIN = 4           # 修理工提前归位余量（距天黑 ≤ 路径 + 4）
+REPAIR_MARGIN = 3           # 修理工提前归位余量（距天黑 ≤ 路径 + 3）
 WEAPON_L1_COST = 100        # 武器 L1→L2 券价（判断是否需要凑武器升级费）
 RESERVE_GOLD = 30           # 升级预算保留金
 LLM_DAILY_LIMIT = 3         # 每日 LLM 调用上限（用户：每天只有 3 次）
@@ -306,9 +308,13 @@ class Brain:
         existing_weapons = {w.pos for w in turn.weapons()}
         existing_walls = {w.pos for w in turn.walls()}
         occupied = turn.occupied_cells()
+        # 武器槽位上限（issue IKHYHT 死锁根因）：全局最多 3 座武器。
+        # 若已达上限，布局里"没对齐"的炮位格**不能**再建（第4座被 LegalityGuard 拒），
+        # 否则 brain 每回合派单→每回合被拒→修理工被永久占用、从不建墙。
+        weapon_slots = max(0, WEAPON_LIMIT - len(existing_weapons))
         turrets_missing = [
             c for c in layout.turret_cells if c not in existing_weapons and c not in occupied
-        ]
+        ][:weapon_slots]
         walls_missing = [
             c for c in layout.wall_cells if c not in existing_walls and c not in occupied
         ]
@@ -349,6 +355,13 @@ class Brain:
         assigned = {
             fsm.build[0] for fsm in self.worker_fsms.values() if fsm.build is not None
         }
+        # 在飞/已建的武器数（含已分配未完工）→ 剩余可建槽位
+        in_flight_weapons = sum(
+            1 for fsm in self.worker_fsms.values()
+            if fsm.build is not None and fsm.build[1] in TOWER_TYPES
+        )
+        weapon_slots = max(0, WEAPON_LIMIT - len(existing_weapons) - in_flight_weapons)
+        turrets_missing = turrets_missing[:weapon_slots]
         busy = set()
         gold_left = turn.gold
         for cell in turrets_missing:
@@ -357,7 +370,11 @@ class Brain:
             if cell in assigned:
                 gold_left -= WEAPON_BUILD_COST
                 continue
-            free = [w for w in workers if w.unit_id not in busy]
+            # 不得抢占"已有建造任务"的工人（否则会覆盖在途的建墙任务 → issue IKHYHT）
+            free = [
+                w for w in workers
+                if w.unit_id not in busy and self._worker_fsm(w).build is None
+            ]
             if not free:
                 break
             worker = min(free, key=lambda w: distance(w.pos, cell))

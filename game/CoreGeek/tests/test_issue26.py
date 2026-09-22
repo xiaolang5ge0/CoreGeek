@@ -241,5 +241,40 @@ class TestMineRateSelection(unittest.TestCase):
         self.assertEqual(mine, Pos(12, 22), "同矿种近矿应胜远矿")
 
 
+class TestWeaponLimitNoDeadlock(unittest.TestCase):
+    def test_no_weapon_build_after_limit_and_walls_get_built(self):
+        """issue IKHYHT：已达 3 武器上限时不得再派第 4 座（否则占死修理工、从不建墙）。"""
+        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (4, 30): "stone"})
+        sim.add_mine((6, 22), "stone", remaining=60)
+        sim.add_mine((4, 30), "stone", remaining=60)
+        brain = Brain()
+        brain.decide(sim.payload())  # 建立布局
+        turrets = set(brain.layout.turret_cells)
+        # 放 3 座火箭在"非布局炮位"的格（模拟历史布局漂移）
+        placed = 0
+        for x in range(7, 14):
+            for y in range(19, 27):
+                if placed >= 3:
+                    break
+                if Pos(x, y) in turrets or (x, y) in sim.mines:
+                    continue
+                if abs(x - 10) <= 2 and abs(y - 24) <= 2:
+                    continue  # 别贴基地
+                sim.roles.append(sim._role(50040 + placed, x, y, "rocket", 1000, level=1))
+                placed += 1
+        self.assertEqual(placed, 3)
+        resp, trace = brain.decide(sim.payload())
+        self.assertEqual(trace.get("turrets_missing"), 0, "已达上限不得再派武器建造")
+        for c in resp["roleCommandMap"].values():
+            self.assertNotEqual(c.get("name"), "rocket", "不得再建第 4 座火箭")
+        # 后续应开始建墙（修理工有石头）
+        sim.role(W1)["backpack"] = ["stone"] * 14
+        for _ in range(30):
+            response, _ = brain.decide(sim.payload())
+            sim.apply(response)
+            sim.advance()
+        self.assertGreater(len(sim.walls()), 0, "修理工应建墙（不再被武器死锁占用）")
+
+
 if __name__ == "__main__":
     unittest.main()

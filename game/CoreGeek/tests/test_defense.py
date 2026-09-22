@@ -114,16 +114,15 @@ class TestWorkerRecall(unittest.TestCase):
         self.assertNotIn("CRITICAL_DEFENSE", states, "远处兵潮不应召回工人")
 
     def test_evade_when_robot_adjacent(self):
-        """机器人贴到工人 ≤3 格且基地安全 → 工人直接避让（远离机器人，而非撤向基地方向）。"""
+        """机器人贴到工人 ≤3 格 → 工人进入防御态（EVADE 远离 / 基地危险时 CRITICAL 撤内圈）。"""
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
         sim.add_mine((8, 20), "copper", remaining=30)
         brain = Brain()
         run_rounds(brain, sim, DAY1)
-        run_rounds(brain, sim, 5)  # 进入夜间，工人在外采矿
+        run_rounds(brain, sim, 5)  # 进入夜间
         miner = sim.role(W2)
         mx, my = miner["pos"]["x"], miner["pos"]["y"]
-        robot = (mx + 1, my)
-        sim.spawn_robot(robot[0], robot[1], "middleRobot", hp=60, rid=30201)  # 贴脸
+        sim.spawn_robot(mx + 1, my, "middleRobot", hp=60, rid=30201)  # 贴脸
         evaded = False
         for _ in range(4):
             response, trace = brain.decide(sim.payload())
@@ -132,13 +131,9 @@ class TestWorkerRecall(unittest.TestCase):
                 evaded = True
             sim.apply(response)
             sim.advance()
-        self.assertTrue(evaded, "机器人贴脸时工人应规避")
-        # 且应与机器人拉开距离（远离而非迎面）
-        pos = sim.role(W2)["pos"]
-        self.assertGreaterEqual(
-            max(abs(pos["x"] - robot[0]), abs(pos["y"] - robot[1])), 2,
-            "工人应远离机器人（而非撤向基地方向与兵潮迎面）",
-        )
+        # 核心：进入防御态（不继续原地采矿送死）。D6 后工人入夜前已回基地附近，
+        # 贴脸时可能走"撤内圈安全格"分支，故不再强求与机器人拉开固定距离。
+        self.assertTrue(evaded, "机器人贴脸时工人应进入防御态")
 
 
 class TestEvade(unittest.TestCase):

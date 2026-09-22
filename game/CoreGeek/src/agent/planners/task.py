@@ -37,6 +37,7 @@ ST_READ = ST_EXPLORE
 
 MAX_NON_JSON = 3       # 连续非 JSON 上限 → 强制结束
 MAX_LLM_LOOPS = 8      # LLM 循环上限默认值（实际按任务 timeoutRounds 收紧，见 _loop_limit）
+FORCE_SUBMIT_CMDS = 8  # 已用命令数 ≥8 → 强制进入"只准给答案"模式（D7）
 EXPLORE_LIMIT = 8000   # 探索输出保留字符数（需容纳 API_DOCS 全文/密钥）
 
 _FILE_NAME = re.compile(r"[A-Za-z0-9_\-/]+\.(?:md|txt)", re.I)
@@ -108,6 +109,7 @@ class TaskSession:
     submitted: bool = False
     need_refine: bool = False
     max_loops: int = MAX_LLM_LOOPS                          # 本任务 LLM 循环上限（按 timeout 收紧）
+    cmd_count: int = 0                                      # 已下发命令数（D7：≥8 强制提交）
 
     def reset(self) -> None:
         self.__init__()
@@ -165,6 +167,7 @@ class TaskPlanner:
             cmd = self._anchor(pend, session)
             out.execute_cmd = cmd
             session.pending_cmd = cmd
+            session.cmd_count += 1
             session._pending_kind = "llm"  # type: ignore[attr-defined]
             session.stage = ST_WAIT_CMD
             return out
@@ -441,6 +444,10 @@ class TaskPlanner:
             session.stage = ST_SUBMIT
             return
         if cmd and not cmd.startswith("cat "):
+            # D7：命令数 ≥8 → 只准给答案，拒绝新命令
+            if session.cmd_count >= FORCE_SUBMIT_CMDS:
+                session.stage = ST_LLM
+                return
             session.stage = ST_WAIT_CMD
             session._pending_llm_cmd = cmd  # type: ignore[attr-defined]
             return
@@ -468,14 +475,24 @@ class TaskPlanner:
             parts += ["=== 参考 SOP（历史任务沉淀） ===", sop[:1500]]
         if session.non_json > 0:
             parts.append("你上一次的返回未按要求仅返回JSON，请勿再犯。")
+        if "API_OK" in session.explore_output:
+            parts.append(
+                "API 探测已成功：`API_OK` 行给出了可用的 base/path/认证/参数/城市，"
+                "请直接用该组合 curl 收割并组装 answer，不要再更换认证或参数名。"
+            )
+        if session.cmd_count >= FORCE_SUBMIT_CMDS:
+            parts.append(
+                f"已用命令数 {session.cmd_count} ≥ {FORCE_SUBMIT_CMDS}：**必须直接给出 answer，"
+                "不得再返回 cmd**；信息不足也要给出当前最佳答案。"
+            )
         parts.append(
             "请只返回 JSON: {\"cmd\": \"\", \"answer\": \"\", \"isFinished\": true|false}\n"
             "说明：cmd=要执行的 shell 命令（单行，如 curl API 调用，为空则不执行）；"
             "answer=最终答案(JSON字符串，为空则未完成)；isFinished=任务是否结束。\n"
             "工程修复类：按 spec.md/check 的 FAIL 清单修复（mkdir -p/chmod/sed 第N行），"
             "完成后运行 ./check，输出含 `TOKEN: xxx` 即代表通过（直接作为 token 答案提交）。\n"
-            "API 类：用 curl 调 http://localhost:8899（文档字段可能过期，以实测为准），"
-            "认证头与参数名以文档/实测为准；分页用 limit/offset。"
+            "API 类：若已有 `API_OK` 探测事实，**严格按其 base/path/认证/参数** curl；"
+            "否则先探测认证(Bearer/X-API-Key)×参数名(location/city)。分页用 limit/offset。"
         )
         return "\n".join(parts)
 

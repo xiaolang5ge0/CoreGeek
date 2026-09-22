@@ -7,8 +7,8 @@
 
 | 项 | 状态 |
 |---|---|
-| 当前阶段 | **P0~P5 + 十六轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
-| 测试 | **142/142 通过** |
+| 当前阶段 | **P0~P5 + 十七轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
+| 测试 | **153/153 通过** |
 | 打包 | `game/CoreGeek/dist/CoreGeek.tar.gz`（**tar 顶层 CoreGeek/ 目录**，平台父目录解包后运行 `<root>/CoreGeek/main3.py`） |
 | 代码 | `game/CoreGeek/`，Python ≥3.11 纯标准库 |
 | 当前行为 | Day1 双工人建满14墙+3火箭；夜1-3 双工人全力采矿卖钱（无蹲防）；开拓者单人控3炮；Day4+ 修墙岗（墙血<50%才修、正面优先、L3→WallFixer、L1/L2→升级券）；WallRegistry 追踪攻破/补建并优先重升级；武器优先升级；任务确定性+LLM兜底；选矿我方侧优先 |
@@ -87,6 +87,22 @@
 | `location=请阅读` 参数污染 | 把 `phaseTask` 文本（"请阅读task_1_beijing.md…"）当成城市候选 | 参数值禁取自 `phaseTask`/提示语，只取文档/响应中的真实字段 |
 | 任务1 仍靠 LLM 三次 | 工程类确定性路径缺失（cat spec→改配置→去 CRLF 全靠 LLM） | 工程类 SOP 固化：find+cat spec → 按 spec 正则修复 → 去 CRLF → check |
 | 两局总分均 88（仅任务1的80分） | 任务2 超时失败，无 +80 | 以上修复后复测通过率 |
+
+## 实战修复记录·第十七轮（2026-09-23 issue IKHYHT 致命 bug + D1–D8 决策落地）
+
+> 日志：Gitee issue `IKHYHT`（teamB12）；决策对比：`STRATEGY_COMPARISON_external.md`。
+
+| 项 | 内容 |
+|---|---|
+| **致命 bug：维修工从不建墙（14 石头闲置）** | 根因实锤：基地已有 3 座火箭，但布局里还差 1 个"未对齐"炮位格 → brain 每回合派修理工建"第 4 座" → LegalityGuard 每回合 `weapon_limit` 拒绝 → 修理工被永久占用、从不建墙。**修复**：① 武器达上限（3）时不再派布局炮位格；② 武器分配不得抢占"已有建造任务"的工人（防覆盖在途建墙） |
+| **D1 修理工回防** | `RETURN_STICKY_DAY 4→3`；D3+ 夜机器人未清空则守 repair_post，清空后才外出采矿 |
+| **D2 归位余量** | 炮手 `DUSK_MARGIN 3→5`；修理工 `REPAIR_MARGIN 4→3` |
+| **D3 墙插队** | 新增 `wall_hp_threshold(day)=max(100,(day+1)×100)`；墙血低于阈值 → 优先级 5（插武器队） |
+| **D4 基地门控** | 基地升级仅在**武器+墙全 L3** 后 |
+| **D6 矿工返程** | 新增 `_past_return_deadline`（白天70/夜间130，A\* 路径+6）+ 基地受威胁且矿工在基地3格内→原地待命 |
+| **D7 命令预算** | `FORCE_SUBMIT_CMDS=8`：命令数达 8 → 拒绝新命令、强制给答案 |
+| **D8 物资上限** | `FIXER_STOCK_MAX=4`（紧缺时）；武器+墙全 L3 → `FIXER_STOCK_MAXED=8`（不设上限） |
+| **测试** | 新增 `tests/test_decisions_d1_d8.py`（10 例）+ `test_issue26.py` 加武器死锁回归；全量 **153/153 通过**；simulate 1300 存活 |
 
 ## 实战修复记录·第十六轮（2026-09-22 issue#28–#32 交接复核 + 外部策略书对比）
 

@@ -17,7 +17,13 @@ RICH_GOLD = 250        # 基地升级门槛
 WALL_DAMAGE_RATIO = 0.6
 CRITICAL_WALL_RATIO = 0.3  # 武器未到 L2 时，仅临界受损墙才修（其余攒钱升塔）
 WALL_MIN_L2 = 6            # 武器升 L3 前，先升的最小墙量（正面+侧面转角，约 6 块）
-FIXER_STOCK_MAX = 3        # WallFixer 按需备货上限（L3 墙无法再用升级券，只能修复包）
+FIXER_STOCK_MAX = 4        # WallFixer 备货上限（金币紧缺时维持 4；全升满后不设上限）
+FIXER_STOCK_MAXED = 8      # 武器+墙全 L3 后：不设上限（有余钱就多备）
+
+
+def wall_hp_threshold(day: int) -> int:
+    """墙修复/插队动态阈值（D3，外部策略）：max(100, (day+1)×100)，随天数递增。"""
+    return max(100, (day + 1) * 100)
 
 VOUCHER = {
     ("weapon", 1): ("WeaponUpgradeVoucher1", 100),
@@ -104,7 +110,16 @@ class UpgradePlanner:
                 ),
             )
 
-        # 1. 武器全部 L2（最高优先）
+        # 0. 【插队 D3】墙血低于动态阈值 max(100,(day+1)×100) → 优先修复/升级（可插武器队）
+        #    仅升 L1→L2（防跳级）；回满血后自然退出。
+        crit = sorted(
+            (w for w in all_walls if w.level == 1 and w.health < wall_hp_threshold(turn.day_index)),
+            key=lambda w: (w.health, -dist_cp(w)),
+        )
+        for wall in crit:
+            v, c = voucher_for("wall", 1)
+            add(v, c, wall.pos, "wall", 5)
+        # 1. 武器全部 L2（常规最高优先）
         for w in weapons:
             if w.level == 1:
                 v, c = voucher_for("weapon", 1)
@@ -143,19 +158,26 @@ class UpgradePlanner:
             for wall in front_order([w for w in all_walls if w.level == 2]):
                 v, c = voucher_for("wall", 2)
                 add(v, c, wall.pos, "wall", 40)
-        # 7. 基地：金币富余时
+        # 7. 基地：**仅当武器+墙全 L3**（D4：暂不升基地，全满后才考虑）
         station = turn.station()
-        if station is not None and 1 <= station.level <= 2 and turn.gold >= RICH_GOLD:
+        all_weapons_l3 = bool(weapons) and all(w.level >= 3 for w in weapons)
+        all_walls_l3 = bool(all_walls) and all(w.level >= 3 for w in all_walls)
+        if (
+            station is not None and 1 <= station.level <= 2
+            and turn.gold >= RICH_GOLD and all_weapons_l3 and all_walls_l3
+        ):
             v, c = voucher_for("station", station.level)
             add(v, c, station.pos, "station", 45)
-        # 8. 按需备货 WallFixer（用户补充）：围墙到 L3 后升级券失效 → 只能靠修复包回血。
-        #    Day3+ 起常备 2 个（通用修复，不挑墙等级）；Day4+（BOSS 夜）或已有 L3 墙时按 L3 墙数加备。
-        #    注意：只数**工人**背包（修理工夜间单独用，炮手持有不算数）。
+        # 8. WallFixer 备货（D8）：金币紧缺时上限 4；**武器+墙全 L3 后不设上限**。
+        #    只数**工人**背包（修理工夜间单独用，炮手持有不算数）。
         if turn.day_index >= 3:
             l3_walls = [w for w in all_walls if w.level >= 3]
-            desired = 2
-            if turn.day_index >= 4 or l3_walls:
-                desired = min(FIXER_STOCK_MAX, max(2, len(l3_walls)))
+            if all_weapons_l3 and all_walls_l3:
+                desired = FIXER_STOCK_MAXED
+            else:
+                desired = 2
+                if turn.day_index >= 4 or l3_walls:
+                    desired = min(FIXER_STOCK_MAX, max(2, len(l3_walls)))
             held = sum(
                 u.backpack.count("WallFixer")
                 for u in turn.ours
@@ -165,4 +187,14 @@ class UpgradePlanner:
                 missions.append(
                     UpgradeMission("WallFixer", 10, None, "stock", 50, qty=desired)
                 )
-        return sorted(missions, key=lambda m: m.priority)
+        # 去重：同一建筑只保留最高优先（小=高）的一条任务
+        seen: set = set()
+        uniq: list[UpgradeMission] = []
+        for m in sorted(missions, key=lambda m: m.priority):
+            if m.target is not None:
+                key = (m.kind, m.target)
+                if key in seen:
+                    continue
+                seen.add(key)
+            uniq.append(m)
+        return uniq
