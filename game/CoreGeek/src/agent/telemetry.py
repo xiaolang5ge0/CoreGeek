@@ -125,7 +125,7 @@ def compact_record(
         if request.get("llmResp"):
             rec["llm"] = str(request["llmResp"])[:200]
         if request.get("lastCmdResult"):
-            rec["lcr"] = str(request["lastCmdResult"])[:300]
+            rec["lcr"] = str(request["lastCmdResult"])[:1500]
     return rec
 
 

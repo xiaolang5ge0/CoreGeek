@@ -129,7 +129,7 @@ class TestTaskFlow(unittest.TestCase):
         brain = Brain()
         run_rounds(brain, sim, DAY1)
         explore = next(c for c in captured if "find /tmp/selfEvolutionTask" in c)
-        for token in ("-iname", "API_DOCS.md", "ws_*/spec.md", "__DIR:", "=== LIST ==="):
+        for token in ("-iname", "*.md", "*.txt", "__DIR:", "=== LIST ==="):
             self.assertIn(token, explore)
 
     def test_non_json_three_times_force_end(self):

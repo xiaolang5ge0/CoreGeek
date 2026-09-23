@@ -88,6 +88,15 @@
 | 任务1 仍靠 LLM 三次 | 工程类确定性路径缺失（cat spec→改配置→去 CRLF 全靠 LLM） | 工程类 SOP 固化：find+cat spec → 按 spec 正则修复 → 去 CRLF → check |
 | 两局总分均 88（仅任务1的80分） | 任务2 超时失败，无 +80 | 以上修复后复测通过率 |
 
+## 实战修复记录·第三十三轮（2026-09-23 IKI6HJ：按 API_DOCS 定分页，不硬编码）
+
+| 问题 | 根因 | 修复 |
+|---|---|---|
+| **全量分页仍不对** | harvester 的分页参数是**硬编码猜测**（limit/pageSize/size），未读 `API_DOCS.md`；且默认页只 10 条 | ① harvester **从 `API_DOCS.md` 解析**分页参数名（`pageSize/limit/offset/page/...`）再逐个试（200/100/50），仍不全则用"页码×页大小"翻页；② **文档 glob 扩到 `.md`+`.txt`** |
+| **健壮探索没读全文档** | `_explore_cmd` 只读 `README/API_DOCS/ws_*/spec.md` | 改为**读取任务目录下所有 `.md`/`.txt`**（用户建议） |
+| **日志看不到文档** | 遥测 `lcr` 截断 300 字符 → API_DOCS/返回体被截 | `lcr` 截断 300 → **1500** |
+| 测试 | — | 更新 `test_explore_command_is_robust`；全量 **205/205 通过** |
+
 ## 实战修复记录·第三十二轮（2026-09-23 IKI604：券全局计数 + 修复包优先）
 
 | 问题 | 根因（实锤） | 修复 |

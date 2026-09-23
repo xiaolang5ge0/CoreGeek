@@ -294,8 +294,9 @@ class TaskPlanner:
             f'f=$(find /tmp/selfEvolutionTask -type f -iname "{name}" -print -quit 2>/dev/null); '
             f'[ -n "$f" ] || f=$(find / -maxdepth 10 -type f -iname "{name}" -print -quit 2>/dev/null); '
             'd=$(dirname "$f"); echo "__FILE:$f"; echo "=== TASK ==="; cat "$f" 2>/dev/null; '
-            'for p in "$d/README.md" "$d/API_DOCS.md" "$d"/ws_*/spec.md; do '
-            '[ -f "$p" ] && { echo "=== FILE:$p ==="; cat "$p"; }; done; '
+            'find "$d" -maxdepth 4 -type f \\( -iname "*.md" -o -iname "*.txt" \\) '
+            '! -name "$(basename "$f")" -print 2>/dev/null | while read p; do '
+            'echo "=== FILE:$p ==="; cat "$p"; done; '
             'echo "=== LIST ==="; find "$d" -maxdepth 3 -type f -printf \'%p %m\\n\' 2>/dev/null; '
             'echo "__DIR:$d"'
         )
