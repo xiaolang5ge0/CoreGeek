@@ -16,15 +16,15 @@ RESERVE_GOLD = 30      # 应急金（炸弹/修墙包）
 RICH_GOLD = 250        # 基地升级门槛
 WEAPON_L1_COST = 100   # 武器 L1→L2 券价（武器金币预留用）
 WEAPON_L2_COST = 150   # 武器 L2→L3 券价（武器金币预留用）
-WALL_DAMAGE_RATIO = 0.6
-CRITICAL_WALL_RATIO = 0.3  # 武器未到 L2 时，仅临界受损墙才修（其余攒钱升塔）
+WALL_DAMAGE_RATIO = 0.5
+CRITICAL_WALL_RATIO = 0.35  # 紧急墙：血量 < 35% 满血（评估：被破前 10 回合多在 20~40%）
 WALL_MIN_L2 = 6            # 武器升 L3 前，先升的最小墙量（正面+侧面转角，约 6 块）
 FIXER_STOCK_MAX = 4        # WallFixer 备货上限（金币紧缺时维持 4；全升满后不设上限）
 FIXER_STOCK_MAXED = 8      # 武器+墙全 L3 后：不设上限（有余钱就多备）
 FRONT_L2_TARGET = 6       # 正面+转角墙 L2 死线数量（D3 入夜前，用户 2026-09-23）
 FRONT_L3_TARGET = 6       # 正面+转角墙 L3 死线数量（D5 入夜前）
 FRONT_STOCK_TARGET = 6    # 正面+转角墙对应券/修复包备货数量（D3+）
-WALL_VOUCHER_BATCH = 6    # 墙升级券批量上限（只备正面+转角，防一次买爆饿死武器）
+WALL_VOUCHER_BATCH = 4    # 墙升级券批量上限（用户 2026-09-23：上限 4，防一次买爆饿死武器）
 
 
 def wall_hp_threshold(day: int) -> int:
@@ -65,30 +65,27 @@ def wall_rank(pos, anchor, front: str | None) -> int:
     return WALL_SIDE
 
 def wall_target_level(pos, anchor, front: str | None) -> int:
-    """围墙终极目标等级（用户 2026-09-23 目标图）：
+    """围墙目标等级（用户 2026-09-23 修订）：
 
-    - 迎敌侧**整列**（prim == pext）→ L3
-    - 顶/底行**靠迎敌侧的 1 格**（prim == pext∓1 且 sec 为极值）→ L3
-    - 其余（靠开口侧）→ L2
+    - **纯正面**（迎敌侧整列，**不含拐角**）→ L3（唯一硬性规定）
+    - 其余（拐角/侧面/靠开口侧）→ L2（按掉血量排序升级）
 
-    以 FRONT=WEST 为例（prim=dx, sec=dy, pext=3）：dx=3 全列 L3；
-    dx=2 且 dy∈{-2,3} 的两端 L3；dx∈{-1,0,1} 与 dx=2 的中间格 L2。
+    以 FRONT=WEST 为例（prim=dx, sec=dy, pext=3）：dx=3 且 dy∈{-1,0,1,2} → L3；
+    拐角 dx=3,dy∈{-2,3} 与其余 → L2。
     """
     if anchor is None:
         return 2
     dx = pos.x - anchor[0]
     dy = pos.y - anchor[1]
     if front == "W":
-        prim, sec, pext, pnear = dx, dy, _RING_HI, _RING_HI - 1
+        prim, sec, pext = dx, dy, _RING_HI
     elif front == "E":
-        prim, sec, pext, pnear = dx, dy, _RING_LO, _RING_LO + 1
+        prim, sec, pext = dx, dy, _RING_LO
     elif front == "N":
-        prim, sec, pext, pnear = dy, dx, _RING_LO, _RING_LO + 1
+        prim, sec, pext = dy, dx, _RING_LO
     else:  # S / None
-        prim, sec, pext, pnear = dy, dx, _RING_HI, _RING_HI - 1
-    if prim == pext:
-        return 3
-    if prim == pnear and sec in (_RING_LO, _RING_HI):
+        prim, sec, pext = dy, dx, _RING_HI
+    if prim == pext and sec not in (_RING_LO, _RING_HI):
         return 3
     return 2
 
@@ -158,7 +155,11 @@ class UpgradePlanner:
         def ratio(w):
             return w.health / WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
 
-        weapons = sorted(turn.weapons(), key=lambda w: (w.level, w.unit_id))
+        # 只考虑火箭（用户 2026-09-23：只升火箭，gatling/railgun 不升）
+        weapons = sorted(
+            [w for w in turn.weapons() if w.kind == "rocket"],
+            key=lambda w: (w.level, w.unit_id),
+        )
         all_walls = list(turn.walls())
         any_l1_wall = any(w.level == 1 for w in all_walls)
         # 武器未到 L2 → 为武器券(100金)预留金币：暂停墙升级（仅修临界受损墙），避免廉价墙券吃光金币
@@ -205,9 +206,9 @@ class UpgradePlanner:
 
         front_wall_units = [w for w in all_walls if rank(w) in (WALL_FRONT, WALL_CORNER)]
 
-        # ---- 硬约束（用户 2026-09-23 确认）：D5 入夜前**目标正面墙 L3 < N** →
-        #      正面墙升级优先级**最高**（priority 1，高于 L2炮台/修复包/一切）。
-        #      只约束"正面墙"（目标 L3 的迎敌侧整列 + 顶/底靠敌 1 格）。
+        # ---- 硬约束（用户 2026-09-23 确认）：D5 入夜前**纯正面墙 L3 < N** →
+        #      纯正面墙升级优先级**最高**（priority 1，高于 L2炮台/修复包/一切）。
+        #      范围 = **纯正面（迎敌侧整列，不含拐角）**；其余墙按掉血量排序。
         front_targets = [w for w in all_walls if target_level(w) == 3]
         front_l3_n = sum(1 for w in front_targets if w.level >= 3)
         if turn.day_index <= 5 and front_l3_n < FRONT_L3_TARGET:
@@ -216,11 +217,26 @@ class UpgradePlanner:
                 if v is not None:
                     add(v, c, wall.pos, "wall", 1)
 
-        # 0. 受损墙优先（用户：优先升级**上一回合受损程度最高**的墙）→ 用券升级回血。
-        #    升级 = 回满血 + 提升上限（比 WallFixer 划算）；最受损优先。
-        #    优先级 12：在 L2 炮台(10) 之后、L2 围墙(15) 之前（用户：L2炮台 > L2围墙 > ...）。
+        # 0. 受损/紧急墙（用户 2026-09-23）：最受损优先 → 用券升级回血（比 WallFixer 划算）。
+        #    - 受损：ratio < 0.5
+        #    - 紧急：ratio < 0.35（评估：被破前 10 回合多在 20~40%）或 **本夜累计掉血 > 剩余血量**
+        #    优先级 12（**不高于 L2 炮台 10**，与受损墙同级）。
+        def _is_hurt(w) -> bool:
+            if w.level >= 3:
+                return False
+            if ratio(w) < WALL_DAMAGE_RATIO:
+                return True
+            if registry is not None:
+                st = registry.walls.get(w.pos)
+                if st is not None and st.exists:
+                    if st.health < CRITICAL_WALL_RATIO * st.max_health:
+                        return True
+                    if st.night_damage > st.health > 0:
+                        return True
+            return False
+
         hurt = sorted(
-            [w for w in all_walls if w.level < 3 and ratio(w) < WALL_DAMAGE_RATIO],
+            [w for w in all_walls if _is_hurt(w)],
             key=lambda w: (ratio(w), rank(w), w.pos.x, w.pos.y),
         )
         for wall in hurt:
@@ -251,9 +267,10 @@ class UpgradePlanner:
             if w.level == 1:
                 v, c = voucher_for("weapon", 1)
                 add(v, c, w.pos, "weapon", 10)
-        # 3. L2 围墙（目标 ≥2 且当前 L1）—— 正面块优先
-        for wall in front_order(
-            [w for w in all_walls if w.level == 1 and target_level(w) >= 2]
+        # 3. L2 围墙（目标 ≥2 且当前 L1）—— **按掉血量**（最受损优先），不再按位置
+        for wall in sorted(
+            [w for w in all_walls if w.level == 1 and target_level(w) >= 2],
+            key=lambda w: (ratio(w), rank(w), w.pos.x, w.pos.y),
         ):
             v, c = voucher_for("wall", 1)
             add(v, c, wall.pos, "wall", 15)
@@ -262,9 +279,10 @@ class UpgradePlanner:
             if w.level == 2:
                 v, c = voucher_for("weapon", 2)
                 add(v, c, w.pos, "weapon", 20)
-        # 5. L3 围墙（目标 ==3 且当前 L2）—— 仅迎敌侧整列 + 顶/底靠敌 1 格
-        for wall in front_order(
-            [w for w in all_walls if w.level == 2 and target_level(w) == 3]
+        # 5. L3 围墙（目标 ==3 且当前 L2）—— 纯正面（硬约束未覆盖时兜底）
+        for wall in sorted(
+            [w for w in all_walls if w.level == 2 and target_level(w) == 3],
+            key=lambda w: (ratio(w), rank(w), w.pos.x, w.pos.y),
         ):
             v, c = voucher_for("wall", 2)
             add(v, c, wall.pos, "wall", 25)

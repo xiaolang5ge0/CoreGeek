@@ -26,6 +26,7 @@ class WallState:
     is_front: bool = False
     breached_round: int = 0  # 最近一次由存在→不存在（被攻破）的回合
     rebuilt_round: int = 0   # 最近一次由不存在→存在（补建）的回合
+    night_damage: int = 0    # 本夜累计掉血（跨回合累加，换日清零）→ 紧急墙判据之一
 
     @property
     def max_health(self) -> int:
@@ -69,6 +70,7 @@ class WallRegistry:
     def __init__(self) -> None:
         self.walls: dict[Pos, WallState] = {}
         self.cp: Pos | None = None
+        self._day: int = -1
 
     def sync(self, turn: Turn, layout=None) -> None:
         """用本回合快照 + 布局刷新墙况，识别"被攻破"与"补建"事件。
@@ -77,6 +79,11 @@ class WallRegistry:
         - 由存在→不存在记 breached_round；由不存在→存在记 rebuilt_round。
         """
         present = {w.pos: w for w in turn.walls()}
+        # 换日 → 清零本夜累计掉血
+        if turn.day_index != self._day:
+            self._day = turn.day_index
+            for s in self.walls.values():
+                s.night_damage = 0
         front: set = set()
         if layout is not None:
             self.cp = layout.control_point
@@ -93,6 +100,8 @@ class WallRegistry:
             if wall is not None:
                 if not state.exists:
                     state.rebuilt_round = turn.round_no
+                elif wall.health < state.health:
+                    state.night_damage += state.health - wall.health
                 state.exists = True
                 state.level = wall.level
                 state.health = wall.health

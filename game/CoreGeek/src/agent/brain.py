@@ -11,7 +11,13 @@ from typing import Any
 
 from .buildable_map import BuildableMap
 from .fire import JointFirePlanner
-from .fsm_pioneer import STATE_TASK_WORK, PioneerFSM
+from .fsm_pioneer import (
+    STATE_TASK_ACCEPT,
+    STATE_TASK_TRAVEL,
+    STATE_TASK_WAIT_ACCEPT,
+    STATE_TASK_WORK,
+    PioneerFSM,
+)
 from .fsm_worker import ROLE_MINER, ROLE_REPAIRER, STONE_BATCH, WorkerFSM
 from .path import next_step
 from .phases import PhaseManager
@@ -453,7 +459,14 @@ class Brain:
 
         # 升级任务分配（仅墙/备货 → 只派修理工；武器升级由炮手 pioneer 处理）
         # 白天只**采购**（allow_stock=True）；实际升级/修复留到夜间（用户：白天最大化采集）
-        self._assign_repair_mission(turn, layout, ctx, workers, allow_stock=True)
+        # 开拓者正在做任务/去任务点时，允许修理工代买武器券升级（用户 2026-09-23）
+        pioneer_busy = self.pioneer_fsm.state in (
+            STATE_TASK_ACCEPT, STATE_TASK_WAIT_ACCEPT,
+            STATE_TASK_WORK, STATE_TASK_TRAVEL,
+        )
+        self._assign_repair_mission(
+            turn, layout, ctx, workers, allow_stock=True, allow_weapon=pioneer_busy
+        )
         # 炮手武器升级计划（由 fsm_pioneer 执行）
         ctx.gunner_upgrade = self._gunner_upgrade_plan(turn)
         # 归位锚点必须在工人决策前设置：修理工黄昏归位依赖 ctx.home_anchor
@@ -684,11 +697,15 @@ class Brain:
             return False
         return 0 < turn.rounds_until_night <= distance(repairer.pos, home) + REPAIR_MARGIN
 
-    def _assign_repair_mission(self, turn: Turn, layout, ctx, workers, *, allow_stock: bool) -> None:
-        """把 1 个墙升级/备货任务派给修理工（每回合最多 1 个）。
+    def _assign_repair_mission(
+        self, turn: Turn, layout, ctx, workers, *, allow_stock: bool, allow_weapon: bool = False
+    ) -> None:
+        """把 1 个墙升级/备货（或武器升级）任务派给修理工（每回合最多 1 个）。
 
         - allow_stock=True（白天）：可派 WallFixer 备货任务（白天采购）。
         - allow_stock=False（夜间）：只派墙升级任务（夜间执行，升级=回血）。
+        - allow_weapon=True（用户 2026-09-23）：开拓者**正在做任务/去任务点**时，
+          让修理工也买武器券升级炮台（提升任务效率）。
         """
         repair_worker = next(
             (w for w in workers if self._worker_fsm(w).role == ROLE_REPAIRER), None
@@ -716,7 +733,8 @@ class Brain:
             turn, cp=layout.control_point, registry=self.wall_registry, front=self.front
         ):
             if mission.kind not in ("wall", "stock"):
-                continue  # 武器/基地升级不派给工人
+                if not (allow_weapon and mission.kind == "weapon"):
+                    continue  # 武器/基地升级默认不派给工人（开拓者做任务时例外）
             if mission.kind == "stock" and not allow_stock:
                 continue  # 夜间不采购
             if mission.target is not None and mission.target in taken_targets:

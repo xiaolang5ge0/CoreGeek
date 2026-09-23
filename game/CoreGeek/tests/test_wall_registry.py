@@ -155,15 +155,24 @@ class TestNightRepairPolicy(unittest.TestCase):
         cmd, _ = self._repair_cmd(sim, brain, cell, 3, 1500, ["WallFixer"])
         self.assertIsNone(cmd)
 
-    def test_below_target_no_voucher_falls_back_to_fixer(self):
-        """未达目标等级的墙无升级券 → fallback 到 WallFixer（用户 2026-09-23 第3步）。"""
+    def test_l2_no_voucher_falls_back_to_fixer(self):
+        """L2 受损墙无升级券 → fallback 到 WallFixer（用户 2026-09-23 第3步）。"""
         sim = make_sim()
         brain = Brain()
         brain.decide(sim.payload())
         cell = brain.layout.wall_cells[0]
-        cmd, _ = self._repair_cmd(sim, brain, cell, 1, 400, ["WallFixer"])
+        cmd, _ = self._repair_cmd(sim, brain, cell, 2, 400, ["WallFixer"])
         self.assertIsNotNone(cmd)
         self.assertEqual(cmd["name"], "WallFixer")
+
+    def test_l1_wall_not_fixed_by_wallfixer(self):
+        """L1 墙**不用 WallFixer**（用户 2026-09-23：白天重建/券升级）。"""
+        sim = make_sim()
+        brain = Brain()
+        brain.decide(sim.payload())
+        cell = brain.layout.wall_cells[0]
+        cmd, _ = self._repair_cmd(sim, brain, cell, 1, 300, ["WallFixer"])
+        self.assertIsNone(cmd)
 
 
 class TestFixerStockOnDemand(unittest.TestCase):

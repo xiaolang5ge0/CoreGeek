@@ -151,7 +151,7 @@ class WorkerFSM:
     # ================= 通用 =================
     def _medicine_cmd(self, turn: Turn, unit: Unit) -> dict[str, Any] | None:
         cap = 220 if unit.kind == "worker" else 200
-        if unit.health > 0.55 * cap:
+        if unit.health > 0.60 * cap:   # 用户 2026-09-23：阈值 55% → 60%
             return None
         med = next((i for i in unit.backpack if i.lower() == "medicine"), None)
         if med:
@@ -707,7 +707,7 @@ class WorkerFSM:
                 maxhp = WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
                 out.append((w.pos, w.level, w.health / maxhp, False, tgt))
         for w in turn.weapons():
-            if w.level < 3:
+            if w.kind == "rocket" and w.level < 3:   # 只升火箭（用户 2026-09-23）
                 maxhp = WEAPON_MAX_HP[min(max(w.level, 1), 3) - 1]
                 out.append((w.pos, w.level, w.health / maxhp, True, 3))
         out.sort(key=lambda t: (t[2], 1 if t[3] else 0, t[0].x, t[0].y))
@@ -731,8 +731,8 @@ class WorkerFSM:
                 v = f"WallUpgradeVoucher{level}"
                 if v in unit.backpack:
                     item = v
-            if item is None and not is_weapon and "WallFixer" in unit.backpack:
-                item = "WallFixer"
+            if item is None and not is_weapon and level >= 2 and "WallFixer" in unit.backpack:
+                item = "WallFixer"   # L1 墙不用包（用户 2026-09-23：白天重建/券升级）
             if item is None:
                 continue
             cmd = self._go_use(turn, unit, ctx, item, pos)
@@ -741,16 +741,23 @@ class WorkerFSM:
         return self._wallfixer_repair(turn, unit, ctx)
 
     def _wallfixer_repair(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        """受损墙（含满级 L3）→ WallFixer 修复（全满后夜里尽量修，保证墙不受损）。"""
+        """受损墙（含满级 L3）→ WallFixer 修复。
+
+        用户 2026-09-23：**L1 墙不用 WallFixer**（L1 被打掉白天重建 / 用 Voucher1 升级即可），
+        只对 L2+ 的受损墙用包（回血），避免浪费。
+        """
         if "WallFixer" not in unit.backpack:
             return None
         registry = getattr(ctx, "wall_registry", None)
         cands: list = []
         if registry is not None:
             for s in registry.damaged():
-                cands.append((s.pos, s.ratio, s.is_front))
+                if s.level >= 2:   # 跳过 L1
+                    cands.append((s.pos, s.ratio, s.is_front))
         else:
             for w in turn.walls():
+                if w.level < 2:
+                    continue
                 maxhp = WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
                 r = w.health / maxhp
                 if r < REPAIR_HP_RATIO:

@@ -155,14 +155,50 @@ class TestUpgradeOrder(unittest.TestCase):
         )
 
     def test_wall_target_level(self):
-        """目标等级：迎敌侧整列 L3；顶/底靠敌 1 格 L3；其余 L2。"""
+        """目标等级（修订）：**纯正面**（迎敌侧整列不含拐角）= L3；其余 = L2。"""
         from agent.planners.upgrade import wall_target_level
         anchor = (10, 23)
-        self.assertEqual(wall_target_level(Pos(13, 23), anchor, "W"), 3)  # 迎敌列
-        self.assertEqual(wall_target_level(Pos(12, 21), anchor, "W"), 3)  # 顶行靠敌
-        self.assertEqual(wall_target_level(Pos(12, 26), anchor, "W"), 3)  # 底行靠敌
-        self.assertEqual(wall_target_level(Pos(12, 23), anchor, "W"), 2)  # 顶/底行中间
-        self.assertEqual(wall_target_level(Pos(9, 21), anchor, "W"), 2)   # 靠开口侧
+        self.assertEqual(wall_target_level(Pos(13, 23), anchor, "W"), 3)  # 纯正面（中间）
+        self.assertEqual(wall_target_level(Pos(13, 22), anchor, "W"), 3)  # 纯正面
+        self.assertEqual(wall_target_level(Pos(13, 21), anchor, "W"), 2)  # 拐角 → L2
+        self.assertEqual(wall_target_level(Pos(13, 26), anchor, "W"), 2)  # 拐角 → L2
+        self.assertEqual(wall_target_level(Pos(12, 21), anchor, "W"), 2)  # 顶行靠敌 → L2
+        self.assertEqual(wall_target_level(Pos(9, 21), anchor, "W"), 2)   # 靠开口侧 → L2
+
+
+class TestOnlyRocket(unittest.TestCase):
+    def test_gatling_not_upgraded(self):
+        """用户 2026-09-23：只升火箭，gatling/railgun 不产生升级任务。"""
+        sim = SimWorld(station_pos=(10, 24), mines={})
+        sim.round_no = 261
+        sim.roles.append(sim._role(80001, 9, 20, "gatling", 1000, level=1))
+        sim.roles.append(sim._role(80002, 10, 20, "railgun", 1000, level=1))
+        sim.roles.append(sim._role(80003, 9, 21, "rocket", 1000, level=1))
+        sim.gold = 500
+        turn = Turn.load(sim.payload())
+        ms = UpgradePlanner().plan(turn, cp=Pos(9, 23), front="W")
+        wep = [m for m in ms if m.kind == "weapon"]
+        self.assertTrue(wep, "应有火箭升级任务")
+        self.assertTrue(
+            all(m.target == Pos(9, 21) for m in wep), "只应升火箭（不含 gatling/railgun）"
+        )
+
+
+class TestNightDamageRegistry(unittest.TestCase):
+    def test_accumulates_and_resets_daily(self):
+        """紧急墙判据：本夜累计掉血跨回合累加，换日清零。"""
+        from agent.wall_registry import WallRegistry
+        sim = SimWorld(station_pos=(10, 24), mines={})
+        sim.roles.append(sim._role(70001, 12, 22, "wall", 1000, level=2))
+        reg = WallRegistry()
+        reg.sync(Turn.load(sim.payload()))
+        sim.role(70001)["health"] = 400
+        reg.sync(Turn.load(sim.payload()))
+        self.assertEqual(reg.walls[Pos(12, 22)].night_damage, 600)
+        # 换日 → 清零
+        sim.round_no += 130
+        reg.sync(Turn.load(sim.payload()))
+        self.assertEqual(reg.walls[Pos(12, 22)].night_damage, 0)
 
 
 if __name__ == "__main__":
