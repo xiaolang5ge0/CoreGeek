@@ -52,7 +52,9 @@ class TestD3WallJumpQueue(unittest.TestCase):
         missions = UpgradePlanner().plan(turn, cp=Pos(9, 23))
         wall_m = [m for m in missions if m.kind == "wall"]
         self.assertTrue(wall_m, "低血墙应产生升级任务")
-        self.assertLess(wall_m[0].priority, 10, "墙插队优先级应高于武器(10)")
+        # 新策略（用户 2026-09-23）：L2炮台(10) > 受损墙(12) > L2围墙(15) > ...
+        self.assertLess(wall_m[0].priority, 15, "受损墙应优先于一般墙升级(15)")
+        self.assertGreater(wall_m[0].priority, 10, "L2炮台(10)优先于受损墙")
         self.assertEqual(wall_hp_threshold(2), 300)
 
     def test_healthy_wall_does_not_jump(self):

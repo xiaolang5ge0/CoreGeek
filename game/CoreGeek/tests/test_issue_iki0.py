@@ -55,8 +55,9 @@ class TestWallFixerAboveUpgrade(unittest.TestCase):
         sim.round_no = 391          # Day4
         for i, pos in enumerate([(9, 20), (10, 20), (9, 21)]):
             sim.roles.append(sim._role(90000 + i, pos[0], pos[1], "rocket", 1500, level=2))
-        for i, pos in enumerate([(12, 22), (12, 23), (12, 24), (12, 25)]):
-            sim.roles.append(sim._role(91000 + i, pos[0], pos[1], "wall", 1000, level=2))
+        # 目标 L3 的正面墙（front='W' → dx=3 列）
+        for i, pos in enumerate([(13, 21), (13, 22), (13, 23), (13, 24)]):
+            sim.roles.append(sim._role(91000 + i, pos[0], pos[1], "wall", 1500, level=2))
         sim.gold = 700
         turn = Turn.load(sim.payload())
         ms = UpgradePlanner().plan(turn, cp=Pos(9, 23), front="W")

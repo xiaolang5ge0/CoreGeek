@@ -14,7 +14,13 @@ from __future__ import annotations
 from typing import Any
 
 from .path import find_path, next_step, step_toward
-from .planners.upgrade import WALL_MAX_HP, WALL_VOUCHER_BATCH, WEAPON_L1_COST, voucher_for
+from .planners.upgrade import (
+    WALL_MAX_HP,
+    WALL_VOUCHER_BATCH,
+    WEAPON_L1_COST,
+    voucher_for,
+    wall_target_level,
+)
 from .protocol import (
     DAY_ROUNDS,
     MINE_TYPES,
@@ -25,6 +31,7 @@ from .protocol import (
     Turn,
     Unit,
     WALL,
+    WEAPON_MAX_HP,
     build_command,
     buy_command,
     collect_command,
@@ -186,7 +193,11 @@ class WorkerFSM:
             self.returning = False  # 已进墙/受阻 → 继续正常流程
         # 夜间优先：升级（=回血，省修复包）→ 抢修 → D3+ 就位 repair_post（机器人清空前不回外）
         if turn.is_night:
-            cmd = self._upgrade_flow(turn, unit, ctx, allow_use=True, allow_buy=False)
+            # 全满后（炮台+目标围墙全 L3）夜间也允许采购修复包，保证墙不受损（用户 2026-09-23）
+            cmd = self._upgrade_flow(
+                turn, unit, ctx, allow_use=True,
+                allow_buy=getattr(ctx, "all_maxed", False),
+            )
             if cmd is not None:
                 return cmd
             cmd = self._repair_cmd(turn, unit, ctx)
@@ -684,37 +695,77 @@ class WorkerFSM:
         return min(shops, key=lambda s: (distance(unit.pos, s), s.x, s.y))
 
     # ---- 夜间修墙 ----
-    def _repair_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        """夜间抢修（用户补充）：血量 <50% 才修；正面优先。
-
-        优先级：未满级(L1/L2) 优先用升级券（升级=回满血+提升上限）；
-        满级(L3) 升级券失效 → 只能用 WallFixer（修复包）。
+    def _upgrade_targets(self, turn: Turn, ctx) -> list:
+        """夜间需升级的建筑（用户 2026-09-23）：
+        墙（低于目标等级）+ 炮台（<L3）；**上一回合受损最重优先**。
+        返回 [(pos, level, ratio, is_weapon, target_level)]。
         """
-        registry = getattr(ctx, "wall_registry", None)
-        candidates: list[tuple[Pos, int, bool, float]] = []
-        if registry is not None:
-            for state in registry.damaged():
-                candidates.append((state.pos, state.level, state.is_front, state.ratio))
-        else:
-            for wall in turn.walls():
-                max_hp = WALL_MAX_HP[min(max(wall.level, 1), 3) - 1]
-                ratio = wall.health / max_hp
-                if ratio < REPAIR_HP_RATIO:
-                    candidates.append((wall.pos, wall.level, False, ratio))
-        if not candidates:
-            return None  # 无达标修复需求 → 落回（修理工夜间无威胁时外出采矿）
-        # 正面优先，其次血最少
-        candidates.sort(key=lambda c: (0 if c[2] else 1, c[3], c[0].x, c[0].y))
-        target, level, _is_front, _ratio = candidates[0]
-        item = None
-        if level <= 2:
-            voucher = f"WallUpgradeVoucher{level}"
-            if voucher in unit.backpack:
-                item = voucher
-        if item is None and "WallFixer" in unit.backpack:
-            item = "WallFixer"
-        if item is None:
+        anchor = getattr(ctx, "layout_anchor", None)
+        front = getattr(ctx, "layout_front", None)
+        out: list = []
+        for w in turn.walls():
+            tgt = wall_target_level(w.pos, anchor, front)
+            if w.level < tgt:
+                maxhp = WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
+                out.append((w.pos, w.level, w.health / maxhp, False, tgt))
+        for w in turn.weapons():
+            if w.level < 3:
+                maxhp = WEAPON_MAX_HP[min(max(w.level, 1), 3) - 1]
+                out.append((w.pos, w.level, w.health / maxhp, True, 3))
+        out.sort(key=lambda t: (t[2], 1 if t[3] else 0, t[0].x, t[0].y))
+        return out
+
+    def _repair_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        """夜间修复/升级（用户 2026-09-23 顺序）：
+
+        第1步 `_upgrade_targets()` 取所有需升级的墙（受损最重优先）；
+        第2步 优先用券：WallUpgradeVoucher → WeaponUpgradeVoucher；
+        第3步 无对应升级券 → 才 fallback 到 WallFixer（仅墙）。
+        炮台/目标围墙全满后 → 夜里尽量用 WallFixer 修受损墙。
+        """
+        for pos, level, _ratio, is_weapon, _tgt in self._upgrade_targets(turn, ctx):
+            item = None
+            if is_weapon:
+                v = f"WeaponUpgradeVoucher{level}"
+                if v in unit.backpack:
+                    item = v
+            else:
+                v = f"WallUpgradeVoucher{level}"
+                if v in unit.backpack:
+                    item = v
+            if item is None and not is_weapon and "WallFixer" in unit.backpack:
+                item = "WallFixer"
+            if item is None:
+                continue
+            cmd = self._go_use(turn, unit, ctx, item, pos)
+            if cmd is not None:
+                return cmd
+        return self._wallfixer_repair(turn, unit, ctx)
+
+    def _wallfixer_repair(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        """受损墙（含满级 L3）→ WallFixer 修复（全满后夜里尽量修，保证墙不受损）。"""
+        if "WallFixer" not in unit.backpack:
             return None
+        registry = getattr(ctx, "wall_registry", None)
+        cands: list = []
+        if registry is not None:
+            for s in registry.damaged():
+                cands.append((s.pos, s.ratio, s.is_front))
+        else:
+            for w in turn.walls():
+                maxhp = WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
+                r = w.health / maxhp
+                if r < REPAIR_HP_RATIO:
+                    cands.append((w.pos, r, False))
+        if not cands:
+            return None
+        cands.sort(key=lambda c: (0 if c[2] else 1, c[1], c[0].x, c[0].y))
+        return self._go_use(turn, unit, ctx, "WallFixer", cands[0][0])
+
+    def _go_use(
+        self, turn: Turn, unit: Unit, ctx, item: str, target: Pos
+    ) -> dict[str, Any] | None:
+        """走到 target 旁并使用 item（券/修复包）。"""
         if unit.pos != target and distance(unit.pos, target) <= 1:
             self.state = STATE_REPAIR
             return use_command(item, target)

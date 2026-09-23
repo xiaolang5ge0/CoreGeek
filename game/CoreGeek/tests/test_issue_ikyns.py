@@ -52,7 +52,8 @@ class TestWallVoucher2Jump(unittest.TestCase):
         missions = UpgradePlanner().plan(turn, cp=Pos(9, 23), front="W")
         w2 = [m for m in missions if m.kind == "wall" and m.voucher == "WallUpgradeVoucher2"]
         self.assertTrue(w2, "L2 受损墙应产生 Voucher2 升级任务")
-        self.assertLess(w2[0].priority, 10, "应插队于武器之前")
+        # 新策略：受损墙优先级 12（L2炮台10 之后、L2围墙15 之前）
+        self.assertLess(w2[0].priority, 15, "受损墙应优先于一般墙升级(15)")
 
 
 class TestD4FixerStock(unittest.TestCase):
@@ -66,7 +67,7 @@ class TestD4FixerStock(unittest.TestCase):
         missions = UpgradePlanner().plan(turn, cp=Pos(9, 23), front="W")
         stock = [m for m in missions if m.kind == "stock" and m.voucher == "WallFixer"]
         self.assertTrue(stock)
-        self.assertGreaterEqual(stock[0].qty, 5)   # 用户：D4+ 修复券 ≥5
+        self.assertGreaterEqual(stock[0].qty, 3)   # 用户：D3/D4/D5 预留 ≥3 修复包
         self.assertLessEqual(stock[0].qty, FIXER_STOCK_MAXED)
 
 

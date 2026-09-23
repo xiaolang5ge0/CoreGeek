@@ -55,7 +55,8 @@ class TestFrontWallDeadlines(unittest.TestCase):
                     if m.kind == "wall" and m.voucher == "WallUpgradeVoucher1"
                     and wall_rank(m.target, anchor, "W") in (0, 1)]
         self.assertGreaterEqual(len(front_l2), 1, "应排正面墙 L2 任务")
-        self.assertEqual(min(m.priority for m in front_l2), 8)
+        # 新策略：L2围墙优先级 15（L2炮台 10 > 受损墙 12 > L2围墙 15）
+        self.assertEqual(min(m.priority for m in front_l2), 15)
         self.assertGreaterEqual(FRONT_L2_TARGET, 5)
 
     def test_d5_front_l3_deadline(self):
@@ -72,8 +73,8 @@ class TestFrontWallDeadlines(unittest.TestCase):
                     if m.kind == "wall" and m.voucher == "WallUpgradeVoucher2"
                     and wall_rank(m.target, anchor, "W") in (0, 1)]
         self.assertGreaterEqual(len(front_l3), 1, "应排正面墙 L3（Voucher2）任务")
-        # 优先级 18：低于武器 L2→L3(12)（用户 2026-09-23：D4 前 3 门火箭炮 L3 优先）
-        self.assertEqual(min(m.priority for m in front_l3), 18)
+        # 新策略：L3围墙优先级 25（L2炮台10 > 受损墙12 > L2围墙15 > L3炮台20 > L3围墙25）
+        self.assertEqual(min(m.priority for m in front_l3), 25)
         self.assertGreaterEqual(FRONT_L3_TARGET, 5)
 
     def test_weapon_l2_first_gate(self):
