@@ -57,6 +57,7 @@ class TreasurePlanner:
         self.legends: list[str] = []
         self.plan = TreasurePlan()
         self.attempted = False
+        self._last_infer_len = 0   # 上次推断时的线索条数（新线索到来才再问 LLM，用户 2026-09-23）
 
     # ---- 线索累积 ----
     def observe(self, folk: str) -> bool:
@@ -66,8 +67,18 @@ class TreasurePlanner:
         self.legends.append(text)
         return True
 
+    def mark_inferred(self) -> None:
+        """记录"已就当前线索问过 LLM"，避免同一批线索反复提问。"""
+        self._last_infer_len = len(self.legends)
+
     def needs_inference(self) -> bool:
-        return bool(self.legends) and not self.plan.ready and not self.attempted
+        # 有新线索（条数增加）且计划未 ready → 再问 LLM（用户 2026-09-23：不是一次不成就放弃）
+        return (
+            bool(self.legends)
+            and not self.plan.ready
+            and not self.attempted
+            and len(self.legends) > self._last_infer_len
+        )
 
     # ---- LLM 推断 ----
     def prompt(self) -> str:

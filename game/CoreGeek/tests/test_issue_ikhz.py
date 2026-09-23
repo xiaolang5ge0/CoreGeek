@@ -239,5 +239,18 @@ class TestMineDistancePreference(unittest.TestCase):
         self.assertEqual(m, Pos(6, 22), "应选近矿 (6,22)")
 
 
+class TestTreasureReinfer(unittest.TestCase):
+    def test_reinfer_on_new_clue(self):
+        """宝藏：新线索到来才再问 LLM（同批线索不重复问；不是一次不成就放弃）。"""
+        from agent.planners.treasure import TreasurePlanner
+        p = TreasurePlanner()
+        p.observe("线索一")
+        self.assertTrue(p.needs_inference())
+        p.mark_inferred()
+        self.assertFalse(p.needs_inference(), "同批线索不应重复提问")
+        p.observe("线索二")
+        self.assertTrue(p.needs_inference(), "新线索到来应再次提问")
+
+
 if __name__ == "__main__":
     unittest.main()

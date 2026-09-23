@@ -215,8 +215,20 @@ class Brain:
                     if self.news_economy.apply_llm(turn.llm_resp):
                         trace["news_llm_applied"] = True
                 elif self._llm_waiting == "treasure":
+                    # 记录 LLM 原文（用户 2026-09-23：便于定位宝藏链为何没落地）
+                    trace["treasure_llm_resp"] = str(turn.llm_resp)[:400]
                     if self.treasure.apply_llm(turn.llm_resp):
                         trace["treasure_llm_applied"] = True
+                    else:
+                        trace["treasure_llm_reject"] = {
+                            "ready": self.treasure.plan.ready,
+                            "location": (
+                                self.treasure.plan.location.dump()
+                                if self.treasure.plan.location else None
+                            ),
+                            "items": list(self.treasure.plan.items),
+                            "day": self.treasure.plan.day,
+                        }
             self._llm_waiting = ""
         if turn.station() is not None:
             if self.layout is None:
@@ -870,6 +882,8 @@ class Brain:
             if self.treasure.needs_inference() and not in_task:
                 if self._ask_llm(turn, ctx, "treasure", self.treasure.prompt()):
                     trace["treasure_llm"] = True
+                    trace["treasure_llm_prompt"] = self.treasure.prompt()[:600]
+                    self.treasure.mark_inferred()   # 记下已就本批线索问过
         if not official and not folk:
             return
         entry = {"round": turn.round_no, "day": turn.day_index,
