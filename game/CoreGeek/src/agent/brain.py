@@ -444,13 +444,24 @@ class Brain:
             can_build = stones >= 1 and (fsm.build_phase or urgent or stones >= walls_left)
             if not walls_missing or not can_build:
                 continue
-            # 按布局优先级派单（正面迎敌侧优先），不按离工人远近。
-            # 缺口补建优先（用户 2026-09-23）：曾被攻破、当前缺失的格**最先补**。
+            # 派单优先级（用户 2026-09-23 修订）：
+            #   1) 曾被攻破的缺口最先补；
+            #   2) **邻接已建墙最多**的格优先 → 保持已建墙**连续成环**（防"远处成环、近基地留缺口"被涌入）；
+            #   3) 其余按布局顺序（正面迎敌侧优先）。
             breached_missing = {
                 s.pos for s in self.wall_registry.missing() if s.breached_round > 0
             }
+            existing_wall_pos = {w.pos for w in turn.walls()}
+
+            def _adj_built(c) -> int:
+                return sum(1 for nb in c.neighbours() if nb in existing_wall_pos)
+
             cand = [c for c in layout.wall_cells if c in walls_missing and c not in assigned]
-            cand.sort(key=lambda c: (0 if c in breached_missing else 1,))
+            cand.sort(key=lambda c: (
+                0 if c in breached_missing else 1,
+                -_adj_built(c),
+                layout.wall_cells.index(c),
+            ))
             cell = cand[0] if cand else None
             if cell is not None:
                 fsm.build = (cell, WALL)
