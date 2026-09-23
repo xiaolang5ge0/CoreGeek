@@ -432,11 +432,14 @@ class Brain:
             can_build = stones >= 1 and (fsm.build_phase or urgent or stones >= walls_left)
             if not walls_missing or not can_build:
                 continue
-            # 按布局优先级派单（正面迎敌侧优先），不按离工人远近
-            cell = next(
-                (c for c in layout.wall_cells if c in walls_missing and c not in assigned),
-                None,
-            )
+            # 按布局优先级派单（正面迎敌侧优先），不按离工人远近。
+            # 缺口补建优先（用户 2026-09-23）：曾被攻破、当前缺失的格**最先补**。
+            breached_missing = {
+                s.pos for s in self.wall_registry.missing() if s.breached_round > 0
+            }
+            cand = [c for c in layout.wall_cells if c in walls_missing and c not in assigned]
+            cand.sort(key=lambda c: (0 if c in breached_missing else 1,))
+            cell = cand[0] if cand else None
             if cell is not None:
                 fsm.build = (cell, WALL)
                 assigned.add(cell)
@@ -684,6 +687,16 @@ class Brain:
             (w for w in workers if self._worker_fsm(w).role == ROLE_REPAIRER), None
         )
         if repair_worker is None or layout is None:
+            return
+        # 缺口优先（用户 2026-09-23）：白天有"**被攻破**的墙缺口"时，清掉升级/备货任务、不派新任务，
+        # 让修理工专心采石补缺口（否则夜间派下的升级任务会占用白天，中间墙整天没人补，如 IKHZOS）。
+        # 注意：仅针对"曾存在→被打掉"的缺口；Day1 尚未建完的初始缺口不阻塞升级。
+        breached_gap = any(
+            (not s.exists) and s.breached_round > 0
+            for s in self.wall_registry.walls.values()
+        )
+        if turn.is_day and breached_gap:
+            self._worker_fsm(repair_worker).upgrade = None
             return
         rfsm = self._worker_fsm(repair_worker)
         if rfsm.upgrade is not None or rfsm.build is not None:

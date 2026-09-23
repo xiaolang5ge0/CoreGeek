@@ -250,8 +250,10 @@ class UpgradePlanner:
                 if u.kind == "worker"
             )
             if held < desired and turn.gold >= RESERVE_GOLD + 10:
+                # 优先级 24（**高于围墙升级任务 25 / 升级券备货 47**）：
+                # 用户 IKHZM0——D3+ 必须先备 ≥3 个围墙修复包，再考虑升级券/升级任务。
                 missions.append(
-                    UpgradeMission("WallFixer", 10, None, "stock", 50, qty=desired)
+                    UpgradeMission("WallFixer", 10, None, "stock", 24, qty=desired)
                 )
         # 9. 正面墙对应升级券备货（用户 2026-09-23）：正面墙 L1→Voucher1、L2→Voucher2，
         #    D3+ 按正面墙等级各备 ≥5（金币不够则不要求）；武器+墙全满后不限制。

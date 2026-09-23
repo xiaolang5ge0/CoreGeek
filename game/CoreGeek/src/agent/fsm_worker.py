@@ -61,6 +61,7 @@ SELL_FULL_RATIO = 0.6
 STUCK_LIMIT = 5
 STUCK_COLLECT_LIMIT = 3
 WORKER_DANGER_DIST = 3      # 机器人贴脸(≤)才规避；脱离 +2 恢复
+EVADE_STICKY = 5            # 规避粘性：进入危险距离后持续规避 N 回合，防 evade↔采矿 反复横跳（IKHZM0）
 MAX_MINE_DIST = 16
 REPAIR_MARGIN = 3           # 修理工归位余量（距天黑 ≤ 路径 + 3）
 REPAIR_STONE_KEEP = 5       # 修理工常备石头（修墙用），低于此不卖
@@ -83,6 +84,7 @@ class WorkerFSM:
         self._last_pos: Pos | None = None
         self._last_bag = -1
         self._evading = False
+        self._evade_until = 0        # 规避粘性截止回合（IKHZM0：防 evade↔采矿 横跳）
         self.build_phase = False
         self.returning = False       # 回防粘性：D4+ 一旦开始返回，持续到进墙
         self.return_since = 0        # 开始返回的回合（防死循环兜底）
@@ -252,17 +254,12 @@ class WorkerFSM:
         ):
             self.state = STATE_BUILD
             return None  # 等 brain 派建墙单
-        # 危险规避（滞回，非粘性）
+        # 危险规避（粘性窗口，修 IKHZM0 横跳）
         cmd = self._evade_cmd(turn, unit, ctx)
         if cmd is not None or self._evading:
             return cmd
-        # D6（采纳外部）：基地受威胁 + 矿工在基地 3 格内 → 原地待命（不发命令）
-        if turn.is_night and getattr(ctx, "robot_cells", ()):
-            station = turn.station()
-            if station is not None:
-                base_threat = any(distance(r, station.pos) <= 6 for r in ctx.robot_cells)
-                if base_threat and distance(unit.pos, station.pos) <= 3:
-                    return None
+        # 决策 D（用户 2026-09-23）：矿工整夜"安全"外采（仅第 9 夜起考虑回防）。
+        # 旧"D6 原地待命"会在机器人在基地 6 格内时把矿工钉在基地旁整夜不采矿 → 已移除。
         # D6：返程 deadline（白天入夜前回基地附近）；夜间默认不回防，仅第 9 夜起考虑
         if (turn.is_day or turn.day_index >= MINER_RETURN_DAY) and self._past_return_deadline(turn, unit, ctx):
             return self._go_home(
@@ -358,7 +355,12 @@ class WorkerFSM:
         return self._move(step, ctx)
 
     def _select_mine(self, turn: Turn, unit: Unit, ctx, *, prefer: str) -> Pos | None:
-        other_locks = () if ctx.share_mines else ctx.other_mine_locks(self.unit_id)
+        # 采石补缺口（prefer=stone）时，修理工对石矿有**优先权**（忽略他人锁），
+        # 避免"矿工抢走唯一石矿 → 修理工拿不到石料 → 中间墙整天补不上"（IKHZOS）。
+        other_locks = (
+            () if (ctx.share_mines or prefer == "stone")
+            else ctx.other_mine_locks(self.unit_id)
+        )
         station = turn.station()
         enemy_station = next((u for u in turn.enemy if u.kind == "station"), None)
         primary: list = []
@@ -500,32 +502,25 @@ class WorkerFSM:
     # ---- 危险规避 ----
     def _evade_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
         if not turn.is_night:
+            self._evading = False
+            self._evade_until = 0
             return None
         nearest = min(
             (distance(unit.pos, r.pos) for r in turn.robots
              if r.alive and r.target_team in ("", turn.team_type)),
             default=99,
         )
+        # 规避粘性（修 IKHZM0 两格震荡）：一旦进入危险距离，持续规避 EVADE_STICKY 回合，
+        # 期间不因机器人抖动立刻切回采矿（否则 evade↔mine 每回合横跳、原地打转）。
         if nearest <= WORKER_DANGER_DIST:
-            self._evading = True
-        elif nearest >= WORKER_DANGER_DIST + 2:
+            self._evade_until = turn.round_no + EVADE_STICKY
+        if turn.round_no >= self._evade_until:
             self._evading = False
-        if not self._evading:
             return None
-        self.mine = None
-        self.build = None
-        self.sell_vendor = None
-        if getattr(ctx, "base_in_danger", False):
-            cell = getattr(ctx, "safe_anchor", None)
-            if cell is not None and unit.pos != cell:
-                self.state = STATE_CRITICAL
-                step = next_step(turn, unit, cell, ctx.reserved)
-                if step is not None:
-                    return self._move(step, ctx)
-            self.state = STATE_CRITICAL
-            return None
-        self.state = STATE_EVADE
+        self._evading = True
+        # 局部远离最近机器人；无法改善则原地不动（回防/走位交由上层角色流程处理）
         step = self._flee_step(turn, unit, ctx)
+        self.state = STATE_EVADE
         return self._move(step, ctx) if step is not None else None
 
     def _flee_step(self, turn: Turn, unit: Unit, ctx) -> Pos | None:
