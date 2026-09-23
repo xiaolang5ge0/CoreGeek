@@ -815,7 +815,7 @@ class WorkerFSM:
                 item = "WallFixer"   # L1 墙不用包（用户 2026-09-23：白天重建/券升级）
             if item is None:
                 continue
-            cmd = self._go_use(turn, unit, ctx, item, pos)
+            cmd = self._go_use(turn, unit, ctx, item, pos, inside_only=True)
             if cmd is not None:
                 return cmd
         return self._wallfixer_repair(turn, unit, ctx)
@@ -845,15 +845,44 @@ class WorkerFSM:
         if not cands:
             return None
         cands.sort(key=lambda c: (0 if c[2] else 1, c[1], c[0].x, c[0].y))
-        return self._go_use(turn, unit, ctx, "WallFixer", cands[0][0])
+        return self._go_use(turn, unit, ctx, "WallFixer", cands[0][0], inside_only=True)
 
     def _go_use(
-        self, turn: Turn, unit: Unit, ctx, item: str, target: Pos
+        self, turn: Turn, unit: Unit, ctx, item: str, target: Pos, *, inside_only: bool = False
     ) -> dict[str, Any] | None:
-        """走到 target 旁并使用 item（券/修复包）。"""
+        """走到 target 旁并使用 item（券/修复包）。
+
+        inside_only=True（夜间，IKI77S）：只从**内侧**接近（距离基地锚点比目标更近的邻格），
+        避免修理工为修开口侧墙而**走出墙外**（夜里危险）。
+        """
         if unit.pos != target and distance(unit.pos, target) <= 1:
             self.state = STATE_REPAIR
             return use_command(item, target)
+        if inside_only:
+            anchor = getattr(ctx, "layout_anchor", None)
+            anchor_pos = Pos(anchor[0], anchor[1]) if anchor is not None else None
+            all_cells = [
+                c for c in target.neighbours()
+                if turn.land(c) and c not in turn.blocked(unit) and c not in ctx.reserved
+            ]
+            cells = list(all_cells)
+            if anchor_pos is not None and all_cells:
+                inside = [
+                    c for c in all_cells
+                    if distance(c, anchor_pos) < distance(target, anchor_pos)
+                ]
+                if inside:
+                    cells = inside
+            for group in (cells, all_cells):   # 内侧优先；内侧不可达才退全量（防卡死）
+                group = sorted(group, key=lambda p: (distance(p, unit.pos), p.x, p.y))
+                for c in group:
+                    step = next_step(turn, unit, c, ctx.reserved) or next_step(turn, unit, c)
+                    if step is not None:
+                        self.state = STATE_REPAIR
+                        return self._move(step, ctx)
+                if group is all_cells:
+                    break
+            return None
         step = step_toward(turn, unit, target, ctx.reserved)
         if step is not None:
             self.state = STATE_REPAIR
