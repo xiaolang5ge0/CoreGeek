@@ -110,5 +110,36 @@ class TestEvadeSticky(unittest.TestCase):
         self.assertEqual(fsm._evade_until, turn.round_no + EVADE_STICKY)
 
 
+class TestWeaponL3Priority(unittest.TestCase):
+    def _sim(self, gold):
+        sim = SimWorld(station_pos=(10, 24), mines={})
+        sim.round_no = 261  # Day3
+        for i, pos in enumerate([(9, 20), (10, 20), (9, 21)]):
+            sim.roles.append(sim._role(90000 + i, pos[0], pos[1], "rocket", 1500, level=2))
+        for i, pos in enumerate([(12, 22), (12, 23), (12, 24), (12, 25), (9, 22), (9, 26)]):
+            sim.roles.append(sim._role(91000 + i, pos[0], pos[1], "wall", 1000, level=1))
+        sim.gold = gold
+        return sim
+
+    def test_weapon_l3_before_wall(self):
+        """用户：D4 前 3 门火箭炮 L3 优先 → 武器 L2→L3 任务优先级高于墙升级。"""
+        turn = Turn.load(self._sim(300).payload())
+        ms = UpgradePlanner().plan(turn, cp=Pos(9, 23), front="W")
+        wep = [m for m in ms if m.kind == "weapon"]
+        wall = [m for m in ms if m.kind == "wall"]
+        self.assertTrue(wep, "应有武器 L3 任务")
+        self.assertTrue(wall)
+        self.assertLess(min(m.priority for m in wep), min(m.priority for m in wall))
+
+    def test_weapon_reserve_protects_l3(self):
+        """金币仅够武器 L3（180）→ 不得被墙升级/备货吃掉。"""
+        turn = Turn.load(self._sim(180).payload())
+        ms = UpgradePlanner().plan(turn, cp=Pos(9, 23), front="W")
+        self.assertTrue(
+            any(m.kind == "weapon" and m.voucher == "WeaponUpgradeVoucher2" for m in ms)
+        )
+        self.assertFalse(any(m.kind == "wall" for m in ms), "金币应为武器预留，不被墙升级占用")
+
+
 if __name__ == "__main__":
     unittest.main()

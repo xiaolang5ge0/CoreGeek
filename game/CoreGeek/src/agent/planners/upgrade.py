@@ -15,6 +15,7 @@ from ..protocol import STATION_MAX_HP, Turn, WALL_MAX_HP, WEAPON_MAX_HP
 RESERVE_GOLD = 30      # 应急金（炸弹/修墙包）
 RICH_GOLD = 250        # 基地升级门槛
 WEAPON_L1_COST = 100   # 武器 L1→L2 券价（武器金币预留用）
+WEAPON_L2_COST = 150   # 武器 L2→L3 券价（武器金币预留用）
 WALL_DAMAGE_RATIO = 0.6
 CRITICAL_WALL_RATIO = 0.3  # 武器未到 L2 时，仅临界受损墙才修（其余攒钱升塔）
 WALL_MIN_L2 = 6            # 武器升 L3 前，先升的最小墙量（正面+侧面转角，约 6 块）
@@ -103,8 +104,14 @@ class UpgradePlanner:
 
         def add(voucher, cost, target, kind, priority):
             nonlocal budget
-            # 武器未到 L2 时，为武器券预留金币（"不能因升级围墙导致前期炮台不升级"）
-            reserve = WEAPON_L1_COST if (weapons_need_l2 and kind in ("wall", "stock")) else 0
+            # 武器升级未完成时，为武器券预留金币（"不能因升级围墙导致炮台不升级"）。
+            # 用户 2026-09-23：D4 前必须 3 门火箭炮 L3 → 只要还有武器 <L3，**非紧急**的墙/备货
+            # （priority≥20）不得动用预留；紧急抢修(5)/正面墙死线(8)/武器券(10/12) 不受限。
+            reserve = (
+                weapon_reserve()
+                if (kind in ("wall", "stock") and priority >= 20)
+                else 0
+            )
             if budget - cost < reserve:
                 return False
             missions.append(UpgradeMission(voucher, cost, target, kind, priority))
@@ -128,6 +135,15 @@ class UpgradePlanner:
         any_l1_wall = any(w.level == 1 for w in all_walls)
         # 武器未到 L2 → 为武器券(100金)预留金币：暂停墙升级（仅修临界受损墙），避免廉价墙券吃光金币
         weapons_need_l2 = any(w.level < 2 for w in weapons)
+        weapons_need_l3 = any(w.level < 3 for w in weapons)
+
+        def weapon_reserve() -> int:
+            """武器升级预留金币：还有 <L2 → 100；否则还有 <L3 → 150；否则 0。"""
+            if weapons_need_l2:
+                return WEAPON_L1_COST
+            if weapons_need_l3:
+                return WEAPON_L2_COST
+            return 0
         # FRONT 方向墙 = 离 CP 最远的一半（迎敌面）；有 WallRegistry 时用其标注的正面
         # rebuilt_pos = 前夜被攻破、次日补建的墙（回到 L1，必须重新纳入升级队列）
         rebuilt_pos: set = set()
@@ -168,12 +184,13 @@ class UpgradePlanner:
             for wall in front_order([w for w in front_wall_units if w.level == 1])[:need]:
                 v, c = voucher_for("wall", 1)
                 add(v, c, wall.pos, "wall", 8)
-        # 6b. 正面+转角 L2→L3 死线（D4-D5 冲，保证扛住 D5 夜）—— 优先级 8
+        # 6b. 正面+转角 L2→L3 死线（D4-D5 冲，保证扛住 D5 夜）—— 优先级 18
+        #     （低于武器 L2→L3(12)：用户要求 D4 前 3 门火箭炮 L3 优先）
         if 4 <= turn.day_index <= 5 and front_l3_n < FRONT_L3_TARGET:
             need = FRONT_L3_TARGET - front_l3_n
             for wall in front_order([w for w in front_wall_units if w.level == 2])[:need]:
                 v, c = voucher_for("wall", 2)
-                add(v, c, wall.pos, "wall", 8)
+                add(v, c, wall.pos, "wall", 18)
 
         # 0. 【插队 D3】墙血低于动态阈值 max(100,(day+1)×100) → 优先修复/升级（可插武器队）
         #    L1→Voucher1、L2→Voucher2（正面 L2 也能升 L3 回血，用户补充）。
@@ -208,11 +225,11 @@ class UpgradePlanner:
                 v, c = voucher_for("wall", 1)
                 if add(v, c, wall.pos, "wall", 25):
                     n += 1
-        # 4. 武器 L3
+        # 4. 武器 L3（用户 2026-09-23：D4 前 3 门 L3 是首要目标 → 优先级 12，高于一般墙升级/备货）
         for w in weapons:
             if w.level == 2:
                 v, c = voucher_for("weapon", 2)
-                add(v, c, w.pos, "weapon", 30)
+                add(v, c, w.pos, "weapon", 12)
         # 5. 墙全 L2（剩余非 FRONT 墙）—— 同样仅在武器已全部 L2 后
         if not weapons_need_l2:
             for wall in front_order([w for w in all_walls if w.level == 1]):
@@ -249,7 +266,7 @@ class UpgradePlanner:
                 for u in turn.ours
                 if u.kind == "worker"
             )
-            if held < desired and turn.gold >= RESERVE_GOLD + 10:
+            if held < desired and turn.gold >= RESERVE_GOLD + 10 + weapon_reserve():
                 # 优先级 24（**高于围墙升级任务 25 / 升级券备货 47**）：
                 # 用户 IKHZM0——D3+ 必须先备 ≥3 个围墙修复包，再考虑升级券/升级任务。
                 missions.append(
@@ -266,7 +283,7 @@ class UpgradePlanner:
                     continue
                 held = sum(u.backpack.count(voucher) for u in turn.ours if u.kind == "worker")
                 target = FIXER_STOCK_MAXED if (all_weapons_l3 and all_walls_l3) else FRONT_STOCK_TARGET
-                if held < target and turn.gold >= RESERVE_GOLD + cost:
+                if held < target and turn.gold >= RESERVE_GOLD + cost + weapon_reserve():
                     missions.append(
                         UpgradeMission(voucher, cost, None, "stock", 47, qty=target)
                     )
@@ -276,7 +293,7 @@ class UpgradePlanner:
             front_ok = front_l2_n >= FRONT_L2_TARGET or all(
                 w.level >= 2 for w in front_wall_units
             )
-            if front_ok and turn.gold >= RICH_GOLD:
+            if front_ok and turn.gold >= RICH_GOLD + weapon_reserve():
                 held = sum(
                     u.backpack.count("Bomb") + u.backpack.count("DizzyWeapon")
                     for u in turn.ours

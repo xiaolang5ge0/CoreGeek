@@ -53,6 +53,7 @@ COST_PER_WALL_BASE = 2      # 每墙基础回合（采集1+建造1）
 WALL_ROUNDS_PER = 5         # 单工人每墙约需回合（采集+建造+挪位）；用于判断是否需第二工人帮建
 REPAIR_MARGIN = 3           # 修理工提前归位余量（距天黑 ≤ 路径 + 3）
 WEAPON_L1_COST = 100        # 武器 L1→L2 券价（判断是否需要凑武器升级费）
+WEAPON_L2_COST = 150        # 武器 L2→L3 券价（用户 2026-09-23：D4 前 3 门 L3）
 RESERVE_GOLD = 30           # 升级预算保留金
 LLM_DAILY_LIMIT = 3         # 每日 LLM 调用上限（用户：每天只有 3 次）
 WALL_DANGER_RATIO = 0.8     # 城墙危险阈值：预计伤害 > 城墙总HP × 此值 → 危险
@@ -759,11 +760,15 @@ class Brain:
         return use_command(item, best)
 
     def _need_weapon_gold(self, turn: Turn) -> bool:
-        """有武器未到 L2 且金币不足 → 挖矿工去卖钱凑升级费。"""
+        """有武器未升满且金币不足 → 挖矿工去卖钱凑升级费（用户 2026-09-23：D4 前 3 门 L3）。"""
         weapons = turn.weapons()
-        if not weapons or all(w.level >= 2 for w in weapons):
+        if not weapons:
             return False
-        return turn.gold < WEAPON_L1_COST + RESERVE_GOLD
+        if any(w.level < 2 for w in weapons):
+            return turn.gold < WEAPON_L1_COST + RESERVE_GOLD
+        if any(w.level < 3 for w in weapons):
+            return turn.gold < WEAPON_L2_COST + RESERVE_GOLD
+        return False
 
     def _gunner_upgrade_plan(self, turn: Turn):
         """炮手的武器升级计划 → (目标Pos, "weapon") 或 None。优先 L1→L2，再 L2→L3。"""
