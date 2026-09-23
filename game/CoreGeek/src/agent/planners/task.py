@@ -41,7 +41,7 @@ MAX_NON_JSON = 3       # 连续非 JSON 上限 → 强制结束
 MAX_LLM_LOOPS = 8      # LLM 循环上限默认值（实际按任务 timeoutRounds 收紧，见 _task_timeout）
 FORCE_SUBMIT_CMDS = 8  # 命令预算默认值（实际按 timeout 动态，见 max_cmds）
 FORCE_ANSWER_MARGIN = 2  # 距任务超时 ≤ 此回合 → 强制"只给答案"模式
-EXPLORE_LIMIT = 8000   # 探索输出保留字符数（需容纳 API_DOCS 全文/密钥）
+EXPLORE_LIMIT = 20000  # 探索输出保留字符数（放开：需容纳 API_DOCS 全文/所有 md·txt/密钥）
 
 _FILE_NAME = re.compile(r"[A-Za-z0-9_\-/]+\.(?:md|txt)", re.I)
 _JSON_BLOCK = re.compile(r"\{.*\}", re.S)

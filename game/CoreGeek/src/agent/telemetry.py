@@ -71,13 +71,13 @@ def compact_record(
             if v.get("controllerId"):
                 entry.append("ctl" + str(v["controllerId"]))
             if v.get("taskAnswer"):
-                entry.append(str(v["taskAnswer"])[:80])
+                entry.append(str(v["taskAnswer"]))   # 完整不截断
             compact_cmds[str(int(k) % 1000)] = entry
         rec["c"] = compact_cmds
     if resp.get("prompt"):
         rec["prompt_len"] = len(resp["prompt"])
     if resp.get("executeCmd"):
-        rec["xcmd"] = resp["executeCmd"][:200]
+        rec["xcmd"] = resp["executeCmd"]             # 完整不截断
 
     if isinstance(request, dict):
         team = request.get("teamOur") or {}
@@ -91,21 +91,12 @@ def compact_record(
             for r in team.get("roles") or []
         ]
         robots = (request.get("robot") or {}).get("roles") or []
-        if len(robots) <= 40:
-            rec["b"] = [
-                [(r.get("pos") or {}).get("x"), (r.get("pos") or {}).get("y"),
-                 _KIND_CH.get(r.get("roleType"), "?"), r.get("health")]
-                for r in robots
-            ]
-        else:  # 大潮只留统计+质心，防止日志爆炸
-            xs = [r["pos"]["x"] for r in robots if r.get("pos")]
-            ys = [r["pos"]["y"] for r in robots if r.get("pos")]
-            kinds: dict[str, int] = {}
-            for r in robots:
-                k = _KIND_CH.get(r.get("roleType"), "?")
-                kinds[k] = kinds.get(k, 0) + 1
-            rec["b"] = {"n": len(robots), "cx": sum(xs) // max(1, len(xs)),
-                        "cy": sum(ys) // max(1, len(ys)), "k": kinds}
+        # 完整记录所有机器人（不截断/不压缩；用户 2026-09-23：仅供分析）
+        rec["b"] = [
+            [(r.get("pos") or {}).get("x"), (r.get("pos") or {}).get("y"),
+             _KIND_CH.get(r.get("roleType"), "?"), r.get("health")]
+            for r in robots
+        ]
         zones = (request.get("mapInfo") or {}).get("zones") or []
         sig = hashlib.md5(json.dumps(zones, sort_keys=True).encode()).hexdigest()[:10]
         if sig != (prev_zones_sig[0] if prev_zones_sig else None):
@@ -119,13 +110,13 @@ def compact_record(
             rec["fb_fail"] = fails
         errs = request.get("errors") or []
         if errs:
-            rec["err"] = [[e.get("errorCode"), str(e.get("description"))[:40]] for e in errs]
+            rec["err"] = [[e.get("errorCode"), str(e.get("description"))] for e in errs]
         if request.get("phaseTask"):
-            rec["pt"] = str(request["phaseTask"])[:120]
+            rec["pt"] = str(request["phaseTask"])        # 完整不截断
         if request.get("llmResp"):
-            rec["llm"] = str(request["llmResp"])[:200]
+            rec["llm"] = str(request["llmResp"])         # 完整不截断
         if request.get("lastCmdResult"):
-            rec["lcr"] = str(request["lastCmdResult"])   # **完整不截断**（用户 2026-09-23：对战后完整分析）
+            rec["lcr"] = str(request["lastCmdResult"])   # 完整不截断
     return rec
 
 
