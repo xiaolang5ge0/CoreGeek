@@ -48,7 +48,9 @@ class TestNightMining(unittest.TestCase):
                 repair_rounds += 1
             sim.apply(response)
             sim.advance()
-        self.assertGreater(mine_rounds, 5, "Night1 工人应大量采矿")
+        # 注：D1 入夜前 3 回合会执行"紧急避让"（往最近地图边缘走，用户 2026-09-24）→
+        # 夜里需先走回矿区，采矿回合数较此前略降（4~5），仍应达到"大量采矿"。
+        self.assertGreaterEqual(mine_rounds, 4, "Night1 工人应大量采矿")
         self.assertEqual(repair_rounds, 0, "Night1 不应启用修墙岗")
 
     def test_resume_mining_after_robots_gone(self):

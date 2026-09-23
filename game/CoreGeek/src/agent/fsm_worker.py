@@ -83,6 +83,9 @@ MINER_NO_RETURN_DAY = 3     # 前 3 天完全不回防（激进挖矿，只躲�
 # 紧急抢修阈值（用户 IKI8HA 2026-09-24）：墙血 < 35% 满血 → 最优先抢修（**含满级 L3**：
 # L3 无法用升级券，必须降级用 WallFixer，否则修理工只升 L1/L2 墙、看着 L3 墙被打掉）
 CRITICAL_REPAIR_RATIO = 0.35
+# D1 入夜前紧急避让（用户 2026-09-24）：首日尚无出兵点记录 → 最后 3 回合往最近地图边缘走
+D1_EDGE_AVOID_ROUNDS = 3
+DUSK_CORRIDOR_RADIUS = 1    # 黄昏走出走廊的判定半径（贴着走廊格也算）
 
 
 class WorkerFSM:
@@ -255,6 +258,10 @@ class WorkerFSM:
             return self._miner(turn, unit, ctx)
         # 白天
         if turn.day_index <= 1:
+            # D1 入夜前 N 回合：紧急避让（尚不知出兵点 → 往最近地图边缘走，用户 2026-09-24）
+            cmd = self._d1_edge_avoid(turn, unit, ctx)
+            if cmd is not None:
+                return cmd
             # D1 全力石料 + 建墙
             return self._build_mine(turn, unit, ctx, prefer="stone")
         # D2+：建墙优先（无缺口）→ 采购 → 回防预留 → 采矿(铜/铁)
@@ -321,6 +328,14 @@ class WorkerFSM:
         ):
             self.state = STATE_BUILD
             return None  # 等 brain 派建墙单
+        # D1 入夜前紧急避让（尚不知出兵点 → 往最近地图边缘走，用户 2026-09-24）
+        cmd = self._d1_edge_avoid(turn, unit, ctx)
+        if cmd is not None:
+            return cmd
+        # 临近入夜：站在历史出兵走廊/出生点里 → 先走出来（用户 2026-09-24）
+        cmd = self._dusk_corridor_escape(turn, unit, ctx)
+        if cmd is not None:
+            return cmd
         # 危险规避（粘性窗口，修 IKHZM0 横跳）
         cmd = self._evade_cmd(turn, unit, ctx)
         if cmd is not None or self._evading:
@@ -600,6 +615,60 @@ class WorkerFSM:
         return min(vendors, key=lambda v: (distance(unit.pos, v), v.x, v.y))
 
     # ---- 危险规避 ----
+    def _d1_edge_avoid(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        """D1 入夜前 N 回合的紧急避让（用户 2026-09-24）。
+
+        首日尚无出兵点记录（`ctx.spawn_cells` 为空）→ 无法避开走廊；退而求其次：
+        **往最近的地图边缘走**（边缘远离双方出兵/行军主线）。仅 D1 最后 N 回合生效；
+        入夜后由 spawn 记录 + 走廊绕行接管。
+        """
+        if turn.day_index != 1 or not (0 < turn.rounds_until_night <= D1_EDGE_AVOID_ROUNDS):
+            return None
+        edges: list[Pos] = []
+        for x in range(turn.width):
+            edges.append(Pos(x, 0))
+            edges.append(Pos(x, turn.height - 1))
+        for y in range(turn.height):
+            edges.append(Pos(0, y))
+            edges.append(Pos(turn.width - 1, y))
+        cands = [c for c in edges if turn.land(c) and c not in turn.blocked(unit)]
+        if not cands:
+            return None
+        goal = min(cands, key=lambda c: (distance(unit.pos, c), c.x, c.y))
+        if unit.pos == goal:
+            return None
+        step = next_step(turn, unit, goal, ctx.reserved) or next_step(turn, unit, goal)
+        if step is None:
+            return None
+        ctx.note(self.unit_id, "d1_edge_avoid")
+        return self._move(step, ctx)
+
+    def _dusk_corridor_escape(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        """临近入夜：若站在历史出兵走廊/出生点附近 → 先走出来（用户 2026-09-24）。
+
+        白天黄昏窗口生效（夜间由 `miner_avoid` 路径绕行处理）；朝基地/安全锚点走。
+        """
+        if turn.is_night or not getattr(ctx, "dusk_avoid", False):
+            return None
+        spawns = getattr(ctx, "spawn_cells", ())
+        corridor = getattr(ctx, "corridor_cells", ())
+        if not spawns and not corridor:
+            return None
+        inside = (
+            any(distance(unit.pos, c) <= DUSK_CORRIDOR_RADIUS for c in corridor)
+            or any(distance(unit.pos, c) <= DUSK_CORRIDOR_RADIUS for c in spawns)
+        )
+        if not inside:
+            return None
+        goal = getattr(ctx, "safe_anchor", None) or ctx.home_anchor
+        if goal is None:
+            return None
+        step = next_step(turn, unit, goal, ctx.reserved) or next_step(turn, unit, goal)
+        if step is None:
+            return None
+        ctx.note(self.unit_id, "dusk_corridor_escape")
+        return self._move(step, ctx)
+
     def _evade_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
         if not turn.is_night:
             self._evading = False

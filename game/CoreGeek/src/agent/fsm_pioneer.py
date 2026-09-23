@@ -263,14 +263,24 @@ class PioneerFSM:
         )
 
     def _treasure_ready(self, turn: Turn, pioneer: Unit, ctx) -> bool:
-        """宝藏前置（用户 2026-09-24）：计划 ready + **炮塔全部 L3** + **无任务可接**。"""
+        """宝藏前置（用户 2026-09-24）：计划 ready + **无任务可接** + 炮塔基本就绪。
+
+        - 炮塔**全 L3** → 直接允许（用户原始条件）。
+        - 炮塔未全 L3 但**已无买得起的升级券**（升级计划已尽/金币不够）→ 也允许，
+          否则会像 IKI8KL 那样一直等不到"全 L3"、错过开启日（用户 2026-09-24 反馈宝藏失败）。
+        """
         planner = getattr(ctx, "treasure", None)
         if planner is None or not getattr(planner.plan, "ready", False) or planner.attempted:
             return False
+        if self._has_task_available(turn):
+            return False          # 有任务可接 → 宝藏不抢占（低优先级）
         weapons = turn.weapons()
-        if not weapons or any(w.level < 3 for w in weapons):
-            return False          # 炮塔全 L3 后才去宝藏（低优先级）
-        return not self._has_task_available(turn)
+        if weapons and any(w.level < 3 for w in weapons):
+            lvl = 1 if any(w.level == 1 for w in weapons) else 2
+            cost = WEAPON_L1_COST if lvl == 1 else WEAPON_L2_COST
+            if turn.gold >= cost:
+                return False      # 还买得起升级券 → 先升级炮塔
+        return True
 
     # ---- 任务流程 ----
     def _task_flow(self, turn: Turn, pioneer: Unit, cp: Pos, ctx) -> dict[str, Any] | None:

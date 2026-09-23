@@ -821,10 +821,14 @@ class TaskPlanner:
                 "已验证的响应格式：{\"code\":200,\"data\":{\"records\":[{...}],"
                 "\"pagination\":{\"total_count\":N,\"offset\":0,\"limit\":10}}}\n"
                 "  · 记录在 **data.records**（不是 data 本身）；总数在 **data.pagination.total_count**；"
-                "`limit` 可能被服务端忽略（每页固定 10 条）→ 用 **offset=0,10,20... 翻页**，"
-                "直到去重记录数 ≥ total_count 再作答。\n"
-                "  · **不要写复杂的 python 解析脚本**：直接 `curl -s '<url>'` 打印原始 JSON"
-                "（必要时 `| head -c 4000`），由你自己阅读 JSON 得出结论；transcript 会保留原始输出供下一轮参考。"
+                "`limit` 可能被服务端忽略（每页固定 10 条）→ **必须用 offset=0,10,20... 翻页**，"
+                "直到去重记录数 ≥ total_count 再作答（**只看第一页会漏记录 → 统计必错**）。\n"
+                "  · **不要写复杂的 python 解析脚本**：直接 `curl -s '<url>'` 打印**完整**原始 JSON，"
+                "由你自己阅读 JSON 得出结论；transcript 会自动保留原始输出，**不要用 `head -c` 截断**"
+                "（截断会让你看不到后面的记录 → oldest_era 等统计出错）。\n"
+                "  · 提交前**重算**（用你已读到的全部记录）：`total_count`=去重记录数；`world_heritage_count`="
+                "protected_level 为“世界遗产”的条数；`types`=去重排序；`oldest_era`=**年代最早**的那条记录名，"
+                "年代序：旧石器/新石器 < 商周 < 春秋战国 < 秦汉 < 三国 < 南北朝 < 隋唐 < 宋 < 元 < 明清 < 民国 < 现代。"
             )
         elif task_type == "engineering":
             base += (

@@ -908,9 +908,10 @@ class Brain:
                 trace["treasure_clue"] = len(self.treasure.legends)
             # 线索足够且无 ready 计划 → LLM 推断宝藏（地点/祭品/时间）
             if self.treasure.needs_inference() and not in_task:
-                if self._ask_llm(turn, ctx, "treasure", self.treasure.prompt()):
+                _tp = self.treasure.prompt(turn.width, turn.height)
+                if self._ask_llm(turn, ctx, "treasure", _tp):
                     trace["treasure_llm"] = True
-                    trace["treasure_llm_prompt"] = self.treasure.prompt()[:600]
+                    trace["treasure_llm_prompt"] = _tp[:600]
                     self.treasure.mark_inferred()   # 记下已就本批线索问过
         if not official and not folk:
             return

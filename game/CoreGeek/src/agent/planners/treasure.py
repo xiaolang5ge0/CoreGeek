@@ -81,10 +81,12 @@ class TreasurePlanner:
         )
 
     # ---- LLM 推断 ----
-    def prompt(self) -> str:
+    def prompt(self, width: int = 41, height: int = 32) -> str:
         return (
             "=== 民间传闻（逐日累积）===\n" + "\n".join(self.legends[-12:]) +
             "\n请据线索推断宝藏：祭坛坐标(x,y)、需献祭的任务用品(英文名)、开启天数。"
+            f"地图为 {width}×{height}，坐标范围 x∈[0,{width - 1}]、y∈[0,{height - 1}]"
+            "（越界坐标会被直接丢弃，务必给出界内整数）。"
             '只返回 JSON：{"x":<int>,"y":<int>,"items":["AcientTablet",...],"day":<int>,"ready":<bool>}。'
             "信息不足时 ready=false。可用用品：" + ", ".join(TREASURE_ITEMS)
         )

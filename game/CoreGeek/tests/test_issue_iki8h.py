@@ -113,7 +113,13 @@ class TestWallVoucherCap(unittest.TestCase):
                          "D4 前持券已达 15 → 不得再囤墙升级券")
 
     def test_stock_allowed_below_cap(self):
-        self.assertTrue(self._wall_stock(self._plan(5)), "未到上限应允许按需求备货")
+        self.assertTrue(self._wall_stock(self._plan(2)), "未到上限应允许按需求备货")
+
+    def test_stock_target_is_five(self):
+        """用户 2026-09-24：经济允许时最多持有 5 张（按墙等级买对应券）。"""
+        stock = self._wall_stock(self._plan(0))
+        self.assertTrue(stock)
+        self.assertLessEqual(stock[0].qty, 5)
 
 
 class TestCriticalRepair(unittest.TestCase):
@@ -171,10 +177,10 @@ class TestTreasureGating(unittest.TestCase):
         ctx.treasure = tp
         return ctx
 
-    def _turn(self, levels, with_task=False):
+    def _turn(self, levels, with_task=False, gold=75):
         tasks = ([{"pos": (14, 14), "text": "t", "scoreReward": 50,
                    "goldReward": 30, "timeoutRounds": 60}] if with_task else None)
-        sim = make_sim(tasks=tasks)
+        sim = make_sim(tasks=tasks, gold=gold)
         for i, lv in enumerate(levels):
             sim.roles.append(sim._role(50040 + i, 8 + i, 20, "rocket", 2000, level=lv))
         return Turn.load(sim.payload())
@@ -183,8 +189,13 @@ class TestTreasureGating(unittest.TestCase):
         return next(u for u in turn.ours if u.kind == "pioneer")
 
     def test_blocked_until_all_turrets_l3(self):
-        turn = self._turn([1, 2, 3])
+        turn = self._turn([1, 2, 3], gold=300)   # 还买得起升级券 → 先升级，不挖宝
         self.assertFalse(PioneerFSM()._treasure_ready(turn, self._pioneer(turn), self._ctx()))
+
+    def test_allowed_when_cannot_afford_upgrade(self):
+        """炮塔未全 L3 但已买不起升级券 → 允许挖宝（IKI8KL：一直等不到全 L3 会错过开启日）。"""
+        turn = self._turn([2, 2, 2], gold=10)
+        self.assertTrue(PioneerFSM()._treasure_ready(turn, self._pioneer(turn), self._ctx()))
 
     def test_blocked_when_task_available(self):
         turn = self._turn([3, 3, 3], with_task=True)

@@ -21,9 +21,10 @@ CRITICAL_WALL_RATIO = 0.35  # 紧急墙：血量 < 35% 满血（评估：被破�
 WALL_MIN_L2 = 6            # 武器升 L3 前，先升的最小墙量（正面+侧面转角，约 6 块）
 FIXER_STOCK_MAX = 30       # 炮台未全 L3 时的 WallFixer 备货上限（预留炮台金币前提下尽量多备）
 FIXER_STOCK_MAXED = 30     # 炮台全 L3 后：尽可能备满（不再为不关键墙预留金币）
+FIXER_STOCK_EARLY = 15     # **D1–D4 修复包上限**（用户 2026-09-24：前期别囤太多，15 个足够）
 FRONT_L2_TARGET = 6       # 正面+转角墙 L2 死线数量（D3 入夜前，用户 2026-09-23）
 FRONT_L3_TARGET = 6       # 正面+转角墙 L3 死线数量（D5 入夜前）
-FRONT_STOCK_TARGET = 6    # 正面+转角墙对应券/修复包备货数量（D3+）
+FRONT_STOCK_TARGET = 5    # 优先墙对应券备货数量（用户 2026-09-24：6→5，最多持有 5 张）
 WALL_VOUCHER_BATCH = 5    # 墙升级券批量上限（用户 2026-09-23：4→5，快速满足正面升3；按需求不多买）
 WALL_VOUCHER_CAP_D4 = 15  # **D4 前墙升级券（V1+V2）总持有上限**（用户 2026-09-24：别屯券，全力升级炮台+围墙）
 
@@ -240,6 +241,8 @@ class UpgradePlanner:
         #    优先级 11（高于一切墙升级）。
         if turn.day_index >= 3:
             desired = FIXER_STOCK_MAXED if all_weapons_l3 else FIXER_STOCK_MAX
+            if turn.day_index <= 4:
+                desired = min(desired, FIXER_STOCK_EARLY)   # D1–D4 修复包上限 15（用户 2026-09-24）
             held = sum(
                 u.backpack.count("WallFixer") for u in turn.ours if u.kind == "worker"
             )
@@ -283,16 +286,18 @@ class UpgradePlanner:
         ):
             v, c = voucher_for("wall", 1)
             add(v, c, wall.pos, "wall", 15)
-        # 3b. **D7 起硬约束**（用户 2026-09-23）：侧面二级墙不得停在 L1（否则侧面易被攻破）
-        #     优先级 5（早于 L2 炮台 10），保证 D7 后补齐。
-        if turn.day_index >= 7:
+        # 3b. **D5 起硬约束**（用户 2026-09-24 修订，原 D7）：墙不得停在 L1
+        #     （"至少 D6 回合开始不能保持侧面 1 级墙，非常容易被攻破"）。
+        #     D5 优先级 5；D6+ 提到 3（早于一切墙升级兜底）。
+        if turn.day_index >= 5:
+            _prio = 3 if turn.day_index >= 6 else 5
             for wall in sorted(
                 [w for w in all_walls if w.level == 1],
                 key=lambda w: (rank(w), ratio(w), w.pos.x, w.pos.y),
             ):
                 v, c = voucher_for("wall", 1)
                 if v is not None:
-                    add(v, c, wall.pos, "wall", 5)
+                    add(v, c, wall.pos, "wall", _prio)
         # 4. L3 炮台（武器 L2→L3）
         for w in weapons:
             if w.level == 2:
@@ -313,11 +318,11 @@ class UpgradePlanner:
         ):
             v, c = voucher_for("station", station.level)
             add(v, c, station.pos, "station", 45)
-        # 9. 正面墙对应升级券备货（用户 2026-09-23）：正面墙 L1→Voucher1、L2→Voucher2，
-        #    D3+ 按正面墙等级各备 ≥5（金币不够则不要求）；武器+墙全满后不限制。
-        #    门控：武器未到 L2 时不为墙券花钱（"金币充足时武器优先"）。
+        # 9. 围墙升级券备货（用户 2026-09-24 修订）：**按墙的实际等级备"符合升级条件"的券**
+        #    （L1 墙→Voucher1、L2 且目标 L3 的墙→Voucher2），每级最多持有 **5 张**（经济允许时）。
+        #    优先级 13（紧跟受损墙 12，早于 L2 墙升级 15）——否则排在 47 永远轮不到 → D3 夜里没券可升
+        #    （用户 IKI8KF：只升了 3 面正面墙 → 一堵墙被攻破）。
         if turn.day_index >= 3 and not weapons_need_l2:
-            # D4 前墙升级券总持有上限（用户 2026-09-24）：避免屯券挤占炮台升级金币
             _wv = ("WallUpgradeVoucher1", "WallUpgradeVoucher2")
             _held_total = sum(
                 u.backpack.count(v) for u in turn.ours if u.kind == "worker" for v in _wv
@@ -325,7 +330,7 @@ class UpgradePlanner:
             _cap = WALL_VOUCHER_CAP_D4 if turn.day_index < 4 else None
             for lvl, voucher, cost in ((1, "WallUpgradeVoucher1", 20),
                                        (2, "WallUpgradeVoucher2", 30)):
-                need = sum(1 for w in front_wall_units if w.level == lvl)
+                need = sum(1 for w in all_walls if w.level == lvl and w.level < target_level(w))
                 if need <= 0:
                     continue
                 held = sum(u.backpack.count(voucher) for u in turn.ours if u.kind == "worker")
@@ -337,7 +342,7 @@ class UpgradePlanner:
                     target = min(target, held + headroom)
                 if held < target and turn.gold >= RESERVE_GOLD + cost + weapon_reserve():
                     missions.append(
-                        UpgradeMission(voucher, cost, None, "stock", 47, qty=target)
+                        UpgradeMission(voucher, cost, None, "stock", 13, qty=target)
                     )
         # 10. 应急道具（Day6+，用户 2026-09-23）：关键围墙/炮塔升级后、有余钱时备炸弹/眩晕
         #     （危险夜用炸弹清群/眩晕拖时间，占用开拓者动作）

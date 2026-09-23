@@ -132,7 +132,7 @@ class TestD8FixerStock(unittest.TestCase):
 
     def test_uncapped_when_all_maxed(self):
         sim = make_sim(gold=300)
-        sim.round_no = 261  # Day3
+        sim.round_no = 521  # Day5（D1–D4 有 15 上限；D5 起恢复满备，用户 2026-09-24）
         for pos in [(9, 20), (10, 20), (9, 21)]:
             add_weapon(sim, pos, level=3)
         for pos in [(12, 20), (12, 21)]:
@@ -141,7 +141,22 @@ class TestD8FixerStock(unittest.TestCase):
         missions = UpgradePlanner().plan(turn, cp=Pos(9, 23))
         stock = [m for m in missions if m.kind == "stock"]
         self.assertTrue(stock)
-        self.assertEqual(stock[0].qty, FIXER_STOCK_MAXED, "全升满后不设上限")
+        self.assertEqual(stock[0].qty, FIXER_STOCK_MAXED, "D5+ 全升满后不设上限")
+
+    def test_early_cap_15_before_d5(self):
+        """D1–D4 修复包上限 15（用户 2026-09-24：D3 囤 30 太多）。"""
+        from agent.planners.upgrade import FIXER_STOCK_EARLY
+        sim = make_sim(gold=300)
+        sim.round_no = 261  # Day3
+        for pos in [(9, 20), (10, 20), (9, 21)]:
+            add_weapon(sim, pos, level=3)
+        for pos in [(12, 20), (12, 21)]:
+            add_wall(sim, pos, level=3)
+        turn = Turn.load(sim.payload())
+        missions = UpgradePlanner().plan(turn, cp=Pos(9, 23))
+        stock = [m for m in missions if m.kind == "stock" and m.voucher == "WallFixer"]
+        self.assertTrue(stock)
+        self.assertEqual(stock[0].qty, FIXER_STOCK_EARLY, "D3 修复包上限应为 15")
 
 
 class TestD1RepairerNightHold(unittest.TestCase):
