@@ -125,7 +125,7 @@ def compact_record(
         if request.get("llmResp"):
             rec["llm"] = str(request["llmResp"])[:200]
         if request.get("lastCmdResult"):
-            rec["lcr"] = str(request["lastCmdResult"])[:1500]
+            rec["lcr"] = str(request["lastCmdResult"])   # **完整不截断**（用户 2026-09-23：对战后完整分析）
     return rec
 
 
