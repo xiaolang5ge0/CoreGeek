@@ -97,9 +97,13 @@ class WorkerFSM:
         self.returning = False       # 回防粘性：D4+ 一旦开始返回，持续到进墙
         self.return_since = 0        # 开始返回的回合（防死循环兜底）
         self._pos_hist: list = []    # 最近位置历史（检测 A→B→A 两格震荡）
+        self._turn = None            # 当前 turn（震荡逃生用）
+        self._unit = None            # 当前 unit（震荡逃生用）
 
     # ================= 主入口 =================
     def decide(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        self._turn = turn
+        self._unit = unit
         if turn.is_day:
             self._evading = False
         if unit.pos != self._last_pos:
@@ -166,9 +170,10 @@ class WorkerFSM:
 
     def _move(self, step: Pos, ctx) -> dict[str, Any] | None:
         self._stuck_moves += 1
-        # 卡住（原地不动）或 两格震荡（A→B→A）→ 清目标重来
+        # 卡住（原地不动）或 两格震荡（A→B→A）→ 震荡逃生 + 清目标重来
         if self._stuck_moves >= STUCK_LIMIT or self._oscillating():
             self._stuck_moves = 0
+            esc = self._escape_step(ctx)   # 远离最近历史位置（IKHYD3 震荡逃生）
             self._pos_hist.clear()
             ctx.note(self.unit_id, "unstuck")
             self.mine = None
@@ -177,8 +182,26 @@ class WorkerFSM:
             self.upgrade = None
             self.returning = False
             self.state = STATE_FREE
-            return None
+            return move_command(esc) if esc is not None else None
         return move_command(step)
+
+    def _escape_step(self, ctx) -> Pos | None:
+        """震荡逃生（IKHYD3）：远离最近 8 步的历史位置，且不贴地图边缘。"""
+        turn, unit = self._turn, self._unit
+        if turn is None or unit is None:
+            return None
+        blocked = turn.blocked(unit)
+        hist = list(self._pos_hist)
+        best, best_key = None, None
+        for nb in unit.pos.neighbours():
+            if not turn.land(nb) or nb in blocked or nb in ctx.reserved:
+                continue
+            away = min((distance(nb, h) for h in hist), default=0)
+            edge = min(nb.x, nb.y, turn.width - 1 - nb.x, turn.height - 1 - nb.y)
+            key = (-away, edge, nb.x, nb.y)   # 远离历史优先；其次不贴边
+            if best is None or key < best_key:
+                best, best_key = nb, key
+        return best
 
     # ================= 修理工 =================
     def _repairer(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
@@ -194,6 +217,16 @@ class WorkerFSM:
             self.returning = False  # 已进墙/受阻 → 继续正常流程
         # 夜间优先：升级（=回血，省修复包）→ 抢修 → D3+ 就位 repair_post（机器人清空前不回外）
         if turn.is_night:
+            # 墙破躲避（IKHYD3 / 用户 2026-09-23）：本回合有墙被攻破 → 先逃向墙内安全格，
+            # 不站在缺口送死（下一回合再恢复修复）。
+            reg = getattr(ctx, "wall_registry", None)
+            if reg is not None and any(
+                s.breached_round == turn.round_no for s in reg.walls.values()
+            ):
+                cmd = self._go_home(turn, unit, ctx, anchor)
+                if cmd is not None:
+                    ctx.note(self.unit_id, "wall_breached_flee")
+                    return cmd
             # 夜间**不采购**（用户 2026-09-23：夜里买来不及——开拓者控炮、一工人修墙、一工人采资源；
             # 修复包必须白天提前备足）。夜间只使用已购券/修复包。
             cmd = self._upgrade_flow(turn, unit, ctx, allow_use=True, allow_buy=False)
@@ -332,9 +365,14 @@ class WorkerFSM:
             # 矿锁与当前偏好不符（issue#26：修理工 Day1 建墙锁了石矿，入夜该采钱却仍走远石矿）
             # prefer=money 且锁的是石矿 → 释放（改采铜/铁）；prefer=stone 且锁的是铜/铁 → 释放。
             locked_kind = turn.zones.get(self.mine)
-            if locked_kind is not None and (
-                (prefer == "money" and locked_kind == "stone")
-                or (prefer == "stone" and locked_kind != "stone")
+            # 锁矿不跳变（IKHYD3）：矿工选定后整个外出周期不变；仅修理工做 prefer 释放
+            if (
+                locked_kind is not None
+                and self.role == ROLE_REPAIRER
+                and (
+                    (prefer == "money" and locked_kind == "stone")
+                    or (prefer == "stone" and locked_kind != "stone")
+                )
             ):
                 ctx.note(self.unit_id, "mine_prefer_release")
                 self.mine = None
@@ -390,7 +428,10 @@ class WorkerFSM:
                 return None
             return collect_command(self.mine)
         self._stuck_collects = 0
-        step = step_toward(turn, unit, self.mine, ctx.reserved)
+        step = step_toward(
+            turn, unit, self.mine,
+            ctx.reserved | getattr(ctx, "miner_avoid", frozenset()),
+        )
         if step is None:
             return None
         return self._move(step, ctx)
@@ -471,6 +512,9 @@ class WorkerFSM:
         if getattr(ctx, "need_weapon_gold", False):
             return True
         if self._batch_full(unit):
+            return True
+        # 白天后半段主动卖货（IKHYD3：白天第 55 回合后）→ 保证入夜前变现（用户 2026-09-23）
+        if turn.is_day and turn.round_in_day >= 55:
             return True
         dist = distance(unit.pos, vendor)
         if dist <= SELL_NEAR_VENDOR_DIST and value >= SELL_NEAR_MIN_VALUE:

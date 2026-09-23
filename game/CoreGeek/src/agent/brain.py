@@ -115,6 +115,7 @@ class _Ctx:
     repair_anchor = None             # 修理工夜间就位点（layout.repair_post，内圈邻墙）
     layout_front: str | None = None  # 布局开口侧（front），供墙目标等级计算
     layout_anchor = None             # 布局锚点 (station.x, station.y-1)，供墙目标等级计算
+    miner_avoid = frozenset()        # 矿工夜间绕行格（机器人走廊；用户 2026-09-23）
     prompt: str = ""                 # LLM prompt（非任务期 news/treasure 或任务）
     execute_cmd: str = ""            # 沙盒命令（仅任务期）
 
@@ -122,12 +123,13 @@ class _Ctx:
         return float(self.price_boost_map.get(kind, 0.0))
 
     def mine_unsafe(self, pos) -> bool:
-        """位置是否危险：活机器人近旁（昼夜都算）；走廊/出生点仅**白天黄昏窗口**算（夜间只看活机器人）。"""
+        """位置是否危险：活机器人近旁（昼夜都算）；走廊/出生点仅**白天黄昏窗口**算。
+        夜间走廊改由**路径绕行**处理（`miner_avoid`），不把走廊矿点判为不可采（用户 2026-09-23）。"""
         from .protocol import distance as _d
         if any(_d(pos, rc) <= NIGHT_SAFE_DIST for rc in self.robot_cells):
             return True
         if getattr(self, "night_now", False):
-            return False  # 夜间：走廊是白天归位用的，夜里只看活机器人（问题1）
+            return False  # 夜间：走廊靠绕行，只看活机器人
         if any(_d(pos, sc) <= SPAWN_AVOID_DIST for sc in self.spawn_cells):
             return True
         return any(_d(pos, cc) <= CORRIDOR_WIDTH for cc in self.corridor_cells)
@@ -264,6 +266,10 @@ class Brain:
         )
         # B 方案安全矿定义：出生点→我方基地的行军走廊
         ctx.corridor_cells = self._corridor_cells(turn)
+        # 矿工夜间绕行：机器人走廊（矩形）格（用户 2026-09-23）
+        ctx.miner_avoid = (
+            frozenset(ctx.corridor_cells) if turn.is_night else frozenset()
+        )
         # 白天临近入夜也提前避开出生走廊（用户要求：接近晚上时避开历史出生位置）
         ctx.dusk_avoid = turn.is_night or (0 < turn.rounds_until_night <= DUSK_AVOID_WINDOW)
         ctx.night_now = turn.is_night
