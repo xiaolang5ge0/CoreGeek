@@ -812,7 +812,10 @@ class WorkerFSM:
                 if v in unit.backpack:
                     item = v
             if item is None and not is_weapon and level >= 2 and "WallFixer" in unit.backpack:
-                item = "WallFixer"   # L1 墙不用包（用户 2026-09-23：白天重建/券升级）
+                # 仅对**已受损(<50%)**的 L2+ 墙用包（用户 2026-09-23：满血的待升级墙不要用包，
+                # 否则浪费经济、导致正面关键墙没包可修）
+                if _ratio < REPAIR_HP_RATIO:
+                    item = "WallFixer"
             if item is None:
                 continue
             cmd = self._go_use(turn, unit, ctx, item, pos, inside_only=True)
