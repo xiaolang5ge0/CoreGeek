@@ -286,10 +286,10 @@ class Brain:
         # 白天临近入夜也提前避开出生走廊（用户要求：接近晚上时避开历史出生位置）
         ctx.dusk_avoid = turn.is_night or (0 < turn.rounds_until_night <= DUSK_AVOID_WINDOW)
         ctx.night_now = turn.is_night
-        self._record_news(turn, ctx)
-        ctx.price_boost_map = self.news_economy.boosts(turn.day_index)
         ctx.prompt = ""
         ctx.execute_cmd = ""
+        self._record_news(turn, ctx)      # 可能设置 ctx.prompt（news/宝藏 LLM 提问）
+        ctx.price_boost_map = self.news_economy.boosts(turn.day_index)
         if turn.is_day:
             self._day(turn, commands, ctx)
         else:
