@@ -86,7 +86,9 @@ def wall_target_level(pos, anchor, front: str | None) -> int:
     else:  # S / None
         prim, sec, pext = dy, dx, _RING_HI
     if prim == pext and sec not in (_RING_LO, _RING_HI):
-        return 3
+        return 3         # 纯正面（迎敌列，不含拐角）
+    if prim == pext:
+        return 3         # 拐角（正面列两端；用户 2026-09-23：拐角 > 侧面）
     return 2
 
 
@@ -208,14 +210,22 @@ class UpgradePlanner:
 
         # ---- 硬约束（用户 2026-09-23 确认）：D5 入夜前**纯正面墙 L3 < N** →
         #      纯正面墙升级优先级**最高**（priority 1，高于 L2炮台/修复包/一切）。
-        #      范围 = **纯正面（迎敌侧整列，不含拐角）**；其余墙按掉血量排序。
+        #      范围 = **纯正面（迎敌侧整列，不含拐角）**；其余按优先级/掉血量。
+        front_only = [w for w in all_walls if rank(w) == WALL_FRONT]
         front_targets = [w for w in all_walls if target_level(w) == 3]
-        front_l3_n = sum(1 for w in front_targets if w.level >= 3)
+        front_l3_n = sum(1 for w in front_only if w.level >= 3)
         if turn.day_index <= 5 and front_l3_n < FRONT_L3_TARGET:
-            for wall in front_order([w for w in front_targets if w.level < 3]):
+            for wall in front_order([w for w in front_only if w.level < 3]):
                 v, c = voucher_for("wall", wall.level)
                 if v is not None:
                     add(v, c, wall.pos, "wall", 1)
+        # ---- 拐角优先（用户 2026-09-23）：**正面 > 拐角 > 侧面**；正面达标后立即升拐角（→L3）
+        corners = [w for w in all_walls if rank(w) == WALL_CORNER and w.level < 3]
+        if corners:
+            for wall in front_order(corners):
+                v, c = voucher_for("wall", wall.level)
+                if v is not None:
+                    add(v, c, wall.pos, "wall", 2)
 
         # 2. L2 炮台（武器 L1→L2）—— 升级顺序最高（用户：L2炮台 > L2围墙 > L3炮台 > L3围墙）
         for w in weapons:

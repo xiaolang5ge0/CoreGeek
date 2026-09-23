@@ -15,10 +15,13 @@ from typing import Any
 
 from .path import find_path, next_step, step_toward
 from .planners.upgrade import (
+    WALL_CORNER,
+    WALL_FRONT,
     WALL_MAX_HP,
     WALL_VOUCHER_BATCH,
     WEAPON_L1_COST,
     voucher_for,
+    wall_rank,
     wall_target_level,
 )
 from .protocol import (
@@ -724,8 +727,18 @@ class WorkerFSM:
         """批量购买：min(刚需, 背包容量, 金币//单价)，扣除已持有（不多买）。"""
         lvl = 1 if voucher.endswith("1") else 2
         if kind == "wall":
-            # 墙券只备正面+转角（用户 2026-09-23）：上限 6，防一次买爆饿死武器升级
-            need = min(WALL_VOUCHER_BATCH, sum(1 for w in turn.walls() if w.level == lvl))
+            # 墙券只按**优先墙（正面+拐角）**的实际需求买（用户 2026-09-23：
+            # "正面>拐角>侧面"，按升级需求，不多买无意义的券）
+            _anchor = getattr(ctx, "layout_anchor", None)
+            _front = getattr(ctx, "layout_front", None)
+            if _anchor is not None:
+                _prio = [
+                    w for w in turn.walls()
+                    if wall_rank(w.pos, _anchor, _front) in (WALL_FRONT, WALL_CORNER)
+                ]
+                need = min(WALL_VOUCHER_BATCH, sum(1 for w in _prio if w.level == lvl))
+            else:
+                need = min(WALL_VOUCHER_BATCH, sum(1 for w in turn.walls() if w.level == lvl))
         else:
             need = sum(1 for w in turn.weapons() if w.level == lvl)
         held = sum(u.backpack.count(voucher) for u in turn.ours)   # **全局统计**（含开拓者/其他工人；用户 2026-09-23）

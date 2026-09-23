@@ -160,8 +160,8 @@ class TestUpgradeOrder(unittest.TestCase):
         anchor = (10, 23)
         self.assertEqual(wall_target_level(Pos(13, 23), anchor, "W"), 3)  # 纯正面（中间）
         self.assertEqual(wall_target_level(Pos(13, 22), anchor, "W"), 3)  # 纯正面
-        self.assertEqual(wall_target_level(Pos(13, 21), anchor, "W"), 2)  # 拐角 → L2
-        self.assertEqual(wall_target_level(Pos(13, 26), anchor, "W"), 2)  # 拐角 → L2
+        self.assertEqual(wall_target_level(Pos(13, 21), anchor, "W"), 3)  # 拐角 → L3（用户 2026-09-23）
+        self.assertEqual(wall_target_level(Pos(13, 26), anchor, "W"), 3)  # 拐角 → L3
         self.assertEqual(wall_target_level(Pos(12, 21), anchor, "W"), 2)  # 顶行靠敌 → L2
         self.assertEqual(wall_target_level(Pos(9, 21), anchor, "W"), 2)   # 靠开口侧 → L2
 
