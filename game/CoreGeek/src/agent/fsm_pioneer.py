@@ -50,6 +50,7 @@ class PioneerFSM:
         self.last_task_type: str | None = None   # 上次接取的任务类型（用于交替）
         self.upgrade_target: tuple | None = None  # (weapon Pos, level)
         self.returning = False                     # 归位粘性：一旦开始入夜前归位，不再被打断
+        self.return_since = 0                      # 开始归位的回合（归位受阻超时兜底，IKI0Q8）
 
     # ================= 夜间 =================
     def move_to_guard(self, turn: Turn, pioneer: Unit, cp: Pos, ctx) -> dict[str, Any] | None:
@@ -82,17 +83,33 @@ class PioneerFSM:
         margin = RETURN_MARGIN_TASK if in_task else DUSK_MARGIN
         must_return = turn.rounds_until_night <= travel + margin
         if self.returning or must_return:
+            if not self.returning:
+                self.return_since = turn.round_no
             self.returning = True
             if self.state in (STATE_WEAPON_BUY, STATE_WEAPON_UPGRADE):
                 self.state = STATE_GUARD
                 self.upgrade_target = None
             if pioneer.pos != cp:
-                self.state = STATE_RETURN_HOME
-                self.task_point = None
-                step = next_step(turn, pioneer, cp, ctx.reserved) or next_step(turn, pioneer, cp)
-                return move_command(step) if step is not None else None
-            self.state = STATE_GUARD
-            self.returning = False       # 已到 CP → 解除粘性
+                # 兜底（IKI0Q8）：归位受阻 >50 回合（到不了 CP）→ 放弃归位、恢复行动，
+                # 否则开拓者会永久卡在 RETURN_HOME（不升级武器/不做任务）。
+                if turn.round_no - self.return_since > 50:
+                    self.returning = False
+                    self.state = STATE_GUARD
+                else:
+                    self.state = STATE_RETURN_HOME
+                    self.task_point = None
+                    step = next_step(turn, pioneer, cp, ctx.reserved) or next_step(turn, pioneer, cp)
+                    return move_command(step) if step is not None else None
+            else:
+                self.state = STATE_GUARD
+                self.returning = False       # 已到 CP → 解除粘性
+        else:
+            # 未在归位（含跨天重置后）：若状态残留 RETURN_HOME（归位受阻/上一天遗留），
+            # 必须复位为 GUARD，否则 `_weapon_upgrade_cmd` 被 `state != RETURN_HOME` 跳过、
+            # `_task_flow` 又不处理该状态 → 开拓者永久发呆（IKI0Q8 根因）。
+            if self.state == STATE_RETURN_HOME:
+                self.state = STATE_GUARD
+                self.upgrade_target = None
         # 2/3. 武器升级计划（买券 / 用券）——仅在未进行任务且非归位时
         if not in_task and self.state != STATE_RETURN_HOME:
             cmd = self._weapon_upgrade_cmd(turn, pioneer, ctx)

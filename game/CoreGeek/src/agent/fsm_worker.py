@@ -239,6 +239,14 @@ class WorkerFSM:
         # D2/D3 有缺口且石头不够 → 改采石补缺口（用户：D2/D3 白天也检索缺口）
         if ctx.walls_left > 0 and stones < ctx.walls_left:
             prefer = "stone"
+        # 墙环建完后（D3+），修理工常备 ≥5 石头（用户 IKI0RT：备用补墙，防"夜里墙被打掉、白天无石料补"）
+        elif (
+            turn.day_index >= 3
+            and ctx.walls_left == 0
+            and self.role == ROLE_REPAIRER
+            and stones < REPAIR_STONE_KEEP
+        ):
+            prefer = "stone"
         return self._mine_flow(turn, unit, ctx, prefer=prefer)
 
     # ================= 挖矿工 =================
