@@ -116,6 +116,7 @@ class _Ctx:
     layout_front: str | None = None  # 布局开口侧（front），供墙目标等级计算
     layout_anchor = None             # 布局锚点 (station.x, station.y-1)，供墙目标等级计算
     miner_avoid = frozenset()        # 矿工夜间绕行格（机器人走廊；用户 2026-09-23）
+    turret_cells: tuple = ()         # 炮塔格（CP 不可达时退到"邻接炮塔最多"的格；IKI60Z）
     prompt: str = ""                 # LLM prompt（非任务期 news/treasure 或任务）
     execute_cmd: str = ""            # 沙盒命令（仅任务期）
 
@@ -410,7 +411,19 @@ class Brain:
             ]
             if not free:
                 break
-            worker = min(free, key=lambda w: distance(w.pos, cell))
+            # 炮塔建造**优先/仅派给修理工**（挖矿工专职采矿/卖钱，不抢建造；用户策略）；
+            # 仅当修理工**阵亡**时才由挖矿工接手。
+            repairers = [w for w in free if self._worker_fsm(w).role == ROLE_REPAIRER]
+            repairer_alive = any(
+                self._worker_fsm(w).role == ROLE_REPAIRER for w in workers
+            )
+            if repairers:
+                pool = repairers
+            elif repairer_alive:
+                break            # 修理工活着但忙 → 挖矿工不抢建造
+            else:
+                pool = free       # 修理工阵亡 → 挖矿工接手
+            worker = min(pool, key=lambda w: distance(w.pos, cell))
             self._worker_fsm(worker).build = (cell, ROCKET)
             busy.add(worker.unit_id)
             gold_left -= WEAPON_BUILD_COST
@@ -489,6 +502,7 @@ class Brain:
         # 归位锚点必须在工人决策前设置：修理工黄昏归位依赖 ctx.home_anchor
         # （此前在 pioneer 分支里才设置 → 工人阶段恒为 None → 修理工从不回防，实战 issue#25 卡墙外）
         ctx.home_anchor = layout.control_point
+        ctx.turret_cells = tuple(layout.turret_cells)   # CP 不可达时退位用（IKI60Z）
         # 修理工夜间就位点 = 内圈邻墙格（issue#26：D4+ 夜到 repair_post 就位，非只回家）
         ctx.repair_anchor = layout.repair_post or layout.control_point
 

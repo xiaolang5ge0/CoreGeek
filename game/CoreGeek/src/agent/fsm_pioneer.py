@@ -53,10 +53,33 @@ class PioneerFSM:
         self.return_since = 0                      # 开始归位的回合（归位受阻超时兜底，IKI0Q8）
 
     # ================= 夜间 =================
+    def _control_cell(self, turn: Turn, pioneer: Unit, ctx) -> Pos | None:
+        """CP 不可达（被占/被墙封）→ 选一个**邻接炮塔最多**的可达格（IKI60Z）。"""
+        turrets = getattr(ctx, "turret_cells", ())
+        cands = set()
+        for t in turrets:
+            cands.update(t.neighbours())
+        best, best_key = None, None
+        for c in cands:
+            if not turn.land(c) or c in turn.blocked(pioneer):
+                continue
+            adj = sum(1 for t in turrets if distance(c, t) <= 1)
+            path = find_path(turn, pioneer, c, ctx.reserved) or find_path(turn, pioneer, c)
+            if path is None:
+                continue
+            key = (-adj, len(path), c.x, c.y)
+            if best is None or key < best_key:
+                best, best_key = c, key
+        return best
+
     def move_to_guard(self, turn: Turn, pioneer: Unit, cp: Pos, ctx) -> dict[str, Any] | None:
         if pioneer.pos == cp:
             return None
-        step = next_step(turn, pioneer, cp, ctx.reserved)
+        step = next_step(turn, pioneer, cp, ctx.reserved) or next_step(turn, pioneer, cp)
+        if step is None:
+            alt = self._control_cell(turn, pioneer, ctx)
+            if alt is not None:
+                step = next_step(turn, pioneer, alt, ctx.reserved) or next_step(turn, pioneer, alt)
         return move_command(step) if step is not None else None
 
     # ================= 白天 =================
@@ -99,6 +122,14 @@ class PioneerFSM:
                     self.state = STATE_RETURN_HOME
                     self.task_point = None
                     step = next_step(turn, pioneer, cp, ctx.reserved) or next_step(turn, pioneer, cp)
+                    if step is None:
+                        # CP 不可达（被占/被墙封）→ 退到邻接炮塔最多的可达格（IKI60Z）
+                        alt = self._control_cell(turn, pioneer, ctx)
+                        if alt is not None:
+                            self.state = STATE_GUARD
+                            self.returning = False
+                            step = (next_step(turn, pioneer, alt, ctx.reserved)
+                                    or next_step(turn, pioneer, alt))
                     return move_command(step) if step is not None else None
             else:
                 self.state = STATE_GUARD
