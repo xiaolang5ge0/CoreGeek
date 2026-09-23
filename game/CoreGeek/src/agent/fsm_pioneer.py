@@ -141,6 +141,15 @@ class PioneerFSM:
             if self.state == STATE_RETURN_HOME:
                 self.state = STATE_GUARD
                 self.upgrade_target = None
+        # 宝藏优先（用户 2026-09-23）：计划 ready 且开启日临近（≥day-1）→ 先买祭品/去祭坛召唤
+        if not in_task and self.state != STATE_RETURN_HOME:
+            _tr = getattr(ctx, "treasure", None)
+            if _tr is not None and getattr(_tr.plan, "ready", False) and not _tr.attempted:
+                _d = getattr(_tr.plan, "day", 0) or 0
+                if _d and turn.day_index >= _d - 1:
+                    _cmd = self._treasure_cmd(turn, pioneer, ctx)
+                    if _cmd is not None:
+                        return _cmd
         # 前 2 天（用户 2026-09-23）：**任务优先**，剩余时间买券升级；
         # D3+：武器升级优先（任务间隙插空）。
         if turn.day_index <= 2:
