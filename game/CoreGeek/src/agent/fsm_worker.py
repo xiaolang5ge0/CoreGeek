@@ -193,11 +193,9 @@ class WorkerFSM:
             self.returning = False  # 已进墙/受阻 → 继续正常流程
         # 夜间优先：升级（=回血，省修复包）→ 抢修 → D3+ 就位 repair_post（机器人清空前不回外）
         if turn.is_night:
-            # 全满后（炮台+目标围墙全 L3）夜间也允许采购修复包，保证墙不受损（用户 2026-09-23）
-            cmd = self._upgrade_flow(
-                turn, unit, ctx, allow_use=True,
-                allow_buy=getattr(ctx, "all_maxed", False),
-            )
+            # 夜间**不采购**（用户 2026-09-23：夜里买来不及——开拓者控炮、一工人修墙、一工人采资源；
+            # 修复包必须白天提前备足）。夜间只使用已购券/修复包。
+            cmd = self._upgrade_flow(turn, unit, ctx, allow_use=True, allow_buy=False)
             if cmd is not None:
                 return cmd
             cmd = self._repair_cmd(turn, unit, ctx)

@@ -45,18 +45,17 @@ class TestWeaponUpgrade(unittest.TestCase):
 
 
 class TestUpgradePriority(unittest.TestCase):
-    def test_weapon_before_wall(self):
-        """武器优先于受损墙（预算仅够其一）。"""
+    def test_front_wall_hard_constraint(self):
+        """用户确认：D5 入夜前目标正面墙 L3 未达标 → 正面墙升级优先级最高(1)。"""
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
         brain = Brain()
         build_day1(brain, sim)
-        wall = sim.walls()[0]
-        wall["health"] = 300  # 受损墙
-        sim.gold = 130  # 武器券100+保留30，无余给墙
-        planner = UpgradePlanner()
-        missions = planner.plan(Turn.load(sim.payload()))
-        self.assertEqual(len(missions), 1)
-        self.assertEqual(missions[0].kind, "weapon")
+        sim.gold = 500
+        missions = UpgradePlanner().plan(
+            Turn.load(sim.payload()), cp=Pos(9, 23), front="W"
+        )
+        front = [m for m in missions if m.kind == "wall" and m.priority == 1]
+        self.assertTrue(front, "正面墙应产生最高优先(1)升级任务")
 
     def test_reserve_kept(self):
         """预算保留：金 100（保留 30）买不起武器券 100 → 无武器任务（廉价墙任务允许）。"""

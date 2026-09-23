@@ -120,8 +120,8 @@ class TestUpgradeOrder(unittest.TestCase):
             sim.roles.append(
                 sim._role(90000 + i, pos[0], pos[1], "rocket", 1500, level=weapons_level)
             )
-        # 目标 L3 的墙（front='W' → dx=3 列）+ 目标 L2 的墙（dx=2 中间）
-        for i, pos in enumerate([(13, 21), (13, 22), (13, 23), (12, 22), (12, 23)]):
+        # 目标 L2 的墙（front='W' → dx=2 中间），避免触发"正面墙最高优先"硬约束
+        for i, pos in enumerate([(12, 22), (12, 23), (12, 24), (12, 25)]):
             sim.roles.append(
                 sim._role(91000 + i, pos[0], pos[1], "wall", 1000, level=wall_level)
             )

@@ -172,7 +172,8 @@
 | **开拓者归位兜底** | 归位受阻/跨天残留 `RETURN_HOME` → **复位 GUARD**；归位受阻 >50 回合 → 放弃归位恢复行动（防永久发呆，IKI0Q8） | issue IKI0Q8 | CONFIRMED |
 | **围墙目标等级** | 迎敌侧整列 + 顶/底靠敌 1 格 = **L3**；其余靠开口侧 = **L2**（`wall_target_level`，不再全冲 L3） | 用户 2026-09-23 | CONFIRMED |
 | **升级顺序** | **L2炮台 > 修复包预留 ≥3 > 受损墙(最重优先) > L2围墙 > L3炮台 > L3围墙** | 用户 2026-09-23 | CONFIRMED |
-| **夜间修复顺序** | `_upgrade_targets()` → 优先用券(WallUpgradeVoucher→WeaponUpgradeVoucher) → 无券才 fallback WallFixer；全满后夜间可买修复包 | 用户 2026-09-23 | CONFIRMED |
+| **夜间修复顺序** | `_upgrade_targets()` → 优先用券(WallUpgradeVoucher→WeaponUpgradeVoucher) → 无券才 fallback WallFixer；**夜间不采购**（修复包白天备足） | 用户 2026-09-23 | CONFIRMED |
+| **正面墙硬约束** | **D5 入夜前目标正面墙 L3 < N** → 正面墙升级**优先级最高(1)**；**只约束正面墙**（用户确认） | 用户 2026-09-23 | CONFIRMED |
 | **应急道具** | Day6+ 且关键墙/炮塔升级后，余钱备炸弹；城墙危险时对机器人最密处使用（占开拓者动作） | 决策 A | CONFIRMED |
 | **矿工夜间回防** | 默认**不回防**（继续安全外采）；仅**第 9 夜起**考虑回防（`MINER_RETURN_DAY=9`） | 决策 D | CONFIRMED |
 | **任务期 LLM 不限次** | 任务执行期间 prompt **不查日限额、不计数**（接口文档 errorCode=5） | 修 issue#23/#24 根因 | CONFIRMED |

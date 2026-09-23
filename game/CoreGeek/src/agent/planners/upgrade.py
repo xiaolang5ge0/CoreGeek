@@ -205,6 +205,17 @@ class UpgradePlanner:
 
         front_wall_units = [w for w in all_walls if rank(w) in (WALL_FRONT, WALL_CORNER)]
 
+        # ---- 硬约束（用户 2026-09-23 确认）：D5 入夜前**目标正面墙 L3 < N** →
+        #      正面墙升级优先级**最高**（priority 1，高于 L2炮台/修复包/一切）。
+        #      只约束"正面墙"（目标 L3 的迎敌侧整列 + 顶/底靠敌 1 格）。
+        front_targets = [w for w in all_walls if target_level(w) == 3]
+        front_l3_n = sum(1 for w in front_targets if w.level >= 3)
+        if turn.day_index <= 5 and front_l3_n < FRONT_L3_TARGET:
+            for wall in front_order([w for w in front_targets if w.level < 3]):
+                v, c = voucher_for("wall", wall.level)
+                if v is not None:
+                    add(v, c, wall.pos, "wall", 1)
+
         # 0. 受损墙优先（用户：优先升级**上一回合受损程度最高**的墙）→ 用券升级回血。
         #    升级 = 回满血 + 提升上限（比 WallFixer 划算）；最受损优先。
         #    优先级 12：在 L2 炮台(10) 之后、L2 围墙(15) 之前（用户：L2炮台 > L2围墙 > ...）。
@@ -216,21 +227,22 @@ class UpgradePlanner:
             v, c = voucher_for("wall", wall.level)
             if v is not None:
                 add(v, c, wall.pos, "wall", 12)
-        # 1. 围墙修复包备货（用户：D3/D4/D5 预留 ≥3 应对夜间；D6+ ≥5；全满后更多）
+        # 1. 围墙修复包备货（用户：D3/D4/D5 预留 ≥3 应对夜间；D4+ 加量到 ≥4；D6+ ≥5；全满后更多）
+        #    **白天提前备足**（夜里买来不及）；优先级 11，保证先于其余升级。
         if turn.day_index >= 3:
             l3_walls = [w for w in all_walls if w.level >= 3]
             if all_weapons_l3 and all_walls_l3:
                 desired = FIXER_STOCK_MAXED
             elif turn.day_index >= 6:
                 desired = min(FIXER_STOCK_MAXED, max(5, len(l3_walls)))
+            elif turn.day_index >= 4:
+                desired = min(FIXER_STOCK_MAXED, max(4, len(l3_walls)))
             else:
                 desired = min(FIXER_STOCK_MAX, max(3, len(l3_walls)))
             held = sum(
                 u.backpack.count("WallFixer") for u in turn.ours if u.kind == "worker"
             )
             if held < desired and turn.gold >= RESERVE_GOLD + 10 + weapon_reserve():
-                # 优先级 11：在 L2 炮台(10) 之后、受损墙(12)/其余升级之前，
-                # 保证 D3-D5 夜间有 ≥3 修复包可用（用户 IKI0RT）。
                 missions.append(
                     UpgradeMission("WallFixer", 10, None, "stock", 11, qty=desired)
                 )

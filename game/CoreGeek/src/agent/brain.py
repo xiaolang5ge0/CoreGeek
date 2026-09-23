@@ -19,7 +19,7 @@ from .planners.layout import BaseLayout, choose_front, compute_layout
 from .planners.news import NewsEconomy
 from .planners.task import TaskPlanner, TaskSession
 from .planners.treasure import TreasurePlanner
-from .planners.upgrade import WALL_MAX_HP, UpgradePlanner, wall_target_level
+from .planners.upgrade import WALL_MAX_HP, UpgradePlanner
 from .protocol import (
     Pos,
     ROCKET,
@@ -109,7 +109,6 @@ class _Ctx:
     repair_anchor = None             # 修理工夜间就位点（layout.repair_post，内圈邻墙）
     layout_front: str | None = None  # 布局开口侧（front），供墙目标等级计算
     layout_anchor = None             # 布局锚点 (station.x, station.y-1)，供墙目标等级计算
-    all_maxed: bool = False          # 炮台全 L3 + 目标围墙全 L3 → 夜间也可买修复包
     prompt: str = ""                 # LLM prompt（非任务期 news/treasure 或任务）
     execute_cmd: str = ""            # 沙盒命令（仅任务期）
 
@@ -251,17 +250,6 @@ class Brain:
         ctx.layout_front = self.front
         _st = turn.station()
         ctx.layout_anchor = (_st.pos.x, _st.pos.y - 1) if _st is not None else None
-        # 全满（炮台全 L3 + 目标围墙全 L3）→ 夜间可继续买修复包修墙（用户 2026-09-23）
-        _tgt3 = [
-            w for w in turn.walls()
-            if wall_target_level(w.pos, ctx.layout_anchor, ctx.layout_front) == 3
-        ]
-        ctx.all_maxed = (
-            bool(turn.weapons())
-            and all(w.level >= 3 for w in turn.weapons())
-            and bool(_tgt3)
-            and all(w.level >= 3 for w in _tgt3)
-        )
         ctx.reserved = {u.pos for u in turn.controllable()}
         ctx.mine_blacklist = self.mine_blacklist
         # 历史出生走廊（首夜起累积，全局固定）→ 夜间选矿/卖货避让
@@ -574,11 +562,11 @@ class Brain:
         else:
             ctx.walls_missing = False
             ctx.need_gold = False
-        # 夜间升级任务分配：修理工用白天采购的券升级/修复墙（升级=回血，省修复包）
-        # 全满后夜间也允许备货修复包（用户 2026-09-23：保证墙不受损）
+        # 夜间升级任务分配：修理工用白天采购的券升级/修复墙（升级=回血，省修复包）。
+        # **夜间不备货**（用户 2026-09-23：夜里买来不及，修复包必须白天提前备足）。
         self._assign_repair_mission(
             turn, self.layout, ctx, sorted(turn.workers(), key=lambda w: w.unit_id),
-            allow_stock=getattr(ctx, "all_maxed", False),
+            allow_stock=False,
         )
         pioneer = turn.pioneer()
         if pioneer is not None and self.layout is not None:
