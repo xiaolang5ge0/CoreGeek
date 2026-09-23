@@ -24,7 +24,7 @@ FIXER_STOCK_MAXED = 30     # 炮台全 L3 后：尽可能备满（不再为不�
 FRONT_L2_TARGET = 6       # 正面+转角墙 L2 死线数量（D3 入夜前，用户 2026-09-23）
 FRONT_L3_TARGET = 6       # 正面+转角墙 L3 死线数量（D5 入夜前）
 FRONT_STOCK_TARGET = 6    # 正面+转角墙对应券/修复包备货数量（D3+）
-WALL_VOUCHER_BATCH = 4    # 墙升级券批量上限（用户 2026-09-23：上限 4，防一次买爆饿死武器）
+WALL_VOUCHER_BATCH = 5    # 墙升级券批量上限（用户 2026-09-23：4→5，快速满足正面升3；按需求不多买）
 
 
 def wall_hp_threshold(day: int) -> int:
@@ -233,8 +233,10 @@ class UpgradePlanner:
                 u.backpack.count("WallFixer") for u in turn.ours if u.kind == "worker"
             )
             if held < desired and turn.gold >= RESERVE_GOLD + 10 + weapon_reserve():
+                # 优先级 **0**：**先买修复包再升级**（用户 2026-09-23：修理工不能只买升级券；
+                # 修复包是夜间防御的前提，必须最先备足，否则会被纯正面升级任务饿死）
                 missions.append(
-                    UpgradeMission("WallFixer", 10, None, "stock", 11, qty=desired)
+                    UpgradeMission("WallFixer", 10, None, "stock", 0, qty=desired)
                 )
         # 0. 受损/紧急墙（用户 2026-09-23）：最受损优先 → 用券升级回血（比 WallFixer 划算）。
         #    - 受损：ratio < 0.5

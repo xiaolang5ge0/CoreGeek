@@ -216,7 +216,8 @@ class PioneerFSM:
             if cnt <= 0:
                 continue
             voucher = f"WeaponUpgradeVoucher{lvl}"
-            held = pioneer.backpack.count(voucher)
+            # **全局统计**已持有（含维修工代买的；用户 2026-09-23：避免重复多买）
+            held = sum(u.backpack.count(voucher) for u in turn.ours)
             want = cnt - held
             if want > 0:
                 needs.append((voucher, cost, want))

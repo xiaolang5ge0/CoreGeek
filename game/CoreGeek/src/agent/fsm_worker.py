@@ -728,7 +728,7 @@ class WorkerFSM:
             need = min(WALL_VOUCHER_BATCH, sum(1 for w in turn.walls() if w.level == lvl))
         else:
             need = sum(1 for w in turn.weapons() if w.level == lvl)
-        held = unit.backpack.count(voucher)
+        held = sum(u.backpack.count(voucher) for u in turn.ours)   # **全局统计**（含开拓者/其他工人；用户 2026-09-23）
         want = max(0, need - held)
         if want <= 0:
             return 0
