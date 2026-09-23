@@ -19,8 +19,8 @@ WEAPON_L2_COST = 150   # 武器 L2→L3 券价（武器金币预留用）
 WALL_DAMAGE_RATIO = 0.5
 CRITICAL_WALL_RATIO = 0.35  # 紧急墙：血量 < 35% 满血（评估：被破前 10 回合多在 20~40%）
 WALL_MIN_L2 = 6            # 武器升 L3 前，先升的最小墙量（正面+侧面转角，约 6 块）
-FIXER_STOCK_MAX = 12       # 炮台未全 L3 时的 WallFixer 备货上限（预留炮台金币前提下尽量多备）
-FIXER_STOCK_MAXED = 16     # 炮台全 L3 后：尽可能备满（不再为不关键墙预留金币）
+FIXER_STOCK_MAX = 30       # 炮台未全 L3 时的 WallFixer 备货上限（预留炮台金币前提下尽量多备）
+FIXER_STOCK_MAXED = 30     # 炮台全 L3 后：尽可能备满（不再为不关键墙预留金币）
 FRONT_L2_TARGET = 6       # 正面+转角墙 L2 死线数量（D3 入夜前，用户 2026-09-23）
 FRONT_L3_TARGET = 6       # 正面+转角墙 L3 死线数量（D5 入夜前）
 FRONT_STOCK_TARGET = 6    # 正面+转角墙对应券/修复包备货数量（D3+）
@@ -223,22 +223,12 @@ class UpgradePlanner:
                 v, c = voucher_for("weapon", 1)
                 add(v, c, w.pos, "weapon", 10)
         # 1. 围墙修复包备货（用户 2026-09-23 追加）：**白天提前备足**（夜里买来不及）。
-        #    - 炮台**未全 L3**：在预留炮台升级金币（weapon_reserve）前提下**尽可能多备**：
-        #      D3 ≥5、D4 ≥8、D5 ≥10、D6+ ≥12（上限 FIXER_STOCK_MAX=12）
-        #    - 炮台**全 L3**：不再为不关键墙预留金币 → **尽可能备满**（FIXER_STOCK_MAXED=16）
+        #    **目标 = 上限（30）：能买多少买多少**（实际受金币/背包容量限制，见 `_stock_qty`）。
+        #    - 炮台**未全 L3**：先预留炮台升级金币（weapon_reserve），其余全买包；
+        #    - 炮台**全 L3**：不再为不关键墙预留金币 → 尽可能备满。
         #    优先级 11（高于一切墙升级）。
         if turn.day_index >= 3:
-            l3_walls = [w for w in all_walls if w.level >= 3]
-            if all_weapons_l3:
-                desired = FIXER_STOCK_MAXED
-            elif turn.day_index >= 6:
-                desired = min(FIXER_STOCK_MAX, max(12, len(l3_walls)))
-            elif turn.day_index == 5:
-                desired = min(FIXER_STOCK_MAX, max(10, len(l3_walls)))
-            elif turn.day_index == 4:
-                desired = min(FIXER_STOCK_MAX, max(8, len(l3_walls)))
-            else:
-                desired = min(FIXER_STOCK_MAX, max(5, len(l3_walls)))
+            desired = FIXER_STOCK_MAXED if all_weapons_l3 else FIXER_STOCK_MAX
             held = sum(
                 u.backpack.count("WallFixer") for u in turn.ours if u.kind == "worker"
             )
