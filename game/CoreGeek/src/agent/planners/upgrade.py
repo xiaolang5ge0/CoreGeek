@@ -25,6 +25,7 @@ FRONT_L2_TARGET = 6       # 正面+转角墙 L2 死线数量（D3 入夜前，�
 FRONT_L3_TARGET = 6       # 正面+转角墙 L3 死线数量（D5 入夜前）
 FRONT_STOCK_TARGET = 6    # 正面+转角墙对应券/修复包备货数量（D3+）
 WALL_VOUCHER_BATCH = 5    # 墙升级券批量上限（用户 2026-09-23：4→5，快速满足正面升3；按需求不多买）
+WALL_VOUCHER_CAP_D4 = 15  # **D4 前墙升级券（V1+V2）总持有上限**（用户 2026-09-24：别屯券，全力升级炮台+围墙）
 
 
 def wall_hp_threshold(day: int) -> int:
@@ -316,6 +317,12 @@ class UpgradePlanner:
         #    D3+ 按正面墙等级各备 ≥5（金币不够则不要求）；武器+墙全满后不限制。
         #    门控：武器未到 L2 时不为墙券花钱（"金币充足时武器优先"）。
         if turn.day_index >= 3 and not weapons_need_l2:
+            # D4 前墙升级券总持有上限（用户 2026-09-24）：避免屯券挤占炮台升级金币
+            _wv = ("WallUpgradeVoucher1", "WallUpgradeVoucher2")
+            _held_total = sum(
+                u.backpack.count(v) for u in turn.ours if u.kind == "worker" for v in _wv
+            )
+            _cap = WALL_VOUCHER_CAP_D4 if turn.day_index < 4 else None
             for lvl, voucher, cost in ((1, "WallUpgradeVoucher1", 20),
                                        (2, "WallUpgradeVoucher2", 30)):
                 need = sum(1 for w in front_wall_units if w.level == lvl)
@@ -323,6 +330,11 @@ class UpgradePlanner:
                     continue
                 held = sum(u.backpack.count(voucher) for u in turn.ours if u.kind == "worker")
                 target = FIXER_STOCK_MAXED if (all_weapons_l3 and all_walls_l3) else FRONT_STOCK_TARGET
+                if _cap is not None:
+                    headroom = _cap - _held_total
+                    if headroom <= 0:
+                        continue
+                    target = min(target, held + headroom)
                 if held < target and turn.gold >= RESERVE_GOLD + cost + weapon_reserve():
                     missions.append(
                         UpgradeMission(voucher, cost, None, "stock", 47, qty=target)

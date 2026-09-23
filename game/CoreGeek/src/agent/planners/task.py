@@ -90,11 +90,12 @@ _API_WEAK = ("curl ", "pagination", "total_count", "authorization:", "http://", 
 
 # 家族经验学习：从 4xx 响应体提取可复用事实（issue IKI8DZ §5.2）
 _NOTE_PATTERNS = (
-    (re.compile(r"expected format:\s*authorization:\s*bearer", re.I),
+    # 真实报文：`Expected format: 'Authorization: Bearer <api_key>'`（引号曾导致漏学）
+    (re.compile(r"expected format:\s*'?\"?\s*authorization:\s*bearer", re.I),
      "认证方式：用 Authorization: Bearer <key>"),
-    (re.compile(r"missing required parameter:\s*([A-Za-z0-9_\-]+)", re.I),
+    (re.compile(r"missing required parameter:\s*'?\"?([A-Za-z0-9_\-]+)", re.I),
      "必须传参数：{0}"),
-    (re.compile(r"unknown parameter:\s*([A-Za-z0-9_\-]+)", re.I),
+    (re.compile(r"unknown parameter:\s*'?\"?([A-Za-z0-9_\-]+)", re.I),
      "不接受参数：{0}（不要传）"),
 )
 
@@ -252,8 +253,15 @@ class TaskPlanner:
             self._on_cmd_result(session, session.pending_cmd, result)
             session.pending_cmd = None
         if session.llm_pending:
-            self._on_llm_result(session, turn.llm_resp or "")
-            session.llm_pending = False
+            # LLM 服务端故障（errorCode=3：503/502/超时）→ **不计入循环/非 JSON 预算**，
+            # 直接重试（IKI8HA r29/r30：连续 502 被当成"答非 JSON"提前放弃任务）
+            if any(code == 3 for code, _ in turn.errors):
+                session.llm_pending = False
+                session.stage = ST_LLM
+                session.llm_loops = max(0, session.llm_loops - 1)
+            else:
+                self._on_llm_result(session, turn.llm_resp or "")
+                session.llm_pending = False
         if any(code == 2 for code, _ in turn.errors):   # 答案错 → 重新作答
             session.need_refine = True
             session.submitted = False
@@ -348,8 +356,10 @@ class TaskPlanner:
                 or self._at_deadline(turn, session)
             )
             if force:
-                if session.force_sent:
-                    session.stage = ST_DONE   # 已要过答案仍不给 → 放弃（保底避免异常）
+                # 仅当"已发过强制答案" **且已到截止回合** 才放弃（IKI8HA：服务端 502 后一次空响应
+                # 就 ST_DONE → 任务干等到超时）。未到截止则继续给 LLM 机会（force 模式只准给答案）。
+                if session.force_sent and self._at_deadline(turn, session):
+                    session.stage = ST_DONE
                     return out
                 session.force_sent = True
                 session.force_answer = True
@@ -807,8 +817,14 @@ class TaskPlanner:
                 "API 类：先读 transcript 里的 API_DOCS / 历史命令与响应，**优先复用已验证成功的认证与参数**；"
                 "curl 不通/信息不足时返回一条 curl 命令去取数据（4xx 必须打印 response BODY 以学习真实参数名）；"
                 "中文参数用 --data-urlencode 或 urllib.parse.quote 编码（原始中文在 Python URL 中会报 ascii codec 错误）；"
-                "分页用 offset/limit 递增直到取全（见上方分页提示）；"
-                "**能直接推断出答案时就直接给 answer**，不要再发命令。不要编造数据、不要用不完整页面凑数。"
+                "**能直接推断出答案时就直接给 answer**，不要再发命令。不要编造数据、不要用不完整页面凑数。\n"
+                "已验证的响应格式：{\"code\":200,\"data\":{\"records\":[{...}],"
+                "\"pagination\":{\"total_count\":N,\"offset\":0,\"limit\":10}}}\n"
+                "  · 记录在 **data.records**（不是 data 本身）；总数在 **data.pagination.total_count**；"
+                "`limit` 可能被服务端忽略（每页固定 10 条）→ 用 **offset=0,10,20... 翻页**，"
+                "直到去重记录数 ≥ total_count 再作答。\n"
+                "  · **不要写复杂的 python 解析脚本**：直接 `curl -s '<url>'` 打印原始 JSON"
+                "（必要时 `| head -c 4000`），由你自己阅读 JSON 得出结论；transcript 会保留原始输出供下一轮参考。"
             )
         elif task_type == "engineering":
             base += (

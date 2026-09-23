@@ -266,3 +266,36 @@
 **关键词表**（`task.py`）：
 - engineering 强：`./check`、`[FAIL]`、`[PASS]`、`spec.md`、`ws_`；弱：`chmod `、`mkdir `、`权限`
 - api 强：`localhost:`、`127.0.0.1`、`/api/`、`api_docs`、`x-api-key`、`bearer `；弱：`curl `、`pagination`、`total_count`、`authorization:`、`http://`、`https://`、`heritage`
+
+## 八、IKI8H9 / IKI8HA 复盘修复（2026-09-24）
+
+### 8.1 自进化任务失败根因（两把实测）
+
+| # | 现象（日志实锤） | 根因 | 修复 |
+|---|---|---|---|
+| T-A | IKI8H9 nanjing：LLM 反复发 `data.get('data',[])` 解析脚本 → `total_count: 0` → 超时 | prompt **没给已验证的响应格式**，LLM 以为 `data` 就是记录列表；`limit` 被服务端忽略（固定每页 10）→ 需 offset 翻页 | `_contract("api")` 写入响应格式 `{"data":{"records":[...],"pagination":{...}}}` + "记录在 **data.records** 不是 data 本身" + "**别写复杂解析脚本**，直接 curl 打印原始 JSON 自己读" + "limit 可能被忽略 → 用 offset 翻页" |
+| T-B | IKI8HA beijing：LLM 服务 502 连续失败 → r30 后**不再发 prompt**，任务干等到 r34 超时 | (1) LLM 服务故障（errorCode=3）被当成"答非 JSON"计入 `non_json`；(2) `force_sent` 后**一次空响应就 ST_DONE** | (1) errorCode=3 不计入循环/非 JSON 预算（净增 0）；(2) 仅当**已到截止回合**才放弃（未到截止继续给 LLM 机会） |
+| T-C | 401/400 的教训（`Expected format: 'Authorization: Bearer ...'`）没被 `learn_family_notes` 学到 | 正则没考虑报文里的**引号** | 正则容忍 `'` / `"` |
+
+> 正面：北京任务已能正确提交（r21 给出 9 类 `types`，与期望一致）；南京任务的认证/参数也靠 transcript + 经验成功切换（X-API-Key→Bearer、city→location）。
+
+### 8.2 围墙升级券上限（用户：别屯券）
+
+- 新增 `WALL_VOUCHER_CAP_D4 = 15`：**D4 前** `WallUpgradeVoucher1/2` 的**总持有上限 15**（stock 备货任务遵守；炮台升级金币优先）。
+- 优先级复核（小=高）：正面 L3 墙 `1` > 拐角 L3 `2` > D7 补 L1 `5` > **L2 炮台 `10`** > WallFixer 备货 `0` > 受损墙 `12` > L2 墙 `15` > **L3 炮台 `20`** > L3 墙 `25` > 基地 `45` > 墙券备货 `47` > 炸弹 `52`。
+
+### 8.3 紧急抢修：满级 L3 墙必须用 WallFixer（用户 IKI8HA）
+
+- 现象：D4 夜修理工持 30 个 WallFixer，却整夜在升 L1/L2 墙（`WallUpgradeVoucher1`），L3 关键墙（65/2000）无人修，修理工被打死。
+- 根因：夜间顺序 `_upgrade_flow`（用券升级）**先于** `_repair_cmd`；且 `_upgrade_targets` 只收 `level < target` 的墙 → **L3（无法升级）永不进入修复队列**。
+- 修复：
+  1. 新增 `_critical_repair`：`ratio < CRITICAL_REPAIR_RATIO(0.35)` 的 **L2+ 墙（含满级 L3）** 最优先——有可升的券先用券，否则用 WallFixer，只从内侧接近；夜间/白天均**先于** `_upgrade_flow`。
+  2. `_upgrade_targets` 纳入"满级但紧急受损（<35%）"的墙（只能靠 WallFixer）。
+- 附带：`brain._safe_unit` 单单位异常隔离（某单位 FSM 崩溃不再让整队 0 指令空转）。
+
+### 8.4 宝藏：低优先级（用户 2026-09-24）
+
+- 前置（`fsm_pioneer._treasure_ready`）：**计划 ready** + **炮塔全部 L3** + **无任务可接**；**低优先级**（排在任务/武器升级之后）。
+- 白天回防回合由 `must_return` 提前预留（不会为宝藏误了入夜归位）。
+- 备齐祭品后可提前采购；**未到开启日（`plan.day`）不召唤**（`treasure.cmd` 加日门控）。
+

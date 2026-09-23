@@ -8,7 +8,7 @@
 | 项 | 状态 |
 |---|---|
 | 当前阶段 | **P0~P5 + 二十四轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
-| 测试 | **228/228 通过** |
+| 测试 | **244/244 通过** |
 | 打包 | `game/CoreGeek/dist/CoreGeek.tar.gz`（**tar 顶层 CoreGeek/ 目录**，平台父目录解包后运行 `<root>/CoreGeek/main3.py`） |
 | 代码 | `game/CoreGeek/`，Python ≥3.11 纯标准库 |
 | 当前行为 | Day1 双工人建满14墙+3火箭；夜1-3 双工人全力采矿卖钱（无蹲防）；开拓者单人控3炮；Day4+ 修墙岗（墙血<50%才修、正面优先、L3→WallFixer、L1/L2→升级券）；WallRegistry 追踪攻破/补建并优先重升级；武器优先升级；任务确定性+LLM兜底；选矿我方侧优先 |
@@ -530,6 +530,20 @@
 | 答案提取 | `TOKEN:`（工程）/ `FINAL_ANSWER: {json}`（通用）自动提交 |
 
 **新增测试**：`tests/test_task_llm_refactor.py`（22 项：分类/截断/local_answer/经验/分页/重算/FINAL_ANSWER/prompt 上下文/HARVEST 已移除）。
+
+## 实战修复记录·IKI8H9 / IKI8HA 复盘（2026-09-24）
+
+| 问题 | 根因 | 修复 |
+|---|---|---|
+| API 任务：LLM 反复发 `data.get('data',[])` → `total_count: 0` → 超时 | prompt 未给已验证响应格式；`limit` 被服务端忽略 | prompt 写入 `{"data":{"records":[...],"pagination":{...}}}` + "记录在 data.records" + "别写复杂解析脚本，curl 打印原始 JSON 自己读" + "offset 翻页" |
+| API 任务：LLM 服务 502 后不再发 prompt、干等到超时 | 服务故障被当"答非 JSON"；`force_sent` 后一次空响应即 ST_DONE | errorCode=3 不计入循环/非 JSON；仅**到截止回合**才放弃 |
+| 家族经验漏学 | 报文里的引号（`Expected format: 'Authorization: Bearer ...'`） | 正则容忍引号 |
+| D2/D3 墙升级券屯得多 | 无总持有上限 | `WALL_VOUCHER_CAP_D4=15`（D4 前总持有 ≤15） |
+| D4 夜 30 个 WallFixer 不修墙、修理工被打死 | 夜间"用券升级"先于抢修；`_upgrade_targets` 只收可升级的墙 → **L3 永不进修复队列** | `_critical_repair`（<35% 的 L2+ 含 L3 最优先，券→WallFixer）；`_upgrade_targets` 纳入紧急受损的满级墙 |
+| 单单位 FSM 崩溃 → 整队 0 指令 | `decide` 整体 try/except | `_safe_unit` 单单位异常隔离 |
+| 宝藏优先级/时机 | 之前排在任务前 | **低优先级**：无任务可接 + 炮塔全 L3 才去；未到开启日不召唤 |
+
+**新增测试**：`tests/test_issue_iki8h.py`（14 项：API 合同/经验/服务故障/强制答案 + 券上限 + 紧急抢修 + 宝藏门控）。
 
 ## 维护约定
 

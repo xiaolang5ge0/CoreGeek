@@ -190,6 +190,17 @@ class Brain:
         except Exception as exc:  # noqa: BLE001
             return empty_response(), {"fatal": f"decide:{exc!r}"}
 
+    def _safe_unit(self, fn, trace: dict, tag: str, *args):
+        """单单位决策异常隔离（2026-09-24）：某单位 FSM 崩溃不应让整队空转（0 指令=全线停摆）。
+
+        异常记录到 trace["unit_errors"]，该单位本回合无指令（其他单位照常行动）。
+        """
+        try:
+            return fn(*args)
+        except Exception as exc:  # noqa: BLE001
+            trace.setdefault("unit_errors", []).append(f"{tag}:{exc!r}")
+            return None
+
     def _decide_core(self, payload: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
         trace: dict[str, Any] = {"code_phase": "P1"}
         if not isinstance(payload, dict):
@@ -519,7 +530,8 @@ class Brain:
         ctx.repair_anchor = layout.repair_post or layout.control_point
 
         for worker in workers:
-            cmd = self._worker_fsm(worker).decide(turn, worker, ctx)
+            cmd = self._safe_unit(self._worker_fsm(worker).decide, ctx.trace,
+                                  "worker%d" % worker.unit_id, turn, worker, ctx)
             if cmd is None:
                 cmd = self._vacate_layout_cell(turn, worker, ctx)
             if cmd:
@@ -670,7 +682,8 @@ class Brain:
         if pioneer is not None and pioneer.unit_id not in commands:
             self.fire.plan(turn, pioneer, commands, ctx.trace)
         for worker in turn.workers():
-            cmd = self._worker_fsm(worker).decide(turn, worker, ctx)
+            cmd = self._safe_unit(self._worker_fsm(worker).decide, ctx.trace,
+                                  "worker%d" % worker.unit_id, turn, worker, ctx)
             if cmd:
                 commands[worker.unit_id] = cmd
             ctx.reserve_from(cmd)

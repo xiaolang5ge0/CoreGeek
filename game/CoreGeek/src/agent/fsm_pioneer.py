@@ -141,15 +141,6 @@ class PioneerFSM:
             if self.state == STATE_RETURN_HOME:
                 self.state = STATE_GUARD
                 self.upgrade_target = None
-        # 宝藏优先（用户 2026-09-23）：计划 ready 且开启日临近（≥day-1）→ 先买祭品/去祭坛召唤
-        if not in_task and self.state != STATE_RETURN_HOME:
-            _tr = getattr(ctx, "treasure", None)
-            if _tr is not None and getattr(_tr.plan, "ready", False) and not _tr.attempted:
-                _d = getattr(_tr.plan, "day", 0) or 0
-                if _d and turn.day_index >= _d - 1:
-                    _cmd = self._treasure_cmd(turn, pioneer, ctx)
-                    if _cmd is not None:
-                        return _cmd
         # 前 2 天（用户 2026-09-23）：**任务优先**，剩余时间买券升级；
         # D3+：武器升级优先（任务间隙插空）。
         if turn.day_index <= 2:
@@ -164,6 +155,12 @@ class PioneerFSM:
         # 2/3. 武器升级计划（买券 / 用券）——仅在未进行任务且非归位时
         if not in_task and self.state != STATE_RETURN_HOME:
             cmd = self._weapon_upgrade_cmd(turn, pioneer, ctx)
+            if cmd is not None:
+                return cmd
+        # 4. 宝藏（用户 2026-09-24：**低优先级**——无任务可接 + 炮塔全 L3 才去；白天回防回合
+        #    由上面的 must_return 提前预留，备齐祭品后到开启日再召唤）
+        if not in_task and self.state != STATE_RETURN_HOME:
+            cmd = self._treasure_cmd(turn, pioneer, ctx)
             if cmd is not None:
                 return cmd
         return self._task_flow(turn, pioneer, cp, ctx)
@@ -252,11 +249,28 @@ class PioneerFSM:
         return min(shops, key=lambda s: (distance(pioneer.pos, s), s.x, s.y))
 
     def _treasure_cmd(self, turn: Turn, pioneer: Unit, ctx) -> dict[str, Any] | None:
-        """长上下文类（宝藏）：ready 计划才行动（最低优先，仅在无任务可接时）。"""
-        planner = getattr(ctx, "treasure", None)
-        if planner is None:
+        """长上下文类（宝藏）：**低优先级**（用户 2026-09-24）——无任务可接 + 炮塔全 L3 才行动。"""
+        if not self._treasure_ready(turn, pioneer, ctx):
             return None
+        planner = getattr(ctx, "treasure", None)
         return planner.cmd(turn, pioneer, self._nearest_shop(turn, pioneer), ctx)
+
+    def _has_task_available(self, turn: Turn) -> bool:
+        """是否还有可接的任务点（宝藏前置：无任务可接才去宝藏）。"""
+        return any(
+            t.is_valid and t.cooldown_rounds == 0 and t.pos not in self.failed_task_points
+            for t in turn.tasks
+        )
+
+    def _treasure_ready(self, turn: Turn, pioneer: Unit, ctx) -> bool:
+        """宝藏前置（用户 2026-09-24）：计划 ready + **炮塔全部 L3** + **无任务可接**。"""
+        planner = getattr(ctx, "treasure", None)
+        if planner is None or not getattr(planner.plan, "ready", False) or planner.attempted:
+            return False
+        weapons = turn.weapons()
+        if not weapons or any(w.level < 3 for w in weapons):
+            return False          # 炮塔全 L3 后才去宝藏（低优先级）
+        return not self._has_task_available(turn)
 
     # ---- 任务流程 ----
     def _task_flow(self, turn: Turn, pioneer: Unit, cp: Pos, ctx) -> dict[str, Any] | None:

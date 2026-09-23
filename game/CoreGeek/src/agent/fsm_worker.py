@@ -80,6 +80,9 @@ RETURN_STICKY_DAY = 3       # D3+ 修理工回防粘性：一旦开始返回，�
 RETURN_MARGIN = 6           # 矿工返程 deadline 余量（当前回合 + 归程 + 6 ≥ 白天/夜间截止）
 MINER_RETURN_DAY = 9        # 挖矿工从第 9 夜起才考虑夜间回防（用户 2026-09-23）
 MINER_NO_RETURN_DAY = 3     # 前 3 天完全不回防（激进挖矿，只躲机器人；用户 2026-09-23）
+# 紧急抢修阈值（用户 IKI8HA 2026-09-24）：墙血 < 35% 满血 → 最优先抢修（**含满级 L3**：
+# L3 无法用升级券，必须降级用 WallFixer，否则修理工只升 L1/L2 墙、看着 L3 墙被打掉）
+CRITICAL_REPAIR_RATIO = 0.35
 
 
 class WorkerFSM:
@@ -233,6 +236,12 @@ class WorkerFSM:
                     return cmd
             # 夜间**不采购**（用户 2026-09-23：夜里买来不及——开拓者控炮、一工人修墙、一工人采资源；
             # 修复包必须白天提前备足）。夜间只使用已购券/修复包。
+            # **紧急抢修最优先**（用户 IKI8HA 2026-09-24）：L3 满级墙无法升级 → 必须用 WallFixer；
+            # 否则会被"升 L1/L2 墙"的任务占满整夜，关键 L3 墙被打掉、修理工也被打死。
+            cmd = self._critical_repair(turn, unit, ctx)
+            if cmd is not None:
+                ctx.note(self.unit_id, "critical_repair")
+                return cmd
             cmd = self._upgrade_flow(turn, unit, ctx, allow_use=True, allow_buy=False)
             if cmd is not None:
                 return cmd
@@ -262,10 +271,13 @@ class WorkerFSM:
                 return cmd
             self.returning = False
             return self._build_mine(turn, unit, ctx, prefer="money")  # 已归位/受阻 → 就近
-        # 缺口补建优先（brain 派单）→ 再升级（白天也允许，用户 2026-09-23）→ 再采矿
+        # 缺口补建优先（brain 派单）→ 紧急抢修 → 再升级（白天也允许，用户 2026-09-23）→ 再采矿
         if self.build is not None:
             self.state = STATE_BUILD
             return self._build_cmd(turn, unit, ctx)
+        cmd = self._critical_repair(turn, unit, ctx)
+        if cmd is not None:
+            return cmd
         cmd = self._upgrade_flow(turn, unit, ctx, allow_use=True, allow_buy=True)
         if cmd is not None:
             return cmd
@@ -777,6 +789,8 @@ class WorkerFSM:
     def _upgrade_targets(self, turn: Turn, ctx) -> list:
         """夜间需升级的建筑（用户 2026-09-23）：
         墙（低于目标等级）+ 炮台（<L3）；**上一回合受损最重优先**。
+        **另含满级/达标但紧急受损（<35%）的 L2+ 墙**——它们无法再升级，只能靠 WallFixer 回血
+        （用户 IKI8HA 2026-09-24：L3 墙也要修）。
         返回 [(pos, level, ratio, is_weapon, target_level)]。
         """
         anchor = getattr(ctx, "layout_anchor", None)
@@ -784,15 +798,48 @@ class WorkerFSM:
         out: list = []
         for w in turn.walls():
             tgt = wall_target_level(w.pos, anchor, front)
+            maxhp = WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
+            ratio = w.health / maxhp
             if w.level < tgt:
-                maxhp = WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
-                out.append((w.pos, w.level, w.health / maxhp, False, tgt))
+                out.append((w.pos, w.level, ratio, False, tgt))
+            elif w.level >= 2 and ratio < CRITICAL_REPAIR_RATIO:
+                out.append((w.pos, w.level, ratio, False, w.level))   # 只能 WallFixer
         for w in turn.weapons():
             if w.kind == "rocket" and w.level < 3:   # 只升火箭（用户 2026-09-23）
                 maxhp = WEAPON_MAX_HP[min(max(w.level, 1), 3) - 1]
                 out.append((w.pos, w.level, w.health / maxhp, True, 3))
         out.sort(key=lambda t: (t[2], 1 if t[3] else 0, t[0].x, t[0].y))
         return out
+
+    def _critical_repair(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        """紧急抢修（用户 IKI8HA 2026-09-24）：墙血 < 35% 满血的 **L2+ 墙（含满级 L3）** 最优先。
+
+        用户："围墙已经 3 级了，不可以用升级券，就要降级用围墙修复包才对。"
+        → 有可升级的券先用券（升级=回满血且升一级），否则用 WallFixer；只从**内侧**接近。
+        """
+        cands: list = []
+        for w in turn.walls():
+            if w.level < 2:
+                continue   # L1 墙不用修复包（白天重建/用 Voucher1 升级即可）
+            maxhp = WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
+            ratio = w.health / maxhp
+            if ratio < CRITICAL_REPAIR_RATIO:
+                cands.append((ratio, w.pos, w.level))
+        if not cands:
+            return None
+        cands.sort(key=lambda c: (c[0], c[1].x, c[1].y))   # 不能直接比较 Pos（未定义排序）
+        for _ratio, pos, level in cands:
+            voucher = f"WallUpgradeVoucher{level}"
+            if voucher in unit.backpack:
+                item = voucher
+            elif "WallFixer" in unit.backpack:
+                item = "WallFixer"
+            else:
+                continue
+            cmd = self._go_use(turn, unit, ctx, item, pos, inside_only=True)
+            if cmd is not None:
+                return cmd
+        return None
 
     def _repair_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
         """夜间修复/升级（用户 2026-09-23 顺序）：

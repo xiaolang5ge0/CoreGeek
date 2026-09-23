@@ -202,14 +202,28 @@ class TestTreasureFramework(unittest.TestCase):
         cmd = tp.cmd(turn, pioneer, Pos(25, 20), ctx)
         self.assertIsNotNone(cmd)
         self.assertIn(cmd["action"], ("move", "buy"))
-        # 备齐祭品且在祭坛旁 → summonTreasure
+        # 备齐祭品且在祭坛旁 → summonTreasure（须到开启日：用户 2026-09-24）
         sim.role(PIONEER)["backpack"] = ["StarSand"]
         sim.role(PIONEER)["pos"] = {"x": 11, "y": 20}
+        sim.round_no = 261   # D3
         turn = Turn.load(sim.payload())
         pioneer = next(u for u in turn.ours if u.kind == "pioneer")
         cmd = tp.cmd(turn, pioneer, Pos(25, 20), ctx)
         self.assertEqual(cmd["action"], "summonTreasure")
         self.assertEqual(cmd["item"], ["StarSand"])
+
+    def test_cmd_waits_until_open_day(self):
+        """未到开启日 → 不召唤（用户 2026-09-24：回合数到了再尝试召唤）。"""
+        sim = make_sim(gold=100)
+        tp = TreasurePlanner()
+        tp.apply_llm('{"x": 12, "y": 20, "items": ["StarSand"], "day": 5, "ready": true}')
+        sim.role(PIONEER)["backpack"] = ["StarSand"]
+        sim.role(PIONEER)["pos"] = {"x": 11, "y": 20}
+        turn = Turn.load(sim.payload())   # D1 < day5
+        pioneer = next(u for u in turn.ours if u.kind == "pioneer")
+        ctx = _Ctx({})
+        ctx.reserved = set()
+        self.assertIsNone(tp.cmd(turn, pioneer, Pos(25, 20), ctx))
 
     def test_not_ready_no_action(self):
         sim = make_sim(gold=100)

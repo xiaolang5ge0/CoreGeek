@@ -153,6 +153,10 @@ class TreasurePlanner:
                 return buy_command(item, 1)
             step = step_toward(turn, pioneer, shop, ctx.reserved)
             return move_command(step) if step is not None else None
+        # 未到开启日 → 先不召唤/不前往（用户 2026-09-24："回合数到了再尝试召唤"）；
+        # 祭品可提前备好，白天回防回合由开拓者 FSM 的 must_return 预留。
+        if self.plan.day and turn.day_index < self.plan.day:
+            return None
         if distance(pioneer.pos, loc) <= 1:
             self.attempted = True
             return summon_treasure_command(loc, list(self.plan.items))
