@@ -207,5 +207,34 @@ class TestWallFixerDay3(unittest.TestCase):
         self.assertGreaterEqual(stock[0].qty, 3)
 
 
+class TestPioneerTaskTimeBudget(unittest.TestCase):
+    def test_task_not_abandoned_early(self):
+        """任务中只要还能赶回基地就不早退（margin=2）；余量不足才强制归位。"""
+        from agent.brain import _Ctx
+        from agent.fsm_pioneer import PioneerFSM, RETURN_MARGIN_TASK, STATE_TASK_WORK
+        sim = make_sim(gold=0)
+        brain = Brain()
+        brain.decide(sim.payload())
+        cp = brain.layout.control_point
+        sim.role(PIONEER)["pos"] = {"x": 20, "y": 20}
+        fsm = PioneerFSM()
+        fsm.state = STATE_TASK_WORK
+        fsm.task_point = Pos(20, 20)
+        ctx = _Ctx({})
+        ctx.reserved = set()
+        ctx.gunner_upgrade = None
+        # 距天黑 20 回合（远大于 归程+2）→ 不归位
+        sim.round_no = 51
+        turn = Turn.load(sim.payload())
+        fsm._day_cmd(turn, next(u for u in turn.ours if u.kind == "pioneer"), cp, ctx)
+        self.assertFalse(fsm.returning, "任务中且时间充裕时不应提前归位")
+        # 距天黑 2 回合 → 强制归位
+        sim.round_no = 69
+        turn = Turn.load(sim.payload())
+        fsm._day_cmd(turn, next(u for u in turn.ours if u.kind == "pioneer"), cp, ctx)
+        self.assertTrue(fsm.returning, "余量不足必须归位（保证能回基地）")
+        self.assertEqual(RETURN_MARGIN_TASK, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

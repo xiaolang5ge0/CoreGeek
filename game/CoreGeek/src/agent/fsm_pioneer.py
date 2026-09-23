@@ -35,6 +35,8 @@ STATE_WEAPON_BUY = "WEAPON_BUY"
 STATE_WEAPON_UPGRADE = "WEAPON_UPGRADE"
 
 DUSK_MARGIN = 5
+RETURN_MARGIN_TASK = 2   # 任务中归位余量（更紧：任务优先，只要还能赶回基地就不早退）
+EST_TASK_ROUNDS = 6      # 单任务预估耗时（接任务前时间预算用）
 WEAPON_L1_COST = 100
 WEAPON_L2_COST = 150
 
@@ -71,12 +73,15 @@ class PioneerFSM:
         # 仅在"任务已接取/进行中"时禁止插空升级；TASK_TRAVEL 途中仍可插空买券/用券
         # （用户：炮手做任务与买券升级互斥 → 需要任务间隙插空升级）
         in_task = self.state in (STATE_TASK_ACCEPT, STATE_TASK_WAIT_ACCEPT, STATE_TASK_WORK)
-        # 4. 入夜前回归 CP（时间敏感，优先于升级/任务；避免夜里还在外面）
-        #    **归位粘性**：一旦开始归位，不再因 travel 估算抖动而切回任务（修 IKHYSK 白天震荡）
+        # 4. 入夜前回归 CP（时间敏感；避免夜里还在外面）。
+        #    **时间预算**（用户 2026-09-23）：任务中只留 RETURN_MARGIN_TASK=2 余量（任务优先，不早退），
+        #    非任务用 DUSK_MARGIN=5；**保证能回**：travel 用 A* 实际路径，且余量不足时强制归位。
         travel = self._travel_rounds(turn, pioneer, cp, ctx)
         if turn.round_in_day == 0:
             self.returning = False       # 新的一天重置归位粘性
-        if self.returning or turn.rounds_until_night <= travel + DUSK_MARGIN:
+        margin = RETURN_MARGIN_TASK if in_task else DUSK_MARGIN
+        must_return = turn.rounds_until_night <= travel + margin
+        if self.returning or must_return:
             self.returning = True
             if self.state in (STATE_WEAPON_BUY, STATE_WEAPON_UPGRADE):
                 self.state = STATE_GUARD
@@ -194,6 +199,12 @@ class PioneerFSM:
                 if cmd is not None:
                     return cmd
                 return self.move_to_guard(turn, pioneer, cp, ctx)
+            # 时间预算：来不及"去任务点+做任务+回基地"则不接，避免开了又被迫放弃
+            if turn.is_day:
+                to_task = distance(pioneer.pos, target)
+                home = self._travel_rounds(turn, pioneer, cp, ctx)
+                if turn.rounds_until_night < to_task + EST_TASK_ROUNDS + home + RETURN_MARGIN_TASK:
+                    return self.move_to_guard(turn, pioneer, cp, ctx)
             self.task_point = target
             self.state = STATE_TASK_TRAVEL
         if self.state == STATE_TASK_TRAVEL:
