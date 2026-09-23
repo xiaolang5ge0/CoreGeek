@@ -60,10 +60,10 @@ STATE_CRITICAL = "CRITICAL_DEFENSE"
 # ---- 常量 ----
 STONE_BATCH = 6
 DUSK_URGENT_ROUNDS = 12
-SELL_NEAR_VENDOR_DIST = 3
-SELL_NEAR_MIN_VALUE = 8
-SELL_RICH_MIN_VALUE = 60    # 专程卖门槛（提高：多攒货再跑，摊薄往返；用户 2026-09-23 路线优化）
-SELL_RICH_MAX_DIST = 20
+SELL_NEAR_VENDOR_DIST = 4
+SELL_NEAR_MIN_VALUE = 6
+SELL_RICH_MIN_VALUE = 50    # 专程卖门槛（60→50，卖得更勤；用户 2026-09-23 资源效率）
+SELL_RICH_MAX_DIST = 24
 SELL_FULL_RATIO = 0.6
 STUCK_LIMIT = 5
 STUCK_COLLECT_LIMIT = 3
@@ -443,10 +443,9 @@ class WorkerFSM:
                 # 新闻囤货：被预测涨价的矿种优先级提高
                 boost = ctx.price_boost(kind) if hasattr(ctx, "price_boost") else 0.0
                 # 单位回合收益（含"矿→小贩"返程，用户 2026-09-23）：
-                #   rate = 一矿收益 / (去矿 + 矿→小贩 + 采集)，越高越好 → 取负号升序。
-                #   矿点越靠近小贩，卖货往返越短（修 IKHYTB 矿工 28 回合只为 50 金）。
+                #   rate = 一矿收益 / 往返；**加大去矿距离权重**（近矿优先，减少长途空跑，用户 2026-09-23）。
                 vendor_dist = min((distance(pos, v) for v in vendors), default=0)
-                rate = (price * 10.0 + boost) / (dist + vendor_dist + 10.0)
+                rate = (price * 10.0 + boost) / (1.7 * dist + vendor_dist + 6.0)
                 key = (-rate, our_dist * 0.1 + side, dist, pos.x, pos.y)
             if best is None or key < best_key:
                 best, best_key = pos, key

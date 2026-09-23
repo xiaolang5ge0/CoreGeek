@@ -222,5 +222,22 @@ class TestExcessStoneSell(unittest.TestCase):
         self.assertGreater(fsm._sellable_value(turn, unit, ctx), 0)
 
 
+class TestMineDistancePreference(unittest.TestCase):
+    def test_prefers_nearer_mine(self):
+        """资源效率：同价矿优先近矿（距离权重加大，减少长途）。"""
+        from agent.fsm_worker import WorkerFSM
+        sim = SimWorld(station_pos=(10, 24), mines={})
+        sim.add_mine((6, 22), "copper", remaining=200)   # 近
+        sim.add_mine((9, 12), "copper", remaining=200)   # 远
+        turn = Turn.load(sim.payload())
+        unit = next(u for u in turn.ours if u.unit_id == 10010)
+        fsm = WorkerFSM(10010)
+        ctx = _Ctx({})
+        ctx.reserved = set()
+        ctx.dusk_avoid = False
+        m = fsm._select_mine(turn, unit, ctx, prefer="money")
+        self.assertEqual(m, Pos(6, 22), "应选近矿 (6,22)")
+
+
 if __name__ == "__main__":
     unittest.main()

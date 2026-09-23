@@ -243,16 +243,18 @@ class UpgradePlanner:
             v, c = voucher_for("wall", wall.level)
             if v is not None:
                 add(v, c, wall.pos, "wall", 12)
-        # 1. 围墙修复包备货（用户：D3/D4/D5 预留 ≥3 应对夜间；D4+ 加量到 ≥4；D6+ ≥5；全满后更多）
-        #    **白天提前备足**（夜里买来不及）；优先级 11，保证先于其余升级。
+        # 1. 围墙修复包备货（用户 2026-09-23）：**白天提前备足**（夜里买来不及）。
+        #    D3 ≥3、D4 ≥5、D5 ≥6、D6+ ≥8（全满后 8）；优先级 11。
         if turn.day_index >= 3:
             l3_walls = [w for w in all_walls if w.level >= 3]
             if all_weapons_l3 and all_walls_l3:
                 desired = FIXER_STOCK_MAXED
             elif turn.day_index >= 6:
+                desired = min(FIXER_STOCK_MAXED, max(8, len(l3_walls)))
+            elif turn.day_index == 5:
+                desired = min(FIXER_STOCK_MAXED, max(6, len(l3_walls)))
+            elif turn.day_index == 4:
                 desired = min(FIXER_STOCK_MAXED, max(5, len(l3_walls)))
-            elif turn.day_index >= 4:
-                desired = min(FIXER_STOCK_MAXED, max(4, len(l3_walls)))
             else:
                 desired = min(FIXER_STOCK_MAX, max(3, len(l3_walls)))
             held = sum(
