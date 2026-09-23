@@ -740,9 +740,15 @@ class Brain:
             fsm.upgrade[0] for fsm in self.worker_fsms.values()
             if fsm.upgrade and hasattr(fsm.upgrade[0], "dump")
         }
-        for mission in self.upgrades.plan(
+        plan = list(self.upgrades.plan(
             turn, cp=layout.control_point, registry=self.wall_registry, front=self.front
-        ):
+        ))
+        # 开拓者做任务时（allow_weapon）：维修工**优先补位升级武器**（用户 2026-09-23：
+        # "开拓者在做任务，维修工应该去补位购买武器升级券升级武器，不能只靠开拓者"）
+        if allow_weapon:
+            plan = ([m for m in plan if m.kind == "weapon"]
+                    + [m for m in plan if m.kind != "weapon"])
+        for mission in plan:
             if mission.kind not in ("wall", "stock"):
                 if not (allow_weapon and mission.kind == "weapon"):
                     continue  # 武器/基地升级默认不派给工人（开拓者做任务时例外）

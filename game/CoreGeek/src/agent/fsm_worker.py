@@ -75,6 +75,7 @@ REPAIR_STONE_KEEP = 5       # 修理工常备石头（修墙用），低于此�
 RETURN_STICKY_DAY = 3       # D3+ 修理工回防粘性：一旦开始返回，跨昼夜持续到进墙
 RETURN_MARGIN = 6           # 矿工返程 deadline 余量（当前回合 + 归程 + 6 ≥ 白天/夜间截止）
 MINER_RETURN_DAY = 9        # 挖矿工从第 9 夜起才考虑夜间回防（用户 2026-09-23）
+MINER_NO_RETURN_DAY = 3     # 前 3 天完全不回防（激进挖矿，只躲机器人；用户 2026-09-23）
 
 
 class WorkerFSM:
@@ -277,8 +278,13 @@ class WorkerFSM:
             return cmd
         # 决策 D（用户 2026-09-23）：矿工整夜"安全"外采（仅第 9 夜起考虑回防）。
         # 旧"D6 原地待命"会在机器人在基地 6 格内时把矿工钉在基地旁整夜不采矿 → 已移除。
-        # D6：返程 deadline（白天入夜前回基地附近）；夜间默认不回防，仅第 9 夜起考虑
-        if (turn.is_day or turn.day_index >= MINER_RETURN_DAY) and self._past_return_deadline(turn, unit, ctx):
+        # 返程 deadline（用户 2026-09-23）：**前 3 天不回防**（激进挖矿，只躲机器人）；
+        # D4+ 白天入夜前回基地附近；夜间默认不回防，仅第 9 夜起考虑
+        if (
+            turn.day_index > MINER_NO_RETURN_DAY
+            and (turn.is_day or turn.day_index >= MINER_RETURN_DAY)
+            and self._past_return_deadline(turn, unit, ctx)
+        ):
             return self._go_home(
                 turn, unit, ctx,
                 getattr(ctx, "safe_anchor", None) or ctx.home_anchor,

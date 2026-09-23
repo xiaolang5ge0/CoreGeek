@@ -110,6 +110,17 @@ class PioneerFSM:
             if self.state == STATE_RETURN_HOME:
                 self.state = STATE_GUARD
                 self.upgrade_target = None
+        # 前 2 天（用户 2026-09-23）：**任务优先**，剩余时间买券升级；
+        # D3+：武器升级优先（任务间隙插空）。
+        if turn.day_index <= 2:
+            has_task = in_task or self._choose_task_point(turn, pioneer) is not None
+            if has_task:
+                return self._task_flow(turn, pioneer, cp, ctx)
+            if not in_task and self.state != STATE_RETURN_HOME:
+                cmd = self._weapon_upgrade_cmd(turn, pioneer, ctx)
+                if cmd is not None:
+                    return cmd
+            return self._task_flow(turn, pioneer, cp, ctx)
         # 2/3. 武器升级计划（买券 / 用券）——仅在未进行任务且非归位时
         if not in_task and self.state != STATE_RETURN_HOME:
             cmd = self._weapon_upgrade_cmd(turn, pioneer, ctx)
