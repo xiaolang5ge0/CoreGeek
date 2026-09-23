@@ -274,13 +274,24 @@ class UpgradePlanner:
             v, c = voucher_for("wall", wall.level)
             if v is not None:
                 add(v, c, wall.pos, "wall", 12)
-        # 3. L2 围墙（目标 ≥2 且当前 L1）—— **按掉血量**（最受损优先），不再按位置
+        # 3. L2 围墙（目标 ≥2 且当前 L1）—— 按掉血量（最受损优先）；优先级 15（L2炮台之后）
+        _side_l1 = [w for w in all_walls if w.level == 1 and target_level(w) >= 2]
         for wall in sorted(
-            [w for w in all_walls if w.level == 1 and target_level(w) >= 2],
+            _side_l1,
             key=lambda w: (ratio(w), rank(w), w.pos.x, w.pos.y),
         ):
             v, c = voucher_for("wall", 1)
             add(v, c, wall.pos, "wall", 15)
+        # 3b. **D7 起硬约束**（用户 2026-09-23）：侧面二级墙不得停在 L1（否则侧面易被攻破）
+        #     优先级 5（早于 L2 炮台 10），保证 D7 后补齐。
+        if turn.day_index >= 7:
+            for wall in sorted(
+                [w for w in all_walls if w.level == 1],
+                key=lambda w: (rank(w), ratio(w), w.pos.x, w.pos.y),
+            ):
+                v, c = voucher_for("wall", 1)
+                if v is not None:
+                    add(v, c, wall.pos, "wall", 5)
         # 4. L3 炮台（武器 L2→L3）
         for w in weapons:
             if w.level == 2:
