@@ -87,10 +87,10 @@ class TestTokenPlaceholderGuard(unittest.TestCase):
         self.assertIn("fc1e78eb2a5a", s.answer)
 
 
-class TestApiProbeRouting(unittest.TestCase):
-    def test_api_task_routes_to_probe(self):
-        """探索输出含 localhost API → 进入确定性 API 探测（不再让 LLM 盲目试认证/参数）。"""
-        from agent.planners.task import ST_API_PROBE
+class TestApiTaskRouting(unittest.TestCase):
+    def test_api_task_routes_to_llm_with_city(self):
+        """探索输出含 localhost API → 分类为 api 并交给 LLM（不再走确定性收割）。"""
+        from agent.planners.task import ST_LLM
         planner = TaskPlanner()
         s = TaskSession()
         s.task_text = "请阅读task_1_beijing.md，获取任务信息"
@@ -103,18 +103,23 @@ class TestApiProbeRouting(unittest.TestCase):
             "__DIR:/tmp/selfEvolutionTask/1-unknown-api\n"
         )
         planner._on_explore(s, explore)
-        self.assertEqual(s.stage, ST_API_PROBE)
-        self.assertEqual(s.city, "北京", "应从文件名拼音识别城市")
+        self.assertEqual(s.stage, ST_LLM, "API 类应交给 LLM")
+        self.assertEqual(s.task_type, "api")
+        self.assertEqual(s.city, "北京", "应从文件名拼音识别城市线索")
 
-    def test_api_probe_cmd_is_python_harvester(self):
+    def test_engineering_task_routes_to_probe(self):
+        """探索输出含 ws_*/check → 分类为 engineering（保留确定性探测）。"""
+        from agent.planners.task import ST_PROBE
         planner = TaskPlanner()
         s = TaskSession()
-        s.task_dir = "/tmp/selfEvolutionTask/1-unknown-api"
-        s.city = "北京"
-        cmd = planner._api_probe_cmd(s)
-        self.assertIn("python3", cmd)
-        self.assertIn("base64", cmd)
-        self.assertIn(s.task_dir, cmd)
+        s.task_text = "修复 ws_1 通过 ./check"
+        planner._on_explore(
+            s,
+            "[exitCode:0]\n__FILE:/tmp/x/ws_1/task.md\n=== FILE:/tmp/x/ws_1/spec.md ===\n"
+            "目录 logs 权限 755\n__DIR:/tmp/x\n",
+        )
+        self.assertEqual(s.stage, ST_PROBE)
+        self.assertEqual(s.task_type, "engineering")
 
 
 class TestPioneerNoOscillation(unittest.TestCase):

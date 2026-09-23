@@ -45,14 +45,11 @@ ENG_EXPLORE = (
     "目录 logs/alpha 权限 755\n"
     "__DIR:/tmp/selfEvolutionTask/2-engineering-fix\n"
 )
-API_PROBE_OK = (
-    "[exitCode:0]\n"
-    "API_OK base=http://localhost:8899 path=/api/v1/heritage/search auth=bearer "
-    "key=heritage-api-key-2024 param=location city=北京\n"
-    "COUNT 15\n"
-    "TOTAL 15\n"
-    '__ANSWER {"city": "北京", "total_count": 15, "world_heritage_count": 6, '
-    '"types": ["宫殿", "园林"], "oldest_era": "周口店遗址"}\n'
+API_RECORDS = (
+    '[exitCode:0]\n{"code":200,"data":{"records":['
+    '{"id":1,"name":"故宫","type":"古建筑"},'
+    '{"id":2,"name":"周口店遗址","type":"古遗址"}],'
+    '"pagination":{"total_count":2,"offset":0,"limit":10}}}\n'
 )
 ENG_PROBE_FAIL = (
     "[exitCode:0]\n"
@@ -64,6 +61,10 @@ ENG_PROBE_FAIL = (
 )
 ENG_PROBE_OK = "[exitCode:0]\n[ OK ] 全部通过 (6/6)\nTOKEN: fc1e78eb2a5a\n"
 API_ANSWER = '{"city":"北京","total_count":3,"world_heritage_count":1,"types":["古建筑","古遗址"]}'
+
+
+def llm_cmd(cmd):
+    return json.dumps({"cmd": cmd, "answer": "", "isFinished": False}, ensure_ascii=False)
 
 
 def llm_answer(ans):
@@ -78,38 +79,34 @@ def run_rounds(brain, sim, n):
 
 
 class TestApiTaskE2E(unittest.TestCase):
-    def test_api_task_probe_then_submit(self):
-        """API 类全确定性：探索 → 探测（__ANSWER）→ 直接提交，零 LLM。"""
+    def test_api_task_llm_curl_then_submit(self):
+        """API 类交给 LLM（issue IKI8DZ）：探索 → LLM 给 curl → 结果入 transcript → LLM 给答案 → 提交。"""
         captured = []
 
         def handler(cmd):
             captured.append(cmd)
             if "find /tmp/selfEvolutionTask" in cmd:
                 return API_EXPLORE
-            if "base64" in cmd and "python3" in cmd:   # API 确定性探测
-                return API_PROBE_OK
+            if "curl" in cmd:
+                return API_RECORDS
             return "[exitCode:0]\n"
 
-        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone"},
-                       tasks=[API_TASK], cmd_handler=handler,
-                       expected_answer="北京")
+        sim = SimWorld(
+            station_pos=(10, 24), mines={(6, 22): "stone"},
+            tasks=[API_TASK], cmd_handler=handler, expected_answer="北京",
+            llm_script=[
+                llm_cmd("curl 'http://localhost:8899/api/v1/heritage/search?location=北京'"),
+                llm_answer('{"city":"北京","total_count":2,"types":["古建筑","古遗址"]}'),
+            ],
+        )
         brain = Brain()
         run_rounds(brain, sim, DAY1)
-        self.assertTrue(any("base64" in c and "python3" in c for c in captured),
-                        "应触发 API 确定性探测")
+        self.assertTrue(sim.prompts_seen, "API 类应走 LLM（不再有确定性收割脚本）")
+        self.assertFalse(any("base64" in c for c in captured), "不得再执行 HARVEST 收割脚本")
+        self.assertTrue(any("curl" in c for c in captured), "应执行 LLM 给的 curl 命令")
         self.assertTrue(sim.submissions, "应提交答案")
         self.assertIn("北京", sim.submissions[0])
         self.assertGreaterEqual(sim.score, 80)
-        self.assertEqual(len(sim.prompts_seen), 0, "API 类应零 LLM")
-
-    def test_api_probe_cmd_has_python_fallback(self):
-        from agent.planners.task import TaskPlanner, TaskSession
-        s = TaskSession()
-        s.task_dir = "/tmp/x"
-        s.city = "北京"
-        cmd = TaskPlanner()._api_probe_cmd(s)
-        self.assertIn("python3", cmd)
-        self.assertIn("|| python ", cmd, "应有 python 兜底")
 
 
 class TestEngineerTaskE2E(unittest.TestCase):

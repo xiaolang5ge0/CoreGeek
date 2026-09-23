@@ -8,7 +8,7 @@
 | 项 | 状态 |
 |---|---|
 | 当前阶段 | **P0~P5 + 二十四轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
-| 测试 | **184/184 通过** |
+| 测试 | **228/228 通过** |
 | 打包 | `game/CoreGeek/dist/CoreGeek.tar.gz`（**tar 顶层 CoreGeek/ 目录**，平台父目录解包后运行 `<root>/CoreGeek/main3.py`） |
 | 代码 | `game/CoreGeek/`，Python ≥3.11 纯标准库 |
 | 当前行为 | Day1 双工人建满14墙+3火箭；夜1-3 双工人全力采矿卖钱（无蹲防）；开拓者单人控3炮；Day4+ 修墙岗（墙血<50%才修、正面优先、L3→WallFixer、L1/L2→升级券）；WallRegistry 追踪攻破/补建并优先重升级；武器优先升级；任务确定性+LLM兜底；选矿我方侧优先 |
@@ -24,8 +24,9 @@
 | P2 | 经济闭环（MineLock/卖货/看门狗） | ✅ | 三验收（不半路跑/不抢占/不打转） |
 | P3 | 单人夜防（火力轮转/致命优先/威胁估计） | ✅ | Night1 全歼基地满血；70只夜潮零伤 |
 | P4 | 中期升级（券任务链/修墙回血/封矿黑名单） | ✅ | 升级序武器优先；墙防跳级 |
-| P5 | 任务流（开拓者/LLM异步/沙盒异步/返程预算） | ✅ | 工程类零 LLM 完成；API 类 harvest 直采 |
+| P5 | 任务流（开拓者/LLM异步/沙盒异步/返程预算） | ✅ | 工程类确定性完成；**API 类已改 LLM 驱动（issue IKI8DZ，移除 harvest）** |
 | P5+ | 六轮实战修复（打包/墙向/夜经济/寻路/任务兜底） | ✅ | 100/100 tests；10天仿真 0 崩溃/基地存活/20任务零LLM |
+| P5++ | **自进化任务重构：LLM 驱动 + 上下文/家族经验（issue IKI8DZ）** | ✅ | 228/228 tests；transcript/分类/经验/分页提示/重算 全绿 |
 | P6 | 宝藏主线/Replay调参/3R对比实验 | ⬜ 剩余 | — |
 
 ## 实战修复记录（2026-09-21 首场 PK 后）
@@ -511,6 +512,24 @@
 - [x] M4：能做任务拿分的 Agent（P5）
 - [ ] M5：真实 PK 完成且 0 异常 ← 当前（已修复打包结构、墙向、夜经济、寻路、任务兜底；待实战验证）
 - [ ] M6：全要素（宝藏/调参/实验）竞争级 Agent（P6）
+
+## 实战修复记录·自进化任务重构（2026-09-23 issue IKI8DZ）
+
+> 用户要求：任务处理逻辑都交给 LLM；移除 HARVEST；保留健壮命令；API 任务"curl 不通返回指令、curl 通直接给答案"；
+> 每次 LLM 交互带上下文与历史经验；用 task_type 维护分类（关键词适度增加不误判）。详见 `STRATEGY_DECISIONS.md §七`。
+
+| 变更 | 内容 |
+|---|---|
+| 移除 HARVEST | 删除 `planners/_harvest_data.py`（base64 收割脚本）、`API_PROBE` 阶段、`_api_probe_cmd`、`__ANSWER` 组答、城市拼音驱动 |
+| API → LLM | `_on_explore` 分类为 api 后直接进 `LLM_LOOP`；LLM 返回 `cmd`（curl）或 `answer`（直接答案） |
+| transcript | 新增 `TaskSession.transcript`（`COMMAND:…/RESULT:…`，单条留 16k），注入 prompt 时按 30k 规则截断（前 12k+后 18k） |
+| 分类 | `_classify()`：engineering/api/general，强信号 1 分弱信号 0.5 分；补充 `127.0.0.1`/`http://`/`heritage`/`api_docs` 等关键词 |
+| 家族经验 | `learn_family_notes`：4xx 学认证/必传参数/不接受参数；`api_facts` 从 200 成功命令学认证头/参数名/路径 |
+| 分页 | `_pagination_note`：记录按 id 去重后 < total_count → prompt 提示继续取；`_recompute_api_answer`：取全后重算 types/total_count/world_heritage_count（仅覆盖已存在字段，受开关控制） |
+| 确定性直答 | `local_answer`：显式答案字段 / 白名单算术求值（零 LLM） |
+| 答案提取 | `TOKEN:`（工程）/ `FINAL_ANSWER: {json}`（通用）自动提交 |
+
+**新增测试**：`tests/test_task_llm_refactor.py`（22 项：分类/截断/local_answer/经验/分页/重算/FINAL_ANSWER/prompt 上下文/HARVEST 已移除）。
 
 ## 维护约定
 

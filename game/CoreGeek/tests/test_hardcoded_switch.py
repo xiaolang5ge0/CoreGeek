@@ -8,7 +8,7 @@ import _bootstrap  # noqa: F401
 
 from agent import config
 from agent.planners.task import (
-    ST_API_PROBE, ST_LLM, ST_PROBE, TaskPlanner, TaskSession,
+    ST_LLM, ST_PROBE, TaskPlanner, TaskSession,
 )
 
 
@@ -75,7 +75,9 @@ class TestHardcodedSwitch(unittest.TestCase):
         s.task_text = "请阅读task_1_beijing.md"
         s.target_name = "task_1_beijing.md"
         p._on_explore(s, API_EXPLORE)
-        self.assertEqual(s.stage, ST_API_PROBE, "开启时 API 类走硬编码探测")
+        # issue IKI8DZ：API 类已移除 HARVEST 硬编码，始终交给 LLM
+        self.assertEqual(s.stage, ST_LLM, "开启时 API 类也交给 LLM")
+        self.assertEqual(s.task_type, "api")
         s2 = TaskSession()
         s2.task_text = "修复 ws_1"
         p._on_explore(s2, ENG_EXPLORE)

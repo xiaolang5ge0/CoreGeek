@@ -244,3 +244,25 @@
 - 友伤回避惩罚（致贴脸哑火）
 - 跑敌方侧矿（被兵潮顺路打死）
 - 召唤令 PvP（首期）
+
+## 七、自进化任务重构（issue IKI8DZ，2026-09-23，用户要求）
+
+**基调**：任务处理**尽量交给 LLM**；只保留"健壮命令"与少量确定性兜底（开关 `config.HARDCODED_ASSIST`）。
+
+| # | 决策 | 说明 |
+|---|---|---|
+| T1 | **移除 HARVEST 硬编码** | 删除 `_harvest_data.py`（base64 API 收割脚本）、`API_PROBE` 阶段、`__ANSWER` 组答、城市拼音驱动。API 任务与工程任务一样**交给 LLM**。 |
+| T2 | **API 任务 = LLM 的"命令或答案"二选一** | LLM 能直接推断答案 → 返回 `answer`；curl 不通/信息不足 → 返回 `cmd`（curl），沙箱执行后结果进 transcript，下一轮继续。**"curl 通了就直接给答案，不通就给指令让我们去 curl"**。 |
+| T3 | **每次 LLM 交互都带上下文 + 历史经验** | prompt = 任务原文 + **transcript**（沙箱命令累积执行记录，30k 规则：前 12k + 后 18k + 中间省略标记；单条结果留末尾 16k）+ 同族 SOP + 家族经验笔记 + 跨任务 API 经验 + 上次判错原因 + 强制提交提示。 |
+| T4 | **task_type 分类**（api / engineering / general） | 按 transcript 关键词判定（强信号 1 分 / 弱信号 0.5 分，平手偏 engineering）；关键词**适度扩充不误判**。SOP/经验**按 task_type 固化**（跨城市复用，不按文件名）。 |
+| T5 | **保留健壮命令** | 单条探索（定位任务文件+读同目录 md/txt+列目录权限）、工程 `./check` 探测（去 CRLF+chmod）、`[FAIL] DIR/LINE` 确定性修复、`TOKEN:` / `FINAL_ANSWER:` 自动提取（均在开关下）。 |
+| T6 | **家族经验学习**（`learn_family_notes`） | 从 4xx 学"认证方式 / 必须传的参数 / 不接受的参数"，从 200 成功命令学认证头/参数名/路径；注入同族后续任务 prompt。 |
+| T7 | **分页完整性提示 + 提交前重算** | 从 transcript 解析已收割记录，**按 id 去重**后与 `total_count` 比对；不完整 → prompt 提示 LLM 用更大 offset 继续取（修 `9 != 7` 根因）。记录取全后，提交前用实际记录重算 `types`/`total_count`/`world_heritage_count`（防臆造/漏算，仅覆盖答案里已存在的字段）。 |
+| T8 | **零 LLM 确定性直答**（`local_answer`） | 任务文本含显式答案字段（`答案/answer : =`）或简单算术（`计算/求` + 白名单 ast 求值）→ 直接提交；占位符（xxx/TODO）拒绝。 |
+| T9 | **答案安全校验**（`plausible_answer`） | 空/全零/含 401·403·error·traceback/占位符 → 不提交，让 LLM 重试；被拒答案不重复提交。 |
+
+**稳定性约束（不变）**：命令预算（≤8 条，按 timeout 收紧）、任务超时（12 回合，剩 2 回合强制只给答案）、连续 3 次非 JSON 强制结束、提交被判错（errorCode=2）拉回 LLM 重试并喂入错误原因、异常回落合法空响应。
+
+**关键词表**（`task.py`）：
+- engineering 强：`./check`、`[FAIL]`、`[PASS]`、`spec.md`、`ws_`；弱：`chmod `、`mkdir `、`权限`
+- api 强：`localhost:`、`127.0.0.1`、`/api/`、`api_docs`、`x-api-key`、`bearer `；弱：`curl `、`pagination`、`total_count`、`authorization:`、`http://`、`https://`、`heritage`
