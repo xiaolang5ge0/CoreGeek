@@ -283,7 +283,25 @@ class WorkerFSM:
                 turn, unit, ctx,
                 getattr(ctx, "safe_anchor", None) or ctx.home_anchor,
             )
-        return self._mine_flow(turn, unit, ctx, prefer="money")
+        cmd = self._mine_flow(turn, unit, ctx, prefer="money")
+        if cmd is not None:
+            return cmd
+        # 兜底（IKI1T2：矿工 50 回合空转）：无可用矿（耗尽/被封/不安全）→
+        # 移动到**最近的矿点**待命（矿会刷新），而不是原地发呆；无矿则回基地附近。
+        mines = turn.mines()
+        if mines:
+            nearest = min(mines, key=lambda p: (distance(unit.pos, p), p.x, p.y))
+            if distance(unit.pos, nearest) > 1:
+                step = step_toward(turn, unit, nearest, ctx.reserved)
+                if step is not None:
+                    self.state = STATE_RETURN
+                    return self._move(step, ctx)
+            self.state = STATE_RETURN
+            return None  # 已在矿旁等待刷新
+        return self._go_home(
+            turn, unit, ctx,
+            getattr(ctx, "safe_anchor", None) or ctx.home_anchor,
+        )
 
     def _past_return_deadline(self, turn: Turn, unit: Unit, ctx) -> bool:
         """D6 返程 deadline：白天截止 70、夜间截止 130（round_in_day），留 RETURN_MARGIN 余量。"""
@@ -465,9 +483,10 @@ class WorkerFSM:
         for ore in MINE_TYPES:
             count = unit.backpack.count(ore)
             if ore == "stone":
-                if ctx.walls_left > 0:
-                    continue  # 墙料不外流
-                count = max(0, count - self._stone_keep())
+                # 只保留"够建剩余墙 + 常备 5"的石头，多余可卖（防背包被石头塞满，
+                # 导致没空间备 WallFixer/升级券 —— IKI1T4 根因）
+                keep = max(self._stone_keep(), ctx.walls_left)
+                count = max(0, count - keep)
             value += count * turn.vendor_prices.get(ore, 1)
         return value
 
@@ -496,9 +515,8 @@ class WorkerFSM:
         for ore in MINE_TYPES:
             count = unit.backpack.count(ore)
             if ore == "stone":
-                if ctx.walls_left > 0:
-                    continue
-                count = max(0, count - self._stone_keep())
+                keep = max(self._stone_keep(), ctx.walls_left)
+                count = max(0, count - keep)
             if count == 0:
                 continue
             value = count * turn.vendor_prices.get(ore, 1)

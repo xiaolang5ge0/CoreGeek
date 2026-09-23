@@ -201,5 +201,26 @@ class TestNightDamageRegistry(unittest.TestCase):
         self.assertEqual(reg.walls[Pos(12, 22)].night_damage, 0)
 
 
+class TestExcessStoneSell(unittest.TestCase):
+    def test_repairer_sells_excess_stone(self):
+        """修理工只保留 max(5, walls_left) 石头，多余可卖（防背包塞满没空间备 WallFixer，IKI1T4）。"""
+        from agent.fsm_worker import WorkerFSM, ROLE_REPAIRER
+        sim = SimWorld(station_pos=(10, 24), mines={})
+        sim.round_no = 261
+        sim.role(10010)["backpack"] = ["stone"] * 20
+        turn = Turn.load(sim.payload())
+        unit = next(u for u in turn.ours if u.unit_id == 10010)
+        fsm = WorkerFSM(10010)
+        fsm.role = ROLE_REPAIRER
+        ctx = _Ctx({})
+        ctx.reserved = set()
+        ctx.dusk_avoid = False
+        ctx.walls_left = 0
+        self.assertGreater(fsm._sellable_value(turn, unit, ctx), 0, "20 石头应可卖 15")
+        # 墙环未建完（walls_left=14）→ 保留 14，仍可卖 6
+        ctx.walls_left = 14
+        self.assertGreater(fsm._sellable_value(turn, unit, ctx), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
