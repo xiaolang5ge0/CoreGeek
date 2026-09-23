@@ -788,8 +788,13 @@ class Brain:
         # 开拓者做任务时（allow_weapon）：维修工**优先补位升级武器**（用户 2026-09-23：
         # "开拓者在做任务，维修工应该去补位购买武器升级券升级武器，不能只靠开拓者"）
         if allow_weapon:
-            plan = ([m for m in plan if m.kind == "weapon"]
-                    + [m for m in plan if m.kind != "weapon"])
+            # 顺序：**备货(stock, 如 WallFixer) 仍最前** → 武器券 → 其余（用户 2026-09-23：
+            # "每次到商店应全局审视还需要买什么"，不能把修复包挤到后面、来回走还买不成）
+            plan = (
+                [m for m in plan if m.kind == "stock"]
+                + [m for m in plan if m.kind == "weapon"]
+                + [m for m in plan if m.kind not in ("stock", "weapon")]
+            )
         for mission in plan:
             if mission.kind not in ("wall", "stock"):
                 if not (allow_weapon and mission.kind == "weapon"):

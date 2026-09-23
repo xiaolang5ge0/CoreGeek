@@ -63,11 +63,12 @@ STATE_CRITICAL = "CRITICAL_DEFENSE"
 # ---- 常量 ----
 STONE_BATCH = 6
 DUSK_URGENT_ROUNDS = 12
-SELL_NEAR_VENDOR_DIST = 4
-SELL_NEAR_MIN_VALUE = 6
-SELL_RICH_MIN_VALUE = 50    # 专程卖门槛（60→50，卖得更勤；用户 2026-09-23 资源效率）
-SELL_RICH_MAX_DIST = 24
-SELL_FULL_RATIO = 0.6
+SELL_NEAR_VENDOR_DIST = 2
+SELL_NEAR_MIN_VALUE = 30    # 路过小贩也要凑够一批再卖（用户 2026-09-23：别采一点就卖）
+SELL_RICH_MIN_VALUE = 150   # 专程卖门槛（用户 2026-09-23：屯够一大批再跑）
+SELL_RICH_MAX_DIST = 20
+SELL_FULL_RATIO = 0.85      # 背包近满才强制卖（约 30-40/容量；用户 2026-09-23 保险值）
+DAY_FORCE_SELL_ROUND = 50   # 白天到第 50 回合强制变现（入夜前清货；用户 2026-09-23）
 STUCK_LIMIT = 5
 STUCK_COLLECT_LIMIT = 3
 WORKER_DANGER_DIST = 3      # 机器人贴脸(≤)才规避；脱离 +2 恢复
@@ -516,8 +517,8 @@ class WorkerFSM:
             return True
         if self._batch_full(unit):
             return True
-        # 白天后半段主动卖货（IKHYD3：白天第 55 回合后）→ 保证入夜前变现（用户 2026-09-23）
-        if turn.is_day and turn.round_in_day >= 55:
+        # 白天后半段主动卖货（IKHYD3 / 用户 2026-09-23）：白天第 50 回合后 → 入夜前变现
+        if turn.is_day and turn.round_in_day >= DAY_FORCE_SELL_ROUND:
             return True
         dist = distance(unit.pos, vendor)
         if dist <= SELL_NEAR_VENDOR_DIST and value >= SELL_NEAR_MIN_VALUE:
