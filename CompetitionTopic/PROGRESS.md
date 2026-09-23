@@ -92,7 +92,7 @@
 
 | 问题 | 根因（实锤） | 修复 |
 |---|---|---|
-| **自进化任务 1 仍失败** | **答案键 = 默认页 records + `pagination.total_count`**：服务端期望 `types` 长度 = **默认页(10条)去重 type 数 = 7**；`total_count` = 分页元数据 = 15。**我上一轮"翻页拉全量"是错的**（15 条 → 9 types → `9 != 7`） | harvester **不再翻页**：records 用**默认页**、`total_count` 用 `total_of`（递归读 `data.pagination.total_count`） |
+| **自进化任务 1 仍失败** | **答案键 = 全量去重**（报错格式 `{期望} != {我方}`）：北京期望 **9**（全量 15 条去重）、我方 **7**（默认页 10 条）→ `9 != 7`；南京期望 **7**、我方 **6** → `7 != 6`。API 默认页仅 10 条 → **必须拉全量**（09-22 dpipe 用 `limit=200` 成功） | harvester **探测时主动带 `limit=200`**（`limit/pageSize/size` 兜底）拉全量；`total_count` 用 `total_of`（递归读 `data.pagination.total_count`） |
 | **挖矿工 D1 只采 6 铜就回防** | D1 白天 r49（48 回合）`_past_return_deadline` 触发 → RETURN_HOME（只采 6 铜） | 矿工**前 3 天完全不回防**（`MINER_NO_RETURN_DAY=3`）：激进挖矿，只躲机器人 |
 | **开拓者做任务时没人升武器** | r306-316 D3 白天 174 金、开拓者 TASK_WORK，维修工却挂着墙升级任务；武器 [R3,R2,R2] 无人升 L3 | `_assign_repair_mission(allow_weapon=...)`：开拓者做任务时，维修工**优先补位升级武器**（武器任务排最前） |
 | **开拓者前 2 天先升级后任务** | 原逻辑武器升级优先于任务 | **前 2 天任务优先**，剩余时间买券升级；D3+ 武器升级优先 |
