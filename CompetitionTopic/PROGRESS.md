@@ -654,6 +654,17 @@
 
 **新增测试**：`tests/test_issue_ikieec.py`（8 项）。
 
+## 实战修复记录·D10 修复包双持 + 道具回防使用（2026-09-24，IKIEMP）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 挖矿工 D10 买了 Bomb/DizzyWeapon 却整夜在外没用；修复包只维修工持有 |
+| 修复包 | D10 挖矿工自备 20 个；备货触发改为**按最少持有者**（防某工人为 0 被全局求和掩盖） |
+| 道具 | 夜间持道具 + 有目标 → **先回防到锚点附近再使用**（优先大型/BOSS）；到位即用（先于规避） |
+| 抢修 | D10 夜间持 WallFixer → 就近抢修 |
+
+**新增测试**：`tests/test_issue_ikieemp.py`（13 项，含端到端）。
+
 ## 维护约定
 - **事实**（RULE_ASSUMPTIONS）：实战证据到达即更新状态（UNKNOWN→CONFIRMED/CONFLICT），改代码前先查事实表。
 - **策略**（STRATEGY_DECISIONS）：与用户讨论的唯一入口；调参只改参数表；证据驱动流程 KEEP/REVERT/INCONCLUSIVE。

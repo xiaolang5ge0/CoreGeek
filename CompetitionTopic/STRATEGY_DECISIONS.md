@@ -457,6 +457,19 @@
 
 **新增测试**：`tests/test_issue_day10.py`（6 项）。
 
+### 十五·补（2026-09-24，IKIEMP 日志复盘）
+
+日志问题：挖矿工 D10 白天买了 `Bomb`/`DizzyWeapon`，但**整夜在外采矿从不使用**；修复包只有维修工持有。
+
+| 项 | 落地 |
+|---|---|
+| 修复包双持 | D10 **挖矿工也自备 20 个** `WallFixer`（`_day10_fixer_stock`），维修工同备 20；备货触发改为**按最少持有者**（`upgrade.py`），避免全局求和掩盖某工人为 0 |
+| 道具**回防后使用** | 夜间持 `Bomb`/`DizzyWeapon` + 场上有值得炸的目标 → `_day10_return` 先回防到锚点 ≤6 格，`_day10_use_item` 到位后使用（放在 `_evade_cmd` **之前**，否则被规避动作抢走） |
+| 就地抢修 | D10 夜间持 `WallFixer` → `_critical_repair`/`_wallfixer_repair`（防维修工卡位导致修墙不及时） |
+
+**新增测试**：`tests/test_issue_ikieemp.py`（13 项，含 D10 端到端）。
+**测试基建**：`harness.SHOP_LIST` 增加 `Bomb`/`DizzyWeapon`（各 100）与 3×3 结算。
+
 ## 十六、宝藏 Prompt 参考 IKIEEC 文档的加固（2026-09-24）
 
 参考文档：Gitee issue `IKIEEC`《宝藏 Prompt 构造详解》（长上下文任务：民间传闻 → 祭坛宝藏）。

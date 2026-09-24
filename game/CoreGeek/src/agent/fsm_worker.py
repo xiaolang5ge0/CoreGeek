@@ -15,6 +15,7 @@ from typing import Any
 
 from .path import find_path, next_step, step_toward
 from .planners.upgrade import (
+    FIXER_D10_PER_WORKER,
     FIXER_STOCK_MAX,
     FIXER_STOCK_MAXED,
     WALL_CORNER,
@@ -37,6 +38,7 @@ from .protocol import (
     Unit,
     WALL,
     WEAPON_MAX_HP,
+    best_item_target,
     build_command,
     buy_command,
     collect_command,
@@ -61,6 +63,7 @@ STATE_REPAIR = "NIGHT_REPAIR"
 STATE_UPGRADE = "UPGRADE"
 STATE_RETURN = "RETURN_HOME"
 STATE_CRITICAL = "CRITICAL_DEFENSE"
+STATE_ITEM = "USE_ITEM"
 
 # ---- 常量 ----
 STONE_BATCH = 6
@@ -89,6 +92,8 @@ CRITICAL_REPAIR_RATIO = 0.35
 # 范围炸弹/眩晕法宝（打大型机器人/BOSS，提高击杀效率）；必须为围墙修复包留足金币。
 DAY10_ITEM_DAY = 10
 DAY10_ITEM_MAX = 2          # 范围炸弹 / 眩晕法宝 各自最多持有
+DAY10_FIXER_TARGET = FIXER_D10_PER_WORKER   # D10 挖矿工也自备 20 个围墙修复包（用户 IKIEMP：与维修工各 20，防卡位）
+DAY10_DEFENSE_DIST = 6      # "已回防到位"判定：距回防锚点 ≤ 此值才用道具
 
 
 class WorkerFSM:
@@ -327,15 +332,35 @@ class WorkerFSM:
         ):
             self.state = STATE_BUILD
             return None  # 等 brain 派建墙单
+        # 第 10 天白天（用户 IKIEMP 2026-09-24）：挖矿工自备 20 个围墙修复包（与维修工各 20，防卡位）
+        cmd = self._day10_fixer_stock(turn, unit, ctx)
+        if cmd is not None:
+            return cmd
         # 第 10 天白天（用户 2026-09-24）：**修复包已保障**时，挖矿工到店买范围炸弹/眩晕法宝
         # （用于打大型机器人/BOSS）；必须为围墙修复包留足金币。
         cmd = self._day10_bomb_buy(turn, unit, ctx)
+        if cmd is not None:
+            return cmd
+        # 第 10 天夜间：回防到位即用炸弹/眩晕（先于规避，否则被 evade 抢走动作、道具永不使用）
+        cmd = self._day10_use_item(turn, unit, ctx)
         if cmd is not None:
             return cmd
         # 危险规避（粘性窗口，修 IKHZM0 横跳）
         cmd = self._evade_cmd(turn, unit, ctx)
         if cmd is not None or self._evading:
             return cmd
+        # 第 10 天夜间：持炸弹/眩晕 → 回防到锚点附近（不再整夜在外采矿，用户 IKIEMP）
+        cmd = self._day10_return(turn, unit, ctx)
+        if cmd is not None:
+            return cmd
+        # 第 10 天夜间：持围墙修复包 → 就近抢修（用户 IKIEMP：防维修工卡位导致修墙不及时）
+        if turn.is_night and turn.day_index >= DAY10_ITEM_DAY and "WallFixer" in unit.backpack:
+            cmd = self._critical_repair(turn, unit, ctx)
+            if cmd is None:
+                cmd = self._wallfixer_repair(turn, unit, ctx)
+            if cmd is not None:
+                ctx.note(self.unit_id, "day10_fixer_repair")
+                return cmd
         # 决策 D（用户 2026-09-23）：矿工整夜"安全"外采（仅第 9 夜起考虑回防）。
         # 旧"D6 原地待命"会在机器人在基地 6 格内时把矿工钉在基地旁整夜不采矿 → 已移除。
         # 返程 deadline（用户 2026-09-23）：**前 3 天不回防**（激进挖矿，只躲机器人）；
@@ -411,6 +436,78 @@ class WorkerFSM:
                 ctx.note(self.unit_id, "day10_buy_%s" % item)
                 return cmd
         return None
+
+    def _day10_fixer_stock(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        """第 10 天白天（用户 IKIEMP 2026-09-24）：**挖矿工也自备 20 个围墙修复包**。
+
+        目的：维修工被机器人/单位**卡位**时，矿工也能就近补修，避免围墙修复不及时。
+        金币约束：买完仍保留"买齐（全局）修复包缺口"的钱（`_wallfixer_reserve_gold`）。
+        """
+        if turn.is_night or turn.day_index < DAY10_ITEM_DAY:
+            return None
+        held = unit.backpack.count("WallFixer")
+        if held >= DAY10_FIXER_TARGET:
+            return None
+        price = turn.shop_prices.get("WallFixer", 10)
+        want = DAY10_FIXER_TARGET - held
+        if price > 0:
+            afford = max(0, (turn.gold - self._wallfixer_reserve_gold(turn)) // price)
+            want = min(want, afford)
+        if want <= 0:
+            return None
+        cmd = self._buy_item(turn, unit, ctx, "WallFixer", want)
+        if cmd is not None:
+            ctx.note(self.unit_id, "day10_buy_WallFixer")
+        return cmd
+
+    def _item_anchor(self, ctx) -> Pos | None:
+        return getattr(ctx, "safe_anchor", None) or ctx.home_anchor
+
+    def _day10_use_item(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        """第 10 天夜间：**回防到位后**用炸弹/眩晕砸最值钱的一簇（优先大型/BOSS）。
+
+        放在规避之前：否则靠近基地（机器人贴脸）时会被 `_evade_cmd` 抢走动作、道具永不使用。
+        """
+        if not turn.is_night or turn.day_index < DAY10_ITEM_DAY:
+            return None
+        item = next((i for i in unit.backpack if i in ("Bomb", "DizzyWeapon")), None)
+        if item is None:
+            return None
+        anchor = self._item_anchor(ctx)
+        if anchor is not None and distance(unit.pos, anchor) > DAY10_DEFENSE_DIST:
+            return None      # 未回防到位 → 交给 `_day10_return`
+        station = turn.station()
+        target = best_item_target(
+            [r for r in turn.robots if r.alive],
+            station.pos if station is not None else anchor,
+        )
+        if target is None:
+            return None
+        self.state = STATE_ITEM
+        ctx.note(self.unit_id, "day10_use_%s" % item)
+        return use_command(item, target)
+
+    def _day10_return(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        """第 10 天夜间：持炸弹/眩晕且场上有值得炸的目标 → **回防**到锚点附近待用。"""
+        if not turn.is_night or turn.day_index < DAY10_ITEM_DAY:
+            return None
+        if not any(i in unit.backpack for i in ("Bomb", "DizzyWeapon")):
+            return None
+        station = turn.station()
+        if best_item_target(
+            [r for r in turn.robots if r.alive],
+            station.pos if station is not None else None,
+        ) is None:
+            return None
+        anchor = self._item_anchor(ctx)
+        if anchor is None or distance(unit.pos, anchor) <= DAY10_DEFENSE_DIST:
+            return None
+        step = step_toward(turn, unit, anchor, ctx.reserved)
+        if step is None:
+            return None
+        self.state = STATE_RETURN
+        ctx.note(self.unit_id, "day10_item_return")
+        return self._move(step, ctx)
 
     # ================= 采矿+卖货 循环 =================
     def _mine_flow(self, turn: Turn, unit: Unit, ctx, *, prefer: str) -> dict[str, Any] | None:
