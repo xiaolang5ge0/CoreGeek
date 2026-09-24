@@ -97,4 +97,32 @@ class JointFirePlanner:
         ]
         if not picked:
             return (), 0
-        return [cell for _, cell in picked], picked[0][0]
+        score = picked[0][0]
+        cells = [cell for _, cell in picked]
+        # 接口文档（targetPos）：加特林/火箭"目标位置数与当前武器等级数相同" → **必须补足到 n_targets**。
+        # 否则服务端判指令不生效（实战：夜末只剩 1~2 只机器人时，炮台发 1~2 个目标 → 整夜不开火，
+        # 残兵撑到天亮）。补位用主目标的邻近格（AOE 顺带覆盖），再退化到射程内任意可站格。
+        if len(cells) < n_targets:
+            primary = cells[0]
+            cands = [
+                c for c in primary.neighbours()
+                if turn.land(c) and 1 <= distance(weapon.pos, c) <= reach and c not in cells
+            ]
+            cands.sort(key=lambda c: (distance(c, primary), c.x, c.y))
+            for c in cands:
+                if len(cells) >= n_targets:
+                    break
+                cells.append(c)
+            if len(cells) < n_targets:
+                for x in range(turn.width):
+                    if len(cells) >= n_targets:
+                        break
+                    for y in range(turn.height):
+                        if len(cells) >= n_targets:
+                            break
+                        c = Pos(x, y)
+                        if turn.land(c) and 1 <= distance(weapon.pos, c) <= reach and c not in cells:
+                            cells.append(c)
+            while len(cells) < n_targets:   # 兜底：重复主目标，保证个数合法
+                cells.append(primary)
+        return cells, score

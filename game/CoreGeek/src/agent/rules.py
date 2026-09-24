@@ -129,8 +129,8 @@ class LegalityGuard:
         targets = parse_targets(cmd.get("targetPos"))
         if not targets:
             return None
-        if expect is not None and not (1 <= len(targets) <= expect):
-            return None   # 允许 1..武器等级 个目标（只剩少量机器人时也能开火，用户 2026-09-23）
+        if expect is not None and len(targets) != expect:
+            return None   # 接口文档：加特林/火箭"目标位置数 = 当前武器等级"；电磁/移动 = 1
         for pos in targets:
             if not in_bounds(pos, self.turn.width, self.turn.height):
                 return None
