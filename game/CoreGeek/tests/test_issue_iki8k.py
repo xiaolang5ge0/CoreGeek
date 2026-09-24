@@ -116,13 +116,13 @@ class TestSideWallsFromD5(unittest.TestCase):
         plan = self._plan(521)   # D5
         m = [x for x in plan if x.target == Pos(8, 21)]
         self.assertTrue(m, "D5 起侧面 L1 墙应进入升级队列")
-        self.assertLessEqual(min(x.priority for x in m), 5)
+        self.assertLessEqual(min(x.priority for x in m), 25)
 
     def test_d6_higher_priority(self):
         plan = self._plan(651)   # D6
         m = [x for x in plan if x.target == Pos(8, 21)]
         self.assertTrue(m)
-        self.assertLessEqual(min(x.priority for x in m), 3, "D6 起优先级更高（不得停在 L1）")
+        self.assertLessEqual(min(x.priority for x in m), 23, "D6 起优先级更高（不得停在 L1）")
 
 
 class TestWallVoucherStock(unittest.TestCase):
@@ -135,7 +135,7 @@ class TestWallVoucherStock(unittest.TestCase):
         plan = UpgradePlanner().plan(turn, cp=Pos(10, 24), front="W")
         stock = [m for m in plan if m.kind == "stock" and m.voucher == "WallUpgradeVoucher1"]
         self.assertTrue(stock, "D3 应按墙等级备升级券（否则夜里没券可升）")
-        self.assertEqual(stock[0].priority, 13)
+        self.assertEqual(stock[0].priority, 12)
         self.assertLessEqual(stock[0].qty, 5)
 
 

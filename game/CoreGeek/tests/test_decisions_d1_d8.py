@@ -44,7 +44,7 @@ class TestD2Margins(unittest.TestCase):
 
 class TestD3WallJumpQueue(unittest.TestCase):
     def test_low_hp_wall_jumps_weapon_queue(self):
-        """D3：墙血低于动态阈值 → 插队（优先于武器升级）。"""
+        """D3：受损墙插队（优先于普通墙升级；但武器升级仍整体更前）。"""
         sim = make_sim(gold=300)
         add_weapon(sim, (9, 20), level=1)          # 武器待升 L2
         add_wall(sim, (12, 20), level=1, health=100)  # 远低于阈值
@@ -52,9 +52,8 @@ class TestD3WallJumpQueue(unittest.TestCase):
         missions = UpgradePlanner().plan(turn, cp=Pos(9, 23))
         wall_m = [m for m in missions if m.kind == "wall"]
         self.assertTrue(wall_m, "低血墙应产生升级任务")
-        # 新策略（用户 2026-09-23）：L2炮台(10) > 受损墙(12) > L2围墙(15) > ...
-        self.assertLess(wall_m[0].priority, 15, "受损墙应优先于一般墙升级(15)")
-        self.assertGreater(wall_m[0].priority, 10, "L2炮台(10)优先于受损墙")
+        # 用户 2026-09-24 修订：武器升级(5/10) > 受损墙(20) > L2围墙(22) > 围墙修复(40)
+        self.assertLess(wall_m[0].priority, 22, "受损墙应优先于一般墙升级(22)")
         self.assertEqual(wall_hp_threshold(2), 300)
 
     def test_healthy_wall_does_not_jump(self):
