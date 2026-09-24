@@ -44,7 +44,7 @@ class TestD2Margins(unittest.TestCase):
 
 class TestD3WallJumpQueue(unittest.TestCase):
     def test_low_hp_wall_jumps_weapon_queue(self):
-        """D3：受损墙插队（优先于普通墙升级；但武器升级仍整体更前）。"""
+        """D3：墙血低于动态阈值 → 插队（优先于武器升级）。"""
         sim = make_sim(gold=300)
         add_weapon(sim, (9, 20), level=1)          # 武器待升 L2
         add_wall(sim, (12, 20), level=1, health=100)  # 远低于阈值
@@ -52,8 +52,9 @@ class TestD3WallJumpQueue(unittest.TestCase):
         missions = UpgradePlanner().plan(turn, cp=Pos(9, 23))
         wall_m = [m for m in missions if m.kind == "wall"]
         self.assertTrue(wall_m, "低血墙应产生升级任务")
-        # 用户 2026-09-24 修订：武器升级(5/10) > 受损墙(20) > L2围墙(22) > 围墙修复(40)
-        self.assertLess(wall_m[0].priority, 22, "受损墙应优先于一般墙升级(22)")
+        # 新策略（用户 2026-09-23）：L2炮台(10) > 受损墙(12) > L2围墙(15) > ...
+        self.assertLess(wall_m[0].priority, 15, "受损墙应优先于一般墙升级(15)")
+        self.assertGreater(wall_m[0].priority, 10, "L2炮台(10)优先于受损墙")
         self.assertEqual(wall_hp_threshold(2), 300)
 
     def test_healthy_wall_does_not_jump(self):
@@ -131,7 +132,7 @@ class TestD8FixerStock(unittest.TestCase):
 
     def test_uncapped_when_all_maxed(self):
         sim = make_sim(gold=300)
-        sim.round_no = 521  # Day5（D1–D4 有 15 上限；D5 起恢复满备，用户 2026-09-24）
+        sim.round_no = 261  # Day3
         for pos in [(9, 20), (10, 20), (9, 21)]:
             add_weapon(sim, pos, level=3)
         for pos in [(12, 20), (12, 21)]:
@@ -140,27 +141,12 @@ class TestD8FixerStock(unittest.TestCase):
         missions = UpgradePlanner().plan(turn, cp=Pos(9, 23))
         stock = [m for m in missions if m.kind == "stock"]
         self.assertTrue(stock)
-        self.assertEqual(stock[0].qty, FIXER_STOCK_MAXED, "D5+ 全升满后不设上限")
-
-    def test_early_cap_15_before_d5(self):
-        """D1–D4 修复包上限 15（用户 2026-09-24：D3 囤 30 太多）。"""
-        from agent.planners.upgrade import FIXER_STOCK_EARLY
-        sim = make_sim(gold=300)
-        sim.round_no = 261  # Day3
-        for pos in [(9, 20), (10, 20), (9, 21)]:
-            add_weapon(sim, pos, level=3)
-        for pos in [(12, 20), (12, 21)]:
-            add_wall(sim, pos, level=3)
-        turn = Turn.load(sim.payload())
-        missions = UpgradePlanner().plan(turn, cp=Pos(9, 23))
-        stock = [m for m in missions if m.kind == "stock" and m.voucher == "WallFixer"]
-        self.assertTrue(stock)
-        self.assertEqual(stock[0].qty, FIXER_STOCK_EARLY, "D3 修复包上限应为 15")
+        self.assertEqual(stock[0].qty, FIXER_STOCK_MAXED, "全升满后不设上限")
 
 
 class TestD1RepairerNightHold(unittest.TestCase):
     def test_d3_night_holds_repair_post_until_robots_cleared(self):
-        """D1：D3+ 夜机器人在场时修理工回防就位（不外出采矿）。"""
+        """D1：D3+ 夜修理工守 repair_post；机器人清空后才外出采矿。"""
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (7, 26): "stone"})
         sim.add_mine((6, 22), "stone", remaining=120)
         sim.add_mine((7, 26), "stone", remaining=120)
@@ -170,21 +156,18 @@ class TestD1RepairerNightHold(unittest.TestCase):
             sim.apply(r)
             sim.advance()
         sim.round_no = 331  # Day3 夜
+        sim.spawn_robot(30, 20, "smallRobot", hp=40, rid=30900)  # 远处机器人（未清空）
         post = brain.layout.repair_post
-        reached = False
-        for _ in range(40):
-            # 保持有机器人（远处、高血量）→ 修理工应持续回防
-            sim.robots.clear()
-            sim.spawn_robot(30, 20, "smallRobot", hp=400, rid=30900)
+        held = False
+        for _ in range(30):
             response, trace = brain.decide(sim.payload())
             info = (trace.get("workers") or {}).get("10010") or {}
             pos = sim.role(10010)["pos"]
-            if max(abs(pos["x"] - post.x), abs(pos["y"] - post.y)) <= 1 \
-                    or info.get("state") == "RETURN_HOME":
-                reached = True
+            if max(abs(pos["x"] - post.x), abs(pos["y"] - post.y)) <= 1:
+                held = True
             sim.apply(response)
             sim.advance()
-        self.assertTrue(reached, "D3 夜机器人在场时修理工应回防就位（不外出采矿）")
+        self.assertTrue(held, "D3 夜修理工应就位 repair_post（守内圈）")
 
 
 class TestWallUpgradeOrder(unittest.TestCase):

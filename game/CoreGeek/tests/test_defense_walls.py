@@ -55,8 +55,8 @@ class TestFrontWallDeadlines(unittest.TestCase):
                     if m.kind == "wall" and m.voucher == "WallUpgradeVoucher1"
                     and wall_rank(m.target, anchor, "W") in (0, 1)]
         self.assertGreaterEqual(len(front_l2), 1, "应排正面墙 L2 任务")
-        # 硬约束（用户确认）：D5 入夜前目标正面墙 L3 未达标 → 正面墙优先级墙类最高(15)
-        self.assertEqual(min(m.priority for m in front_l2), 15)
+        # 硬约束（用户确认）：D5 入夜前目标正面墙 L3 未达标 → 正面墙优先级最高(1)
+        self.assertEqual(min(m.priority for m in front_l2), 1)
         self.assertGreaterEqual(FRONT_L2_TARGET, 5)
 
     def test_d5_front_l3_deadline(self):
@@ -73,13 +73,12 @@ class TestFrontWallDeadlines(unittest.TestCase):
                     if m.kind == "wall" and m.voucher == "WallUpgradeVoucher2"
                     and wall_rank(m.target, anchor, "W") in (0, 1)]
         self.assertGreaterEqual(len(front_l3), 1, "应排正面墙 L3（Voucher2）任务")
-        # 硬约束（用户确认）：D5 入夜前目标正面墙 L3 未达标 → 正面墙优先级墙类最高(15)
-        self.assertEqual(min(m.priority for m in front_l3), 15)
+        # 硬约束（用户确认）：D5 入夜前目标正面墙 L3 未达标 → 正面墙优先级最高(1)
+        self.assertEqual(min(m.priority for m in front_l3), 1)
         self.assertGreaterEqual(FRONT_L3_TARGET, 5)
 
     def test_weapon_l2_first_gate(self):
-        """武器未到 L2 时：**武器升级优先**（预算先给武器，并为其预留 100 金）；
-        有余钱时也允许备墙券（用户 2026-09-24：买完武器券仍有金币就该买墙券）。"""
+        """武器未到 L2 时，不得为墙券/墙死线花钱（金币充足时武器优先）。"""
         sim = make_sim(gold=400)
         sim.round_no = 261
         sim.roles.append(sim._role(73000, 9, 20, "rocket", 1000, level=1))  # 武器 L1
@@ -88,13 +87,10 @@ class TestFrontWallDeadlines(unittest.TestCase):
             sim.roles.append(sim._role(73100 + i, p.x, p.y, "wall", 1000, level=1))
         turn = Turn.load(sim.payload())
         missions = UpgradePlanner().plan(turn, cp=Pos(9, 23), front="W")
-        weapon = [m for m in missions if m.kind == "weapon"]
-        self.assertTrue(weapon, "应优先武器 L2")
-        stock = [m for m in missions
-                 if m.kind == "stock" and "WallUpgradeVoucher" in m.voucher]
-        if stock:
-            self.assertLess(min(m.priority for m in weapon), min(m.priority for m in stock),
-                            "武器升级应优先于墙券备货")
+        self.assertFalse([m for m in missions
+                          if m.kind == "stock" and "WallUpgradeVoucher" in m.voucher],
+                         "武器未 L2 时不得备货墙升级券")
+        self.assertTrue([m for m in missions if m.kind == "weapon"], "应优先武器 L2")
 
 
 class TestFrontVoucherStock(unittest.TestCase):

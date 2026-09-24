@@ -8,7 +8,7 @@
 | 项 | 状态 |
 |---|---|
 | 当前阶段 | **P0~P5 + 二十四轮实战修复完成；剩余 P6（宝藏/Replay/实验）与实战联调** |
-| 测试 | **281/281 通过** |
+| 测试 | **252/252 通过** |
 | 打包 | `game/CoreGeek/dist/CoreGeek.tar.gz`（**tar 顶层 CoreGeek/ 目录**，平台父目录解包后运行 `<root>/CoreGeek/main3.py`） |
 | 代码 | `game/CoreGeek/`，Python ≥3.11 纯标准库 |
 | 当前行为 | Day1 双工人建满14墙+3火箭；夜1-3 双工人全力采矿卖钱（无蹲防）；开拓者单人控3炮；Day4+ 修墙岗（墙血<50%才修、正面优先、L3→WallFixer、L1/L2→升级券）；WallRegistry 追踪攻破/补建并优先重升级；武器优先升级；任务确定性+LLM兜底；选矿我方侧优先 |
@@ -606,8 +606,20 @@
 
 **新增/更新测试**：`test_issue_ikiax.py` +2（自适应启动）、`test_defense_walls`/`test_issue_iki8k` 优先级断言更新。
 
-## 维护约定
+## ⚠️ 回滚记录：墙/武器/修复券策略回到 `f8c2811`（2026-09-24，用户决定）
 
+**用户判定**：`f8c2811` 是**稳定通关版本**，墙/武器/修复券策略均优秀；其后 6 个提交（`e698188`→`ce15e61`）
+对墙/工人/火力的改动**长期不通关**。故本次以 `f8c2811` 为基线，**只保留自进化任务 + 宝藏**的后续修复。
+
+- **回退到 f8c2811**：`src/agent/fsm_worker.py`、`src/agent/planners/upgrade.py`、`src/agent/fire.py`
+  （以及全部墙相关测试）。→ **`STRATEGY_DECISIONS.md §八~§十三中所有"围墙/工人/火力/经济"条目作废**。
+- **保留（后续修复）**：
+  - 任务：`task.py` API 合同（响应格式 + `offset` 翻页 + 禁止 `head -c` + `oldest_era` 年代序）；
+  - 宝藏：`treasure.py`（prompt 地图边界 + 召唤失败反馈/拒绝失败点）、`fsm_pioneer._treasure_ready`（门控放宽）、
+    `brain.py` 传地图尺寸。
+- **实现方式**：**新增 commit 回退**（不改写历史），保证之前的提交记录仍在。
+
+## 维护约定
 - **事实**（RULE_ASSUMPTIONS）：实战证据到达即更新状态（UNKNOWN→CONFIRMED/CONFLICT），改代码前先查事实表。
 - **策略**（STRATEGY_DECISIONS）：与用户讨论的唯一入口；调参只改参数表；证据驱动流程 KEEP/REVERT/INCONCLUSIVE。
 - **进度**（本文档）：每阶段闭环后刷新；遗留问题必须记账，不许口头遗忘。

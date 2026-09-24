@@ -15,9 +15,6 @@ from typing import Any
 
 from .path import find_path, next_step, step_toward
 from .planners.upgrade import (
-    FIXER_STOCK_EARLY,
-    FIXER_STOCK_MAX,
-    FIXER_STOCK_MAXED,
     WALL_CORNER,
     WALL_FRONT,
     WALL_MAX_HP,
@@ -71,8 +68,7 @@ SELL_NEAR_MIN_VALUE = 30    # 路过小贩也要凑够一批再卖（用户 2026
 SELL_RICH_MIN_VALUE = 150   # 专程卖门槛（用户 2026-09-23：屯够一大批再跑）
 SELL_RICH_MAX_DIST = 20
 SELL_FULL_RATIO = 0.85      # 背包近满才强制卖（约 30-40/容量；用户 2026-09-23 保险值）
-DAY_FORCE_SELL_ROUND = 45   # 白天到第 45 回合强制变现（入夜前清货；用户 2026-09-24：50→45 留足采购回合）
-DAY_LOGISTICS_ROUND = 45    # 白天第 45 回合起进入"后勤模式"：卖货变现 + 到店一次把缺口买齐（用户 IKIAXN）
+DAY_FORCE_SELL_ROUND = 50   # 白天到第 50 回合强制变现（入夜前清货；用户 2026-09-23）
 STUCK_LIMIT = 5
 STUCK_COLLECT_LIMIT = 3
 WORKER_DANGER_DIST = 3      # 机器人贴脸(≤)才规避；脱离 +2 恢复
@@ -87,9 +83,6 @@ MINER_NO_RETURN_DAY = 3     # 前 3 天完全不回防（激进挖矿，只躲�
 # 紧急抢修阈值（用户 IKI8HA 2026-09-24）：墙血 < 35% 满血 → 最优先抢修（**含满级 L3**：
 # L3 无法用升级券，必须降级用 WallFixer，否则修理工只升 L1/L2 墙、看着 L3 墙被打掉）
 CRITICAL_REPAIR_RATIO = 0.35
-# D1 入夜前紧急避让（用户 2026-09-24）：首日尚无出兵点记录 → 最后 3 回合往最近地图边缘走
-D1_EDGE_AVOID_ROUNDS = 3
-DUSK_CORRIDOR_RADIUS = 1    # 黄昏走出走廊的判定半径（贴着走廊格也算）
 
 
 class WorkerFSM:
@@ -110,7 +103,6 @@ class WorkerFSM:
         self.build_phase = False
         self.returning = False       # 回防粘性：D4+ 一旦开始返回，持续到进墙
         self.return_since = 0        # 开始返回的回合（防死循环兜底）
-        self._home_block_runs = 0    # 连续归位受阻回合（>10 才退化采矿，IKI9XF）
         self._pos_hist: list = []    # 最近位置历史（检测 A→B→A 两格震荡）
         self._turn = None            # 当前 turn（震荡逃生用）
         self._unit = None            # 当前 unit（震荡逃生用）
@@ -259,26 +251,10 @@ class WorkerFSM:
             robots_alive = bool(getattr(ctx, "robot_cells", ()))
             if turn.day_index >= RETURN_STICKY_DAY and robots_alive:
                 # D3+ 且机器人未清空 → 就位 repair_post 守内圈（用户：清空前不外出采矿）
-                cmd = self._go_home(turn, unit, ctx, anchor)
-                if cmd is not None:
-                    self._home_block_runs = 0
-                    return cmd
-                # 归位受阻：短暂受阻（被占/被堵）先等一回合（下一回合常自行恢复）；
-                # **连续受阻 > 10 回合**才退化为采矿/自救流程
-                # （IKI9XF：修理工整夜 RETURN_HOME 无指令、手里有修复包却站着不动，墙被攻破）
-                self._home_block_runs += 1
-                if self._home_block_runs <= 10:
-                    return None
-                ctx.note(self.unit_id, "home_blocked_fallthrough")
-            else:
-                self._home_block_runs = 0
+                return self._go_home(turn, unit, ctx, anchor)
             return self._miner(turn, unit, ctx)
         # 白天
         if turn.day_index <= 1:
-            # D1 入夜前 N 回合：紧急避让（尚不知出兵点 → 往最近地图边缘走，用户 2026-09-24）
-            cmd = self._d1_edge_avoid(turn, unit, ctx)
-            if cmd is not None:
-                return cmd
             # D1 全力石料 + 建墙
             return self._build_mine(turn, unit, ctx, prefer="stone")
         # D2+：建墙优先（无缺口）→ 采购 → 回防预留 → 采矿(铜/铁)
@@ -300,11 +276,6 @@ class WorkerFSM:
             self.state = STATE_BUILD
             return self._build_cmd(turn, unit, ctx)
         cmd = self._critical_repair(turn, unit, ctx)
-        if cmd is not None:
-            return cmd
-        # **后勤模式**（用户 IKIAXN 2026-09-24）：白天第 45 回合起，先卖货变现 → 到店把缺口一次买齐
-        # （墙券 V1/V2 + 修复包），不再"只买一样/被缺口挤掉不买"。
-        cmd = self._logistics(turn, unit, ctx)
         if cmd is not None:
             return cmd
         cmd = self._upgrade_flow(turn, unit, ctx, allow_use=True, allow_buy=True)
@@ -350,14 +321,6 @@ class WorkerFSM:
         ):
             self.state = STATE_BUILD
             return None  # 等 brain 派建墙单
-        # D1 入夜前紧急避让（尚不知出兵点 → 往最近地图边缘走，用户 2026-09-24）
-        cmd = self._d1_edge_avoid(turn, unit, ctx)
-        if cmd is not None:
-            return cmd
-        # 临近入夜：站在历史出兵走廊/出生点里 → 先走出来（用户 2026-09-24）
-        cmd = self._dusk_corridor_escape(turn, unit, ctx)
-        if cmd is not None:
-            return cmd
         # 危险规避（粘性窗口，修 IKHZM0 横跳）
         cmd = self._evade_cmd(turn, unit, ctx)
         if cmd is not None or self._evading:
@@ -405,89 +368,6 @@ class WorkerFSM:
         ret = len(path) - 1 if path else distance(unit.pos, anchor)
         return turn.round_in_day + ret + RETURN_MARGIN >= deadline
 
-    def _path_len(self, turn: Turn, unit: Unit, ctx, goal) -> int:
-        """到目标格的回合数（A* 实长；不可达则用切比雪夫距离兜底）。"""
-        if goal is None:
-            return 0
-        if unit.pos == goal:
-            return 0
-        path = find_path(turn, unit, goal, ctx.reserved)
-        return len(path) - 1 if path else distance(unit.pos, goal)
-
-    # ================= 白天后勤（卖货 + 一次买齐） =================
-    def _logistics(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        """白天后勤模式（用户 IKIAXN 2026-09-24）：**卖货变现 + 到店把缺口一次买齐**。
-
-        背景：D3/D4 金币充足却没买墙券/修复包（备货任务被"墙缺口/优先级"挤掉）→ 墙被攻破。
-        规则：
-        1. **预留回合**：不再固定"第 45 回合"——当 `距入夜 <= 到店 + 买齐 + 回防 + 余量` 时就启动
-           （商店远/路上远也能提前出发），同时保留"第 45 回合"作为最晚起点；
-        2. 背包有可卖矿 → 先卖（凑钱）；
-        3. 到商店按**缺口清单**买：墙券 V1/V2（按"当前等级 vs 目标等级"的**墙数量**定，不限死 5 张）
-           + WallFixer（D1–D4 ≤8 / D5+ ≤30）；**每回合买一样，直到买齐**（不买一类就走）；
-        4. 仍为武器升级预留金币（购买优先级 武器 > 围墙升级 > 围墙修复）。
-        """
-        if turn.is_night:
-            return None
-        needs = self._shopping_list(turn, unit, ctx)
-        if not needs:
-            return None
-        shop = self._nearest_shop(turn, unit)
-        if shop is None:
-            return None
-        home = getattr(ctx, "repair_anchor", None) or ctx.home_anchor
-        budget = (
-            self._path_len(turn, unit, ctx, shop) + len(needs)
-            + self._path_home_len(turn, unit, ctx, home) + 4
-        )
-        if turn.round_in_day < DAY_LOGISTICS_ROUND and turn.rounds_until_night > budget:
-            return None
-        # 1) 变现（凑钱）
-        if self._should_sell(turn, unit, ctx):
-            cmd = self._sell_chain(turn, unit, ctx, mandatory=False)
-            if cmd is not None:
-                ctx.note(self.unit_id, "logistics_sell")
-                return cmd
-        # 2) 买缺口（为武器升级预留金币：武器未 L2 时留 100）
-        reserve = WEAPON_L1_COST if any(w.level < 2 for w in turn.weapons()) else 0
-        for item, qty in needs:
-            price = turn.shop_prices.get(item, 10)
-            if turn.gold - price < reserve:
-                continue
-            cmd = self._buy_item(turn, unit, ctx, item, qty)
-            if cmd is not None:
-                ctx.note(self.unit_id, "logistics_buy_%s" % item)
-                return cmd
-        return None
-
-    def _shopping_list(self, turn: Turn, unit: Unit, ctx) -> list[tuple[str, int]]:
-        """后勤缺口清单 [(item, qty)]：按墙的当前等级 vs 目标差距 + 修复包缺口（用户 IKIAXN）。"""
-        anchor = getattr(ctx, "layout_anchor", None)
-        front = getattr(ctx, "layout_front", None)
-        room = max(0, (unit.capacity or 100) - len(unit.backpack))
-        out: list[tuple[str, int]] = []
-        # 墙升级券：缺口 = "当前该等级、且未达目标等级"的墙数量（不设固定上限）
-        for lvl, voucher in ((1, "WallUpgradeVoucher1"), (2, "WallUpgradeVoucher2")):
-            need = sum(
-                1 for w in turn.walls()
-                if w.level == lvl and w.level < wall_target_level(w.pos, anchor, front)
-            )
-            want = max(0, need - unit.backpack.count(voucher))
-            if want > 0 and room > 0:
-                q = min(want, room)
-                out.append((voucher, q))
-                room -= q
-        # 修复包：D1–D4 ≤8；D5+ ≤30（炮台全 L3 时）
-        weapons = turn.weapons()
-        all_l3 = bool(weapons) and all(w.level >= 3 for w in weapons)
-        desired = FIXER_STOCK_MAXED if all_l3 else FIXER_STOCK_MAX
-        if turn.day_index <= 4:
-            desired = min(desired, FIXER_STOCK_EARLY)
-        held_fix = unit.backpack.count("WallFixer")
-        if held_fix < desired and room > 0:
-            out.append(("WallFixer", min(desired - held_fix, room)))
-        return [(it, q) for it, q in out if q > 0]
-
     # ================= 采矿+卖货 循环 =================
     def _mine_flow(self, turn: Turn, unit: Unit, ctx, *, prefer: str) -> dict[str, Any] | None:
         # 背包满/批量阈值 → 卖
@@ -496,18 +376,6 @@ class WorkerFSM:
                 ctx.note(self.unit_id, "release_lock_batch_full")
                 self.mine = None
             return self._sell_chain(turn, unit, ctx, mandatory=True)
-        # 白天第 50 回合后强制变现（用户 2026-09-23）：**即使矿未采完也先卖**（入夜前清货）。
-        # 修 IKI9X2：此前只在 FREE 状态检查 `_should_sell` → 矿未采完时整段白天不卖，
-        # 金币枯竭（g=5）、修理工买不起修复包/墙券 → 墙一直不升级、D8 才升 L3。
-        if (
-            self.mine is not None
-            and turn.is_day
-            and turn.round_in_day >= DAY_FORCE_SELL_ROUND
-            and self._should_sell(turn, unit, ctx)
-        ):
-            ctx.note(self.unit_id, "force_sell_before_dusk")
-            self.mine = None
-            return self._sell_chain(turn, unit, ctx, mandatory=False)
         # 矿锁
         if self.mine is not None:
             # 矿锁与当前偏好不符（issue#26：修理工 Day1 建墙锁了石矿，入夜该采钱却仍走远石矿）
@@ -732,60 +600,6 @@ class WorkerFSM:
         return min(vendors, key=lambda v: (distance(unit.pos, v), v.x, v.y))
 
     # ---- 危险规避 ----
-    def _d1_edge_avoid(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        """D1 入夜前 N 回合的紧急避让（用户 2026-09-24）。
-
-        首日尚无出兵点记录（`ctx.spawn_cells` 为空）→ 无法避开走廊；退而求其次：
-        **往最近的地图边缘走**（边缘远离双方出兵/行军主线）。仅 D1 最后 N 回合生效；
-        入夜后由 spawn 记录 + 走廊绕行接管。
-        """
-        if turn.day_index != 1 or not (0 < turn.rounds_until_night <= D1_EDGE_AVOID_ROUNDS):
-            return None
-        edges: list[Pos] = []
-        for x in range(turn.width):
-            edges.append(Pos(x, 0))
-            edges.append(Pos(x, turn.height - 1))
-        for y in range(turn.height):
-            edges.append(Pos(0, y))
-            edges.append(Pos(turn.width - 1, y))
-        cands = [c for c in edges if turn.land(c) and c not in turn.blocked(unit)]
-        if not cands:
-            return None
-        goal = min(cands, key=lambda c: (distance(unit.pos, c), c.x, c.y))
-        if unit.pos == goal:
-            return None
-        step = next_step(turn, unit, goal, ctx.reserved) or next_step(turn, unit, goal)
-        if step is None:
-            return None
-        ctx.note(self.unit_id, "d1_edge_avoid")
-        return self._move(step, ctx)
-
-    def _dusk_corridor_escape(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        """临近入夜：若站在历史出兵走廊/出生点附近 → 先走出来（用户 2026-09-24）。
-
-        白天黄昏窗口生效（夜间由 `miner_avoid` 路径绕行处理）；朝基地/安全锚点走。
-        """
-        if turn.is_night or not getattr(ctx, "dusk_avoid", False):
-            return None
-        spawns = getattr(ctx, "spawn_cells", ())
-        corridor = getattr(ctx, "corridor_cells", ())
-        if not spawns and not corridor:
-            return None
-        inside = (
-            any(distance(unit.pos, c) <= DUSK_CORRIDOR_RADIUS for c in corridor)
-            or any(distance(unit.pos, c) <= DUSK_CORRIDOR_RADIUS for c in spawns)
-        )
-        if not inside:
-            return None
-        goal = getattr(ctx, "safe_anchor", None) or ctx.home_anchor
-        if goal is None:
-            return None
-        step = next_step(turn, unit, goal, ctx.reserved) or next_step(turn, unit, goal)
-        if step is None:
-            return None
-        ctx.note(self.unit_id, "dusk_corridor_escape")
-        return self._move(step, ctx)
-
     def _evade_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
         if not turn.is_night:
             self._evading = False
@@ -867,11 +681,6 @@ class WorkerFSM:
                 return None
             want = self._stock_qty(turn, unit, ctx, item, qty)
             if want <= 0:
-                # 买不起/没空间 → **清掉任务**，别死占修理工（IKI9X2 根因：备货任务卡死 318 回合，
-                # 阻断所有墙升级 → 墙一直停在 L1/L2、D8 才升 L3、被正面突破）。
-                # 规划器在金币不足时不会再下发该备货任务 → 修理工转而做墙升级。
-                self.upgrade = None
-                self.state = STATE_FREE
                 return None
             return self._buy_item(turn, unit, ctx, item, want)
         building = next(
@@ -892,8 +701,8 @@ class WorkerFSM:
             if not allow_buy:
                 return None  # 夜间不采购；留待白天买
             if turn.gold < cost:
-                # 金币不足 → **保留任务**（不清掉），由采矿/卖货筹钱后再买；
-                # 清任务会导致"每回合重派同一墙、永远完不成"（IKI9X2 复现）。
+                self.upgrade = None
+                self.state = STATE_FREE
                 return None
             want = self._voucher_qty(turn, unit, ctx, voucher, cost, kind)
             if want <= 0:
@@ -945,13 +754,7 @@ class WorkerFSM:
                 need = min(WALL_VOUCHER_BATCH, sum(1 for w in turn.walls() if w.level == lvl))
         else:
             need = sum(1 for w in turn.weapons() if w.level == lvl)
-        if kind == "wall":
-            # 墙券由**修理工自己**使用 → 只算自己持有，否则开拓者/他人身上的券会让修理工
-            # 以为"已有券"而不买、却用不了（IKI9XF：3 张券在别人身上、修理工干看着）
-            held = unit.backpack.count(voucher)
-        else:
-            # 武器券共享（开拓者代买/使用）→ 全局统计，避免重复购买
-            held = sum(u.backpack.count(voucher) for u in turn.ours)
+        held = sum(u.backpack.count(voucher) for u in turn.ours)   # **全局统计**（含开拓者/其他工人；用户 2026-09-23）
         want = max(0, need - held)
         if want <= 0:
             return 0
@@ -1009,15 +812,15 @@ class WorkerFSM:
         return out
 
     def _critical_repair(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        """紧急抢修（用户 IKI8HA/IKI9XF 2026-09-24）：墙血 < 35% 满血的最优先。
+        """紧急抢修（用户 IKI8HA 2026-09-24）：墙血 < 35% 满血的 **L2+ 墙（含满级 L3）** 最优先。
 
         用户："围墙已经 3 级了，不可以用升级券，就要降级用围墙修复包才对。"
-        以及 IKI9XF："身上 3 个升级券 + 25 个修复包却没使用 → 被兵潮攻破"。
         → 有可升级的券先用券（升级=回满血且升一级），否则用 WallFixer；只从**内侧**接近。
-        **含 L1 墙**（夜间无法重建，临界 L1 被打掉即缺口；修复包远便宜于被破后的损失）。
         """
         cands: list = []
         for w in turn.walls():
+            if w.level < 2:
+                continue   # L1 墙不用修复包（白天重建/用 Voucher1 升级即可）
             maxhp = WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
             ratio = w.health / maxhp
             if ratio < CRITICAL_REPAIR_RATIO:

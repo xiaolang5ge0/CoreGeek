@@ -51,7 +51,7 @@ class TestGapRebuild(unittest.TestCase):
 
 class TestWallFixerPriority(unittest.TestCase):
     def test_wallfixer_stock_before_upgrade(self):
-        """用户 2026-09-24 修订：**围墙升级 > 围墙修复** → 升级任务优先级高于修复包备货。"""
+        """IKHZM0：D3+ 必须先备围墙修复包(WallFixer)，再买围墙升级券/做升级任务。"""
         sim = SimWorld(station_pos=(10, 24), mines={})
         sim.round_no = 261  # Day3
         for i, pos in enumerate([(9, 20), (10, 20), (9, 21)]):
@@ -65,9 +65,9 @@ class TestWallFixerPriority(unittest.TestCase):
         self.assertGreaterEqual(fixer[0].qty, 3)
         wall_up = [m for m in missions if m.kind == "wall"]
         self.assertTrue(wall_up, "应有围墙升级任务")
-        self.assertGreater(
-            fixer[0].priority, max(m.priority for m in wall_up),
-            "围墙升级任务应优先于修复包备货（升级>修复）",
+        self.assertLess(
+            fixer[0].priority, min(m.priority for m in wall_up),
+            "修复包优先级必须高于围墙升级任务/券",
         )
 
 
@@ -149,10 +149,9 @@ class TestUpgradeOrder(unittest.TestCase):
         w2 = [m for m in ms if m.kind == "weapon" and m.voucher == "WeaponUpgradeVoucher2"]
         self.assertTrue(wall, "应有 L2 围墙任务")
         self.assertTrue(w2, "应有 L3 炮台任务")
-        # 用户 2026-09-24 修订：**武器升级 > 围墙升级** → L3 炮台先于 L2 围墙
         self.assertLess(
-            min(m.priority for m in w2), min(m.priority for m in wall),
-            "L3 炮台应优先于 L2 围墙（武器升级>围墙升级）",
+            min(m.priority for m in wall), min(m.priority for m in w2),
+            "L2 围墙应优先于 L3 炮台",
         )
 
     def test_wall_target_level(self):

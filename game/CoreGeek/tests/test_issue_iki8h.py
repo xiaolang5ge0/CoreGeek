@@ -113,13 +113,7 @@ class TestWallVoucherCap(unittest.TestCase):
                          "D4 前持券已达 15 → 不得再囤墙升级券")
 
     def test_stock_allowed_below_cap(self):
-        self.assertTrue(self._wall_stock(self._plan(2)), "未到上限应允许按需求备货")
-
-    def test_stock_target_is_five(self):
-        """用户 2026-09-24：经济允许时最多持有 5 张（按墙等级买对应券）。"""
-        stock = self._wall_stock(self._plan(0))
-        self.assertTrue(stock)
-        self.assertLessEqual(stock[0].qty, 5)
+        self.assertTrue(self._wall_stock(self._plan(5)), "未到上限应允许按需求备货")
 
 
 class TestCriticalRepair(unittest.TestCase):

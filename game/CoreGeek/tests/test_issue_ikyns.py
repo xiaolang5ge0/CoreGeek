@@ -42,7 +42,7 @@ class TestThreatEmptyDefense(unittest.TestCase):
 class TestWallVoucher2Jump(unittest.TestCase):
     def test_l2_damaged_wall_gets_voucher2(self):
         """正面 L2 墙低于阈值 → Voucher2（升 L3 回血）。"""
-        sim = make_sim(gold=1000)
+        sim = make_sim(gold=200)
         sim.round_no = 261
         for pos in [(9, 20), (10, 20), (9, 21)]:
             sim.roles.append(sim._role(62000 + len(sim.weapons()), pos[0], pos[1], "rocket", 1500, level=2))
@@ -52,8 +52,8 @@ class TestWallVoucher2Jump(unittest.TestCase):
         missions = UpgradePlanner().plan(turn, cp=Pos(9, 23), front="W")
         w2 = [m for m in missions if m.kind == "wall" and m.voucher == "WallUpgradeVoucher2"]
         self.assertTrue(w2, "L2 受损墙应产生 Voucher2 升级任务")
-        # 用户 2026-09-24：受损墙优先级 20（正面15/拐角18 之后、侧面22 之前）
-        self.assertLess(w2[0].priority, 22, "受损墙应优先于一般墙升级(22)")
+        # 新策略：受损墙优先级 12（L2炮台10 之后、L2围墙15 之前）
+        self.assertLess(w2[0].priority, 15, "受损墙应优先于一般墙升级(15)")
 
 
 class TestD4FixerStock(unittest.TestCase):

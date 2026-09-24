@@ -50,12 +50,12 @@ class TestPioneerRecover(unittest.TestCase):
 
 class TestWallFixerAboveUpgrade(unittest.TestCase):
     def test_wallfixer_priority_above_wall_upgrade(self):
-        """用户 2026-09-24 修订：**围墙升级 > 围墙修复** → 升级任务优先于修复包备货。"""
+        """IKI0RT：D4 修理工必须先备围墙修复包，再买升级券/做升级任务。"""
         sim = SimWorld(station_pos=(10, 24), mines={})
         sim.round_no = 391          # Day4
         for i, pos in enumerate([(9, 20), (10, 20), (9, 21)]):
             sim.roles.append(sim._role(90000 + i, pos[0], pos[1], "rocket", 1500, level=2))
-        # 目标 L2 的墙（front='W' → dx=2 中间）保持 L1 → 产生 L2 围墙任务
+        # 目标 L2 的墙（front='W' → dx=2 中间）保持 L1 → 产生 L2 围墙任务(15)
         for i, pos in enumerate([(12, 22), (12, 23), (12, 24), (12, 25)]):
             sim.roles.append(sim._role(91000 + i, pos[0], pos[1], "wall", 1000, level=1))
         sim.gold = 700
@@ -65,9 +65,9 @@ class TestWallFixerAboveUpgrade(unittest.TestCase):
         wall = [m for m in ms if m.kind == "wall"]
         self.assertTrue(fixer)
         self.assertTrue(wall)
-        self.assertGreater(
-            fixer[0].priority, max(m.priority for m in wall),
-            "围墙升级任务应优先于修复包备货（升级>修复）",
+        self.assertLess(
+            fixer[0].priority, min(m.priority for m in wall),
+            "修复包优先级必须高于围墙升级任务",
         )
 
 

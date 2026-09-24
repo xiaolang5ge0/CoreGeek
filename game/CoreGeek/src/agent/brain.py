@@ -782,8 +782,16 @@ class Brain:
         plan = list(self.upgrades.plan(
             turn, cp=layout.control_point, registry=self.wall_registry, front=self.front
         ))
-        # 用户 2026-09-24 修订：**"围墙升级 > 围墙修复"** → 备货(stock)不再抢占墙升级任务，
-        # 备货优先级已降到 40（墙升级 15~28 之后），自然只在墙升级都排完时才轮到。
+        # **备货(stock)可抢占墙升级(wall)**（用户 2026-09-23）：修复包是夜间防御前提，
+        # 不能被上一回合领的"墙升级券任务"一直挡住（IKI7VH：D3 的 WallFixer 被 D2 的旧任务饿死）。
+        top_stock = next((m for m in plan if m.kind == "stock"), None)
+        if (
+            rfsm.upgrade is not None
+            and rfsm.build is None
+            and top_stock is not None
+            and rfsm.upgrade[1] == "wall"
+        ):
+            rfsm.upgrade = None   # 允许备货抢占
         if rfsm.upgrade is not None or rfsm.build is not None:
             return
         taken_targets = {
