@@ -83,6 +83,7 @@ MINER_NO_RETURN_DAY = 3     # 前 3 天完全不回防（激进挖矿，只躲�
 # 紧急抢修阈值（用户 IKI8HA 2026-09-24）：墙血 < 35% 满血 → 最优先抢修（**含满级 L3**：
 # L3 无法用升级券，必须降级用 WallFixer，否则修理工只升 L1/L2 墙、看着 L3 墙被打掉）
 CRITICAL_REPAIR_RATIO = 0.35
+DUSK_CORRIDOR_RADIUS = 1    # 黄昏走出出兵走廊的判定半径（贴着走廊格也算；用户 2026-09-24）
 
 
 class WorkerFSM:
@@ -321,6 +322,10 @@ class WorkerFSM:
         ):
             self.state = STATE_BUILD
             return None  # 等 brain 派建墙单
+        # 临近入夜：站在历史出兵走廊/出生点里 → 先走出来（用户 2026-09-24）
+        cmd = self._dusk_corridor_escape(turn, unit, ctx)
+        if cmd is not None:
+            return cmd
         # 危险规避（粘性窗口，修 IKHZM0 横跳）
         cmd = self._evade_cmd(turn, unit, ctx)
         if cmd is not None or self._evading:
@@ -600,6 +605,32 @@ class WorkerFSM:
         return min(vendors, key=lambda v: (distance(unit.pos, v), v.x, v.y))
 
     # ---- 危险规避 ----
+    def _dusk_corridor_escape(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
+        """临近入夜：若站在历史出兵走廊/出生点附近 → 先走出来（用户 2026-09-24）。
+
+        白天黄昏窗口生效（夜间由 `miner_avoid` 路径绕行处理）；朝基地/安全锚点走。
+        """
+        if turn.is_night or not getattr(ctx, "dusk_avoid", False):
+            return None
+        spawns = getattr(ctx, "spawn_cells", ())
+        corridor = getattr(ctx, "corridor_cells", ())
+        if not spawns and not corridor:
+            return None
+        inside = (
+            any(distance(unit.pos, c) <= DUSK_CORRIDOR_RADIUS for c in corridor)
+            or any(distance(unit.pos, c) <= DUSK_CORRIDOR_RADIUS for c in spawns)
+        )
+        if not inside:
+            return None
+        goal = getattr(ctx, "safe_anchor", None) or ctx.home_anchor
+        if goal is None:
+            return None
+        step = next_step(turn, unit, goal, ctx.reserved) or next_step(turn, unit, goal)
+        if step is None:
+            return None
+        ctx.note(self.unit_id, "dusk_corridor_escape")
+        return self._move(step, ctx)
+
     def _evade_cmd(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
         if not turn.is_night:
             self._evading = False
@@ -681,6 +712,10 @@ class WorkerFSM:
                 return None
             want = self._stock_qty(turn, unit, ctx, item, qty)
             if want <= 0:
+                # 买不起/没空间 → **清掉任务**，别死占修理工（IKI9X2：备货任务卡死 318 回合，
+                # 阻断所有墙升级）。规划器金币不足时不会再下发该备货任务 → 修理工转做墙升级。
+                self.upgrade = None
+                self.state = STATE_FREE
                 return None
             return self._buy_item(turn, unit, ctx, item, want)
         building = next(
@@ -701,8 +736,8 @@ class WorkerFSM:
             if not allow_buy:
                 return None  # 夜间不采购；留待白天买
             if turn.gold < cost:
-                self.upgrade = None
-                self.state = STATE_FREE
+                # 金币不足 → **保留任务**（不清掉），由采矿/卖货筹钱后再买；
+                # 清任务会导致"每回合重派同一墙、永远完不成"（IKI9X2 复现）。
                 return None
             want = self._voucher_qty(turn, unit, ctx, voucher, cost, kind)
             if want <= 0:
@@ -754,7 +789,13 @@ class WorkerFSM:
                 need = min(WALL_VOUCHER_BATCH, sum(1 for w in turn.walls() if w.level == lvl))
         else:
             need = sum(1 for w in turn.weapons() if w.level == lvl)
-        held = sum(u.backpack.count(voucher) for u in turn.ours)   # **全局统计**（含开拓者/其他工人；用户 2026-09-23）
+        if kind == "wall":
+            # 墙券由**修理工自己**使用 → 只算自己持有，否则开拓者/他人身上的券会让修理工
+            # 以为"已有券"而不买、却用不了（IKI9XF：3 张券在别人身上、修理工干看着）
+            held = unit.backpack.count(voucher)
+        else:
+            # 武器券共享（开拓者代买/使用）→ 全局统计，避免重复购买
+            held = sum(u.backpack.count(voucher) for u in turn.ours)
         want = max(0, need - held)
         if want <= 0:
             return 0
