@@ -23,6 +23,16 @@ class TestTreasurePromptBounds(unittest.TestCase):
         self.assertIn("[0,40]", text)
         self.assertIn("[0,31]", text)
 
+    def test_prompt_has_direction_guide(self):
+        """方位词换算 + 石门=召唤点 + reason 字段（帮助 LLM 从传闻推坐标）。"""
+        p = TreasurePlanner()
+        p.observe("西部有一石门，门需三钥")
+        text = p.prompt(41, 32)
+        self.assertIn("方位词换算", text)
+        self.assertIn("西部", text)
+        self.assertIn("石门", text)
+        self.assertIn("reason", text)
+
 
 class TestApiContract(unittest.TestCase):
     def test_contract_has_era_order_and_no_head(self):
