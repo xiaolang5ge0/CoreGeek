@@ -58,6 +58,7 @@ class TreasurePlanner:
         self.plan = TreasurePlan()
         self.attempted = False
         self._last_infer_len = 0   # 上次推断时的线索条数（新线索到来才再问 LLM，用户 2026-09-23）
+        self.failed_sites: list[tuple[int, int]] = []   # 召唤失败过的坐标（结果 2/3，需换地点重推）
 
     # ---- 线索累积 ----
     def observe(self, folk: str) -> bool:
@@ -71,6 +72,9 @@ class TreasurePlanner:
         """记录"已就当前线索问过 LLM"，避免同一批线索反复提问。"""
         self._last_infer_len = len(self.legends)
 
+    def is_failed_site(self, pos: Pos | None) -> bool:
+        return pos is not None and (pos.x, pos.y) in self.failed_sites
+
     def needs_inference(self) -> bool:
         # 有新线索（条数增加）且计划未 ready → 再问 LLM（用户 2026-09-23：不是一次不成就放弃）
         return (
@@ -82,14 +86,24 @@ class TreasurePlanner:
 
     # ---- LLM 推断 ----
     def prompt(self, width: int = 41, height: int = 32) -> str:
-        return (
-            "=== 民间传闻（逐日累积）===\n" + "\n".join(self.legends[-12:]) +
+        parts = [
+            "=== 民间传闻（逐日累积）===\n" + "\n".join(self.legends[-12:]),
+        ]
+        if self.failed_sites:
+            # 失败反馈（用户 IKIAE6 2026-09-24：召唤结果 2 = 地点/祭品不对）→ 换新地点重推
+            bad = "、".join("(%d,%d)" % p for p in self.failed_sites[-5:])
+            parts.append(
+                f"=== 失败反馈 ===\n以下坐标已尝试召唤但**失败**：{bad}。"
+                "请结合传闻**重新推断**，不要重复给出这些坐标。"
+            )
+        parts.append(
             "\n请据线索推断宝藏：祭坛坐标(x,y)、需献祭的任务用品(英文名)、开启天数。"
             f"地图为 {width}×{height}，坐标范围 x∈[0,{width - 1}]、y∈[0,{height - 1}]"
             "（越界坐标会被直接丢弃，务必给出界内整数）。"
             '只返回 JSON：{"x":<int>,"y":<int>,"items":["AcientTablet",...],"day":<int>,"ready":<bool>}。'
             "信息不足时 ready=false。可用用品：" + ", ".join(TREASURE_ITEMS)
         )
+        return "\n".join(parts)
 
     def apply_llm(self, response: str) -> bool:
         obj = None
@@ -123,16 +137,25 @@ class TreasurePlanner:
         if not (1 <= day <= 10):
             return False
         ready = bool(obj.get("ready"))
+        # 已失败过的坐标不再接受（用户 IKIAE6：结果 2 = 地点不对 → 必须换地点）
+        if (x, y) in self.failed_sites:
+            return False
         self.plan = TreasurePlan(Pos(x, y), items, day, ready, (response or "")[:200])
         return True
 
     def on_summon_result(self, code: int) -> None:
-        """召唤结果（策略书 §8.4）：1/4=完成不再尝试；2/3=失败→丢弃计划待新传闻重推。"""
+        """召唤结果（策略书 §8.4）：1/4=完成不再尝试；2/3=失败→记录失败点并**立即用全部传闻重推**。"""
         if code in (1, 4):
             self.attempted = True
         elif code in (2, 3):
+            if self.plan.location is not None:
+                site = (self.plan.location.x, self.plan.location.y)
+                if site not in self.failed_sites:
+                    self.failed_sites.append(site)
             self.plan = TreasurePlan()
             self.attempted = False
+            # **立即重推**（不等新传闻）：把累计传闻 + 失败反馈一起再问 LLM
+            self._last_infer_len = 0
 
     def record_attempt(self) -> None:
         self.attempted = True
@@ -143,6 +166,9 @@ class TreasurePlanner:
         if not self.plan.ready or self.attempted or self.plan.location is None:
             return None
         loc = self.plan.location
+        if self.is_failed_site(loc):     # 已失败过的坐标不再尝试（防重复空耗）
+            self.plan = TreasurePlan()
+            return None
         missing = [it for it in self.plan.items if it not in pioneer.backpack]
         if missing:
             if shop is None:
