@@ -641,6 +641,19 @@
 
 **新增测试**：`tests/test_issue_day10.py`（6 项）。
 
+## 实战修复记录·宝藏 Prompt 参考 IKIEEC（2026-09-24）
+
+| 项 | 内容 |
+|---|---|
+| 全量传闻 | `prompt()` 注入 `self.legends` 全量（原截断 12 条） |
+| 计划校验 | `apply_llm(resp, current_day)`：**开启日不得早于当前天数**，否则丢弃重推 |
+| 执行提前量 | `cmd()`：开启日**前 1 天**开始移动，开启日当天召唤 |
+| 提示当前天 | `prompt(width, height, day)` 写明当前天数 |
+| 日志可读 | LLM 输出 **`reason` 放 JSON 最后**（原在最前，400 字截断吃掉坐标） |
+| 方位单句 | 只取与『石门/石殿/祭坛』**同句**方位；渡口等方位为**干扰** |
+
+**新增测试**：`tests/test_issue_ikieec.py`（8 项）。
+
 ## 维护约定
 - **事实**（RULE_ASSUMPTIONS）：实战证据到达即更新状态（UNKNOWN→CONFIRMED/CONFLICT），改代码前先查事实表。
 - **策略**（STRATEGY_DECISIONS）：与用户讨论的唯一入口；调参只改参数表；证据驱动流程 KEEP/REVERT/INCONCLUSIVE。

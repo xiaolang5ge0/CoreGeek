@@ -85,9 +85,9 @@ class TreasurePlanner:
         )
 
     # ---- LLM 推断 ----
-    def prompt(self, width: int = 41, height: int = 32) -> str:
+    def prompt(self, width: int = 41, height: int = 32, day: int = 1) -> str:
         parts = [
-            "=== 民间传闻（逐日累积）===\n" + "\n".join(self.legends[-12:]),
+            "=== 民间传闻（逐日累积）===\n" + "\n".join(self.legends),
         ]
         if self.failed_sites:
             # 失败反馈（用户 IKIAE6 2026-09-24：召唤结果 2 = 地点/祭品不对）→ 换新地点重推
@@ -99,24 +99,30 @@ class TreasurePlanner:
         parts.append(
             "\n请据线索推断宝藏：祭坛坐标(x,y)、需献祭的任务用品(英文名)、开启天数。"
             f"地图为 {width}×{height}，坐标范围 x∈[0,{width - 1}]、y∈[0,{height - 1}]"
-            "（越界坐标会被直接丢弃，务必给出界内整数）。\n"
+            "（越界坐标会被直接丢弃，务必给出界内整数）。"
+            f"**当前是第 {day} 天**（整场 10 天）。\n"
             "=== 解读提示（务必按此推理，不要凭空给地图中部坐标）===\n"
-            f"1. **方位词换算**：西部 → x 取**西侧小值**（x≤5）；东部 → x 取东侧大值（x≥{width - 6}）；"
-            f"北部 → y 取北侧小值（y≤5）；南部 → y 取南侧大值（y≥{height - 6}）。"
-            "传闻里若同时出现多个方位，以与『**石门 / 石殿 / 祭坛**』同句的那个方位为准。\n"
+            "1. **方位词换算**：西部 → x 取**西侧小值**（x≤5）；"
+            f"东部 → x 取东侧大值（x≥{width - 6}）；"
+            f"北部 → y 取北侧小值（y≤5）；南部 → y 取南侧大值（y≥{height - 6}）。\n"
+            "   只取与『**石门 / 石殿 / 祭坛**』**同一句**的那个方位；其它场景"
+            "（渡口 / 林场 / 矿区 / 集市 / 狼嚎）提到的方位与数字是**背景干扰**，**不要**用于定位。\n"
+            "   若只给出一个方位，另一轴取与它同侧的地图角（例如『西部』→ 取西侧一角，"
+            "而不是地图中部）。\n"
             "2. 『石门 / 石殿 / 祭坛』就是**召唤点**；『门需三钥 / 三道杠 / 三道封印 / 刮了三次』等"
             "数字 → **祭品数量**。\n"
             "3. 祭品英文名对应传闻里的『稀奇玩意儿 / 封印之物』："
             "铭文石板→AcientTablet；不灭之光·光之尘→StarSand；纯净之火·橙红雾→FlameBreath。\n"
-            "4. 开启天数若传闻无硬性线索，给一个你认为最可能的 1~10 整数即可。\n"
-            "5. 先在你的 `reason` 字段写下推断依据（读到的方位/数字/对应物品），再给坐标。\n"
-            '只返回 JSON：{"reason":"<推断依据>","x":<int>,"y":<int>,"items":["AcientTablet",...],'
-            '"day":<int>,"ready":<bool>}。'
+            "4. 开启天数：若传闻无硬性线索，给一个你认为最可能的 **1~10** 整数，"
+            f"且**不得早于当前天数（第 {day} 天）**（早于今天的计划无效）。\n"
+            "5. 先在 `reason` 里写清推断依据；为便于日志查看，**`reason` 放在 JSON 最后**。\n"
+            '只返回 JSON：{"x":<int>,"y":<int>,"items":["AcientTablet",...],"day":<int>,"ready":<bool>,'
+            '"reason":"<推断依据>"}。'
             "信息不足时 ready=false。可用用品：" + ", ".join(TREASURE_ITEMS)
         )
         return "\n".join(parts)
 
-    def apply_llm(self, response: str) -> bool:
+    def apply_llm(self, response: str, current_day: int = 0) -> bool:
         obj = None
         t = (response or "").strip()
         for blob in [t, *_JSON_BLOCK.findall(t)]:
@@ -133,7 +139,7 @@ class TreasurePlanner:
             x, y = int(obj.get("x")), int(obj.get("y"))
         except (TypeError, ValueError):
             return False
-        # 计划校验（策略书 §8.3）：坐标/祭品/开启日非法 → 丢弃计划（防 LLM 臆造）
+        # 计划校验（策略书 §8.3 + 参考文档 IKIEEC 的 6 道验证）：坐标/祭品/开启日非法 → 丢弃
         if not (0 <= x < 41 and 0 <= y < 32):
             return False
         items = tuple(
@@ -146,6 +152,9 @@ class TreasurePlanner:
         except (TypeError, ValueError):
             day = 0
         if not (1 <= day <= 10):
+            return False
+        # 第 6 道验证（IKIEEC）：**开启日不得早于当前天数**（否则永远打不开 → 直接丢弃、重推）
+        if current_day and day < current_day:
             return False
         ready = bool(obj.get("ready"))
         # 已失败过的坐标不再接受（用户 IKIAE6：结果 2 = 地点不对 → 必须换地点）
@@ -192,11 +201,13 @@ class TreasurePlanner:
                 return buy_command(item, 1)
             step = step_toward(turn, pioneer, shop, ctx.reserved)
             return move_command(step) if step is not None else None
-        # 未到开启日 → 先不召唤/不前往（用户 2026-09-24："回合数到了再尝试召唤"）；
+        # 提前 1 天移动到祭坛（参考文档 IKIEEC：确保开启日当天已在祭坛旁，不浪费赶路回合）；
         # 祭品可提前备好，白天回防回合由开拓者 FSM 的 must_return 预留。
-        if self.plan.day and turn.day_index < self.plan.day:
+        if self.plan.day and turn.day_index < self.plan.day - 1:
             return None
         if distance(pioneer.pos, loc) <= 1:
+            if self.plan.day and turn.day_index < self.plan.day:
+                return None      # 已到祭坛旁但未到开启日 → 原地待命（回防交给 FSM）
             self.attempted = True
             return summon_treasure_command(loc, list(self.plan.items))
         step = step_toward(turn, pioneer, loc, ctx.reserved)

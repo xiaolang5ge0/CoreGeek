@@ -228,8 +228,8 @@ class Brain:
                         trace["news_llm_applied"] = True
                 elif self._llm_waiting == "treasure":
                     # 记录 LLM 原文（用户 2026-09-23：便于定位宝藏链为何没落地）
-                    trace["treasure_llm_resp"] = str(turn.llm_resp)[:400]
-                    if self.treasure.apply_llm(turn.llm_resp):
+                    trace["treasure_llm_resp"] = str(turn.llm_resp)[:900]
+                    if self.treasure.apply_llm(turn.llm_resp, turn.day_index):
                         trace["treasure_llm_applied"] = True
                     else:
                         trace["treasure_llm_reject"] = {
@@ -923,7 +923,7 @@ class Brain:
                 trace["treasure_clue"] = len(self.treasure.legends)
             # 线索足够且无 ready 计划 → LLM 推断宝藏（地点/祭品/时间）
             if self.treasure.needs_inference() and not in_task:
-                _tp = self.treasure.prompt(turn.width, turn.height)
+                _tp = self.treasure.prompt(turn.width, turn.height, turn.day_index)
                 if self._ask_llm(turn, ctx, "treasure", _tp):
                     trace["treasure_llm"] = True
                     trace["treasure_llm_prompt"] = _tp[:600]
