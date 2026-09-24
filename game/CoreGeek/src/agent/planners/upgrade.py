@@ -240,10 +240,11 @@ class UpgradePlanner:
             if w.level == 2:
                 v, c = voucher_for("weapon", 2)
                 add(v, c, w.pos, "weapon", 10)
-        # 12. 围墙升级券备货（用户 2026-09-24：**提高优先级**）：按墙的**当前等级与目标差距**
-        #     备"符合条件"的券（L1→Voucher1、L2 且目标 L3→Voucher2），每级最多 5 张。
-        #     优先级 12 —— 高于所有墙升级任务，保证升级时手里有券；金币仍为武器预留。
-        if turn.day_index >= 3 and not weapons_need_l2:
+        # 30. 围墙升级券备货（用户 2026-09-24 修订）：**优先级降到墙升级之后**（30）——
+        #     先让"正面/拐角/受损/侧面"的**升级任务**跑（用户："优先升级围墙"），
+        #     券的采购主要交给修理工的**白天后勤模式**（`_logistics` 按墙数量缺口买）；
+        #     本备货仅作兜底。按墙**当前等级 vs 目标**买对应券；金币仍为武器升级预留。
+        if turn.day_index >= 3:
             _wv = ("WallUpgradeVoucher1", "WallUpgradeVoucher2")
             _held_total = sum(
                 u.backpack.count(v) for u in turn.ours if u.kind == "worker" for v in _wv
@@ -263,7 +264,7 @@ class UpgradePlanner:
                     target = min(target, held + headroom)
                 if held < target and turn.gold >= RESERVE_GOLD + cost + weapon_reserve():
                     missions.append(
-                        UpgradeMission(voucher, cost, None, "stock", 12, qty=target)
+                        UpgradeMission(voucher, cost, None, "stock", 30, qty=target)
                     )
         # 0. 受损/紧急墙（用户 2026-09-23）：最受损优先 → 用券升级回血（比 WallFixer 划算）。
         #    - 受损：ratio < 0.5

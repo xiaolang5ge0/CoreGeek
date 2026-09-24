@@ -135,7 +135,7 @@ class TestWallVoucherStock(unittest.TestCase):
         plan = UpgradePlanner().plan(turn, cp=Pos(10, 24), front="W")
         stock = [m for m in plan if m.kind == "stock" and m.voucher == "WallUpgradeVoucher1"]
         self.assertTrue(stock, "D3 应按墙等级备升级券（否则夜里没券可升）")
-        self.assertEqual(stock[0].priority, 12)
+        self.assertEqual(stock[0].priority, 30)
         self.assertLessEqual(stock[0].qty, 5)
 
 

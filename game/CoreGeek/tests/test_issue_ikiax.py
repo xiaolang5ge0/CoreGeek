@@ -27,8 +27,8 @@ def make_sim(**kw):
 
 
 class TestDayLogistics(unittest.TestCase):
-    def _setup(self, round_no, gold=300, wall_level=1):
-        sim = make_sim(gold=gold)
+    def _setup(self, round_no, gold=300, wall_level=1, shop=(25, 20)):
+        sim = make_sim(gold=gold, shop=shop)
         sim.round_no = round_no
         for y in (22, 23, 24, 25):    # 正面列（front='W' → dx=3）
             sim.roles.append(sim._role(90000 + y, 13, y, "wall", 1000, level=wall_level))
@@ -41,6 +41,8 @@ class TestDayLogistics(unittest.TestCase):
         ctx.reserved = set()
         ctx.layout_anchor = (10, 23)
         ctx.layout_front = "W"
+        ctx.home_anchor = Pos(10, 24)
+        ctx.repair_anchor = Pos(10, 24)
         return turn, unit, fsm, ctx
 
     def test_shopping_list_covers_vouchers_and_packs(self):
@@ -69,6 +71,15 @@ class TestDayLogistics(unittest.TestCase):
     def test_logistics_inactive_at_night(self):
         turn, unit, fsm, ctx = self._setup(261 + 75)   # D3 夜
         self.assertIsNone(fsm._logistics(turn, unit, ctx))
+
+    def test_logistics_starts_early_when_shop_far(self):
+        """商店远 → 距入夜 <= 预算 时就提前启动（不必等到 45 回合）。"""
+        turn, unit, fsm, ctx = self._setup(261 + 36, shop=(38, 30))
+        self.assertIsNotNone(fsm._logistics(turn, unit, ctx), "商店远时应提前启动后勤")
+
+    def test_logistics_waits_before_45_when_shop_near(self):
+        turn, unit, fsm, ctx = self._setup(261 + 30)   # 商店就在旁边
+        self.assertIsNone(fsm._logistics(turn, unit, ctx), "商店近时按第 45 回合启动")
 
 
 if __name__ == "__main__":

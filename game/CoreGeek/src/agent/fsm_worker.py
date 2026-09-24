@@ -405,28 +405,54 @@ class WorkerFSM:
         ret = len(path) - 1 if path else distance(unit.pos, anchor)
         return turn.round_in_day + ret + RETURN_MARGIN >= deadline
 
+    def _path_len(self, turn: Turn, unit: Unit, ctx, goal) -> int:
+        """到目标格的回合数（A* 实长；不可达则用切比雪夫距离兜底）。"""
+        if goal is None:
+            return 0
+        if unit.pos == goal:
+            return 0
+        path = find_path(turn, unit, goal, ctx.reserved)
+        return len(path) - 1 if path else distance(unit.pos, goal)
+
     # ================= 白天后勤（卖货 + 一次买齐） =================
     def _logistics(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        """白天后勤模式（用户 IKIAXN 2026-09-24）：第 45 回合起 **卖货变现 + 到店把缺口一次买齐**。
+        """白天后勤模式（用户 IKIAXN 2026-09-24）：**卖货变现 + 到店把缺口一次买齐**。
 
-        背景：此前 D3 金币充足却没买任何墙券/修复包（备货任务被"墙缺口/优先级"挤掉）→ 墙被攻破。
+        背景：D3/D4 金币充足却没买墙券/修复包（备货任务被"墙缺口/优先级"挤掉）→ 墙被攻破。
         规则：
-        1. 背包有可卖矿 → 先卖（凑钱）；
-        2. 到商店按**缺口清单**买：墙券 V1/V2（按"当前等级 vs 目标等级"的**墙数量**定，不限死 5 张）
-           + WallFixer（D1–D4 ≤8 / D5+ ≤30）；**每回合买一样，直到买齐**（不买一类就走）。
+        1. **预留回合**：不再固定"第 45 回合"——当 `距入夜 <= 到店 + 买齐 + 回防 + 余量` 时就启动
+           （商店远/路上远也能提前出发），同时保留"第 45 回合"作为最晚起点；
+        2. 背包有可卖矿 → 先卖（凑钱）；
+        3. 到商店按**缺口清单**买：墙券 V1/V2（按"当前等级 vs 目标等级"的**墙数量**定，不限死 5 张）
+           + WallFixer（D1–D4 ≤8 / D5+ ≤30）；**每回合买一样，直到买齐**（不买一类就走）；
+        4. 仍为武器升级预留金币（购买优先级 武器 > 围墙升级 > 围墙修复）。
         """
-        if turn.is_night or turn.round_in_day < DAY_LOGISTICS_ROUND:
+        if turn.is_night:
             return None
-        # 1) 变现
+        needs = self._shopping_list(turn, unit, ctx)
+        if not needs:
+            return None
+        shop = self._nearest_shop(turn, unit)
+        if shop is None:
+            return None
+        home = getattr(ctx, "repair_anchor", None) or ctx.home_anchor
+        budget = (
+            self._path_len(turn, unit, ctx, shop) + len(needs)
+            + self._path_home_len(turn, unit, ctx, home) + 4
+        )
+        if turn.round_in_day < DAY_LOGISTICS_ROUND and turn.rounds_until_night > budget:
+            return None
+        # 1) 变现（凑钱）
         if self._should_sell(turn, unit, ctx):
             cmd = self._sell_chain(turn, unit, ctx, mandatory=False)
             if cmd is not None:
                 ctx.note(self.unit_id, "logistics_sell")
                 return cmd
-        # 2) 买缺口
-        for item, qty in self._shopping_list(turn, unit, ctx):
+        # 2) 买缺口（为武器升级预留金币：武器未 L2 时留 100）
+        reserve = WEAPON_L1_COST if any(w.level < 2 for w in turn.weapons()) else 0
+        for item, qty in needs:
             price = turn.shop_prices.get(item, 10)
-            if turn.gold < price:
+            if turn.gold - price < reserve:
                 continue
             cmd = self._buy_item(turn, unit, ctx, item, qty)
             if cmd is not None:
