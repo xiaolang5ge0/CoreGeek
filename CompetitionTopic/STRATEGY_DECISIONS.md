@@ -444,58 +444,37 @@
     （炮塔未全 L3 但买不起升级券也允许）。
 - **回滚方式**：新增 commit（不改写历史）。
 
-## 十五、第 10 天紧急道具策略（2026-09-24，用户要求）
+## 十五、回滚基线 = `6332fdf`（稳定通关版），**仅合入宝藏优化**（2026-09-24）
 
-- **目标**：第 10 天用 范围炸弹(`Bomb`) / 眩晕法宝(`DizzyWeapon`) 打**大型机器人/BOSS**，提高击杀效率。
-- **购买方**：**挖矿工**（白天到店买）；各最多持 `DAY10_ITEM_MAX=2` 个。
-- **前置（硬约束）**：**必须保证围墙修复包**——
-  - 已买齐（`_wallfixer_reserve_gold()==0`，即维修工已备好），**或**
-  - 扣掉本次花费后金币仍 ≥ "买齐修复包缺口所需金币"（`缺口 × WallFixer 单价`）；
-  - 否则**不买**（绝不动修复包的钱）。第 10 天前 / 夜间均不买。
-- **使用侧**：`brain._emergency_item` 落点改为**价值评分**（3×3 内机器人数 + **大型/BOSS 加权 ×2**）；
-  `Day10+ 只要场上有大型/BOSS 即可用`（不再要求 3 只密度）；占用开拓者动作、优先于开火。
+用户要求：以稳定通关版 `6332fdf` 为基线，**只合入宝藏改动**；`6332fdf` 之后的其他改动
+（炮台 `targetPos` 补足、D10 挖矿工炸弹/眩晕、D10 修复包双持与回防使用）**一律不采纳**，
+保证"只影响宝藏成功/失败"。
 
-**新增测试**：`tests/test_issue_day10.py`（6 项）。
+- **源码差异（相对 `6332fdf`）仅 2 个文件**：
+  - `src/agent/planners/treasure.py`（宝藏推断/执行）
+  - `src/agent/brain.py`（仅宝藏 3 处：import、`apply_llm` 带 `current_day/offerings`、`observe` 带天数 + prompt 带 `zones/offerings`）
+- **已撤回**（回到 `6332fdf` 内容）：`fire.py`、`rules.py`、`fsm_worker.py`、`planners/upgrade.py`、`protocol.py`、`tests/harness.py`；删除 `tests/test_fire_targets.py`、`test_issue_day10.py`、`test_issue_ikieemp.py`。
+- **回滚方式**：新增 commit（不改写历史）。
 
-### 十五·补（2026-09-24，IKIEMP 日志复盘）
-
-日志问题：挖矿工 D10 白天买了 `Bomb`/`DizzyWeapon`，但**整夜在外采矿从不使用**；修复包只有维修工持有。
-
-| 项 | 落地 |
-|---|---|
-| 修复包双持 | D10 **挖矿工也自备 20 个** `WallFixer`（`_day10_fixer_stock`），维修工同备 20；备货触发改为**按最少持有者**（`upgrade.py`），避免全局求和掩盖某工人为 0 |
-| 道具**回防后使用** | 夜间持 `Bomb`/`DizzyWeapon` + 场上有值得炸的目标 → `_day10_return` 先回防到锚点 ≤6 格，`_day10_use_item` 到位后使用（放在 `_evade_cmd` **之前**，否则被规避动作抢走） |
-| 就地抢修 | D10 夜间持 `WallFixer` → `_critical_repair`/`_wallfixer_repair`（防维修工卡位导致修墙不及时） |
-
-**新增测试**：`tests/test_issue_ikieemp.py`（13 项，含 D10 端到端）。
-**测试基建**：`harness.SHOP_LIST` 增加 `Bomb`/`DizzyWeapon`（各 100）与 3×3 结算。
-
-## 十六、宝藏 Prompt 参考 IKIEEC 文档的加固（2026-09-24）
-
-参考文档：Gitee issue `IKIEEC`《宝藏 Prompt 构造详解》（长上下文任务：民间传闻 → 祭坛宝藏）。
+### 十五·A 宝藏优化（IKIEEC 参考文档）
 
 | # | 借鉴点 | 落地 |
 |---|---|---|
-| 1 | 传闻**全量**注入（不是只给最新一条） | `prompt()` 用 `self.legends`（原来截断到 `[-12:]`） |
-| 2 | 校验第 6 条：**开启日 ≥ 当前天数** | `apply_llm(resp, current_day=N)`：`day < N` → 丢弃（否则永远打不开） |
-| 3 | 执行：**提前 1 天**移动到祭坛 | `cmd()`：`day_index >= plan.day - 1` 开始赶路，`>= plan.day` 才召唤 |
-| 4 | 提示模型当前天数 | `prompt(width, height, day)` 写明"当前第 N 天" |
-| 5 | 日志可读性 | 输出 JSON 把 **`reason` 放最后**（原来在最前，400 字截断把 x/y/day 全吃掉） |
-| 6 | 方位线索单句判定 | 明确"只取与『石门/石殿/祭坛』**同句**的方位；渡口/林场/矿区等方位是**干扰**" |
+| 1 | 传闻**全量**注入 | `prompt()` 用 `self.legends`（原截断 `[-12:]`） |
+| 2 | 校验第 6 条：**开启日 ≥ 当前天数** | `apply_llm(resp, current_day=N)`：`day < N` → 丢弃重推 |
+| 3 | 执行**提前 1 天**移动到祭坛 | `cmd()`：`day_index >= plan.day - 1` 赶路，`>= plan.day` 召唤 |
+| 4 | prompt 写明**当前天数** | `prompt(width, height, day)` |
+| 5 | 日志可读 | LLM 输出 **`reason` 放 JSON 最后**（防 400 字截断吃掉坐标） |
+| 6 | 方位线索单句判定 | 只取与『石门/石殿/祭坛』**同句**方位；渡口/林场/矿区等为**干扰** |
 
-**新增测试**：`tests/test_issue_ikieec.py`（8 项）。
-
-## 十七、宝藏链参考 IKIF4V 强队实现（2026-09-24）
-
-参考：Gitee issue `IKIF4V`（强队宝藏任务完整实现）。
+### 十五·B 宝藏优化（IKIF4V 强队实现）
 
 | # | 借鉴点 | 落地 |
 |---|---|---|
-| 1 | 任务用品**随地图变化**（任务书 §4.6.3）→ 从武器商店清单**动态识别** | `offerings_from_shop(shop_names)`：清单里除固定商品（`NON_OFFERING`：6 券 + WallFixer/Medicine/Bomb/DizzyWeapon + 4 召唤令）外的即任务用品；清单缺失退回 6 种兜底 |
-| 2 | prompt 注入**地图中立元素坐标** | `zones_text(turn)`：石矿/铁矿/铜矿/小贩/武器商店/任务点坐标 → 传闻方位词可锚定 |
-| 3 | 传闻**按天标注** | `observe(folk, day)` 记录天数；prompt 输出 `第N天传闻：…` |
-| 4 | **新传闻 → 重推**（可能补充/推翻旧推理） | `needs_inference`：去掉 `not plan.ready`，只要 `新线索 && !attempted` 就重推 |
-| 5 | prompt 给出**当前天数** | `prompt(..., day)`（IKIEEC 已加） |
+| 1 | 任务用品**随地图变化**（任务书 §4.6.3） | `offerings_from_shop()`：商店清单里除固定商品（`NON_OFFERING`：6 券 + WallFixer/Medicine/Bomb/DizzyWeapon + 4 召唤令）外的即本图祭品；缺失退回 6 种兜底 |
+| 2 | prompt 注入**地图中立元素坐标** | `zones_text()`：石矿/铁矿/铜矿/小贩/武器商店/任务点 → 传闻方位词可锚定 |
+| 3 | 传闻**按天标注** | `observe(folk, day)` + `第N天传闻：…` |
+| 4 | **新传闻 → 重推** | `needs_inference` 去掉 `not plan.ready`：新线索 && 未召唤 → 重推 |
 
-**未采纳**：`open_day=null`（未知开启日立即试）——与"召唤结果 2 会被记为失败点"冲突，保留"必须有开启日"。
-**新增测试**：`tests/test_issue_ikif4v.py`（9 项）。
+**未采纳**：`open_day=null`（未知开启日立即试）——与"召唤结果 2 记为失败点"冲突。
+**测试**：`tests/test_issue_iki8k.py`(+1)、`test_issue_ikieec.py`(8)、`test_issue_ikif4v.py`(9)。

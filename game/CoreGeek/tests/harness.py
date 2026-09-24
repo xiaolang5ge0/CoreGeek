@@ -32,9 +32,6 @@ SHOP_LIST = [
     {"name": "StationUpgradeVoucher2", "price": 150},
     {"name": "WallFixer", "price": 10},
     {"name": "Medicine", "price": 10},
-    # 应急道具（用户 2026-09-24：D10 打大型机器人/BOSS；3×3 范围，无使用距离限制）
-    {"name": "Bomb", "price": 100},
-    {"name": "DizzyWeapon", "price": 100},
 ]
 SHOP_PRICES = {item["name"]: item["price"] for item in SHOP_LIST}
 BUILDING_MAX_HP = {
@@ -487,20 +484,6 @@ class SimWorld:
             building["health"] = BUILDING_MAX_HP[building["roleType"]][building["level"] - 1]
             if building["roleType"] == "rocket":
                 building["attackRange"] = ROCKET_RANGE_BY_LEVEL[building["level"] - 1]
-            role["backpack"].remove(name)
-            return True
-        if name in ("Bomb", "DizzyWeapon"):
-            # 范围炸弹：3×3 内机器人 -100 血；眩晕法宝：3×3 内机器人眩晕 5 回合（任务书 §4.6.3）
-            if name not in role["backpack"]:
-                return False
-            for robot in self.robots:
-                rx, ry = robot["pos"]["x"], robot["pos"]["y"]
-                if max(abs(rx - tx), abs(ry - ty)) > 1:
-                    continue
-                if name == "Bomb":
-                    robot["health"] = max(0, int(robot.get("health") or 0) - 100)
-                else:
-                    robot["abnormalState"] = "dizzy"
             role["backpack"].remove(name)
             return True
         return False

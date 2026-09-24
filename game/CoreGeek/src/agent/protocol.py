@@ -89,29 +89,6 @@ def distance(first: Pos, second: Pos) -> int:
     return max(abs(first.x - second.x), abs(first.y - second.y))
 
 
-# 大型机器人 / BOSS（范围炸弹、眩晕法宝的优先目标；用户 2026-09-24）
-BIG_ROBOT_KINDS = ("largeRobot", "bossRobot")
-
-
-def item_strike_value(robots, pos: Pos) -> int:
-    """落点 `pos` 的应急道具价值：3×3(切比雪夫 ≤1) 内机器人数 + 大型/BOSS 加权 ×2。"""
-    near = [r for r in robots if distance(pos, r.pos) <= 1]
-    return len(near) + 2 * sum(1 for r in near if r.kind in BIG_ROBOT_KINDS)
-
-
-def best_item_target(robots, home: Pos | None = None, min_value: int = 3) -> Pos | None:
-    """范围炸弹/眩晕法宝的最优落点：价值最高，其次离基地最近；价值 < min_value 则不打。"""
-    best, best_s = None, 0
-    for r in robots:
-        score = item_strike_value(robots, r.pos)
-        if score > best_s or (
-            score == best_s and best is not None and home is not None
-            and distance(r.pos, home) < distance(best, home)
-        ):
-            best, best_s = r.pos, score
-    return best if best is not None and best_s >= min_value else None
-
-
 def in_bounds(pos: Pos, width: int, height: int) -> bool:
     return 0 <= pos.x < width and 0 <= pos.y < height
 

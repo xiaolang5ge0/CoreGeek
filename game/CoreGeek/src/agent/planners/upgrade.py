@@ -21,7 +21,6 @@ CRITICAL_WALL_RATIO = 0.35  # 紧急墙：血量 < 35% 满血（评估：被破�
 WALL_MIN_L2 = 6            # 武器升 L3 前，先升的最小墙量（正面+侧面转角，约 6 块）
 FIXER_STOCK_MAX = 30       # 炮台未全 L3 时的 WallFixer 备货上限（预留炮台金币前提下尽量多备）
 FIXER_STOCK_MAXED = 30     # 炮台全 L3 后：尽可能备满（不再为不关键墙预留金币）
-FIXER_D10_PER_WORKER = 20  # D10：**每个工人各备 20 个** WallFixer（用户 IKIEMP 2026-09-24，防卡位）
 FRONT_L2_TARGET = 6       # 正面+转角墙 L2 死线数量（D3 入夜前，用户 2026-09-23）
 FRONT_L3_TARGET = 6       # 正面+转角墙 L3 死线数量（D5 入夜前）
 FRONT_STOCK_TARGET = 6    # 正面+转角墙对应券/修复包备货数量（D3+）
@@ -240,19 +239,10 @@ class UpgradePlanner:
         #    - 炮台**全 L3**：不再为不关键墙预留金币 → 尽可能备满。
         #    优先级 11（高于一切墙升级）。
         if turn.day_index >= 3:
-            if turn.day_index >= 10:
-                # D10（用户 IKIEMP 2026-09-24）：矿工与维修工**各备 20**，防卡位导致修墙不及时
-                # → 按**最少持有者**触发备货（全局求和会掩盖某个工人为 0 的情况）
-                desired = FIXER_D10_PER_WORKER
-                held = min(
-                    (u.backpack.count("WallFixer") for u in turn.ours if u.kind == "worker"),
-                    default=0,
-                )
-            else:
-                desired = FIXER_STOCK_MAXED if all_weapons_l3 else FIXER_STOCK_MAX
-                held = sum(
-                    u.backpack.count("WallFixer") for u in turn.ours if u.kind == "worker"
-                )
+            desired = FIXER_STOCK_MAXED if all_weapons_l3 else FIXER_STOCK_MAX
+            held = sum(
+                u.backpack.count("WallFixer") for u in turn.ours if u.kind == "worker"
+            )
             if held < desired and turn.gold >= RESERVE_GOLD + 10 + weapon_reserve():
                 # 优先级 **0**：**先买修复包再升级**（用户 2026-09-23：修理工不能只买升级券；
                 # 修复包是夜间防御的前提，必须最先备足，否则会被纯正面升级任务饿死）
