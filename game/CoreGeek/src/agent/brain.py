@@ -24,7 +24,7 @@ from .phases import PhaseManager
 from .planners.layout import BaseLayout, choose_front, compute_layout
 from .planners.news import NewsEconomy
 from .planners.task import TaskPlanner, TaskSession
-from .planners.treasure import TreasurePlanner
+from .planners.treasure import TreasurePlanner, offerings_from_shop, zones_text
 from .planners.upgrade import WALL_MAX_HP, UpgradePlanner
 from .protocol import (
     BIG_ROBOT_KINDS,
@@ -231,7 +231,10 @@ class Brain:
                 elif self._llm_waiting == "treasure":
                     # 记录 LLM 原文（用户 2026-09-23：便于定位宝藏链为何没落地）
                     trace["treasure_llm_resp"] = str(turn.llm_resp)[:900]
-                    if self.treasure.apply_llm(turn.llm_resp, turn.day_index):
+                    if self.treasure.apply_llm(
+                        turn.llm_resp, turn.day_index,
+                        offerings=offerings_from_shop(turn.shop_prices),
+                    ):
                         trace["treasure_llm_applied"] = True
                     else:
                         trace["treasure_llm_reject"] = {
@@ -908,11 +911,15 @@ class Brain:
                 if self._ask_llm(turn, ctx, "news", NewsEconomy.prompt(official)):
                     trace["news_llm"] = True
         if folk:
-            if self.treasure.observe(folk):
+            if self.treasure.observe(folk, turn.day_index):
                 trace["treasure_clue"] = len(self.treasure.legends)
-            # 线索足够且无 ready 计划 → LLM 推断宝藏（地点/祭品/时间）
+            # 线索足够且尚未召唤 → LLM 推断宝藏（地点/祭品/时间）；新传闻会**重推**（参考 IKIF4V）
             if self.treasure.needs_inference() and not in_task:
-                _tp = self.treasure.prompt(turn.width, turn.height, turn.day_index)
+                _tp = self.treasure.prompt(
+                    turn.width, turn.height, turn.day_index,
+                    zones=zones_text(turn),
+                    offerings=offerings_from_shop(turn.shop_prices),
+                )
                 if self._ask_llm(turn, ctx, "treasure", _tp):
                     trace["treasure_llm"] = True
                     trace["treasure_llm_prompt"] = _tp[:600]

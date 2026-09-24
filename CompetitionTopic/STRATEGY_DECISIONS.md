@@ -484,3 +484,18 @@
 | 6 | 方位线索单句判定 | 明确"只取与『石门/石殿/祭坛』**同句**的方位；渡口/林场/矿区等方位是**干扰**" |
 
 **新增测试**：`tests/test_issue_ikieec.py`（8 项）。
+
+## 十七、宝藏链参考 IKIF4V 强队实现（2026-09-24）
+
+参考：Gitee issue `IKIF4V`（强队宝藏任务完整实现）。
+
+| # | 借鉴点 | 落地 |
+|---|---|---|
+| 1 | 任务用品**随地图变化**（任务书 §4.6.3）→ 从武器商店清单**动态识别** | `offerings_from_shop(shop_names)`：清单里除固定商品（`NON_OFFERING`：6 券 + WallFixer/Medicine/Bomb/DizzyWeapon + 4 召唤令）外的即任务用品；清单缺失退回 6 种兜底 |
+| 2 | prompt 注入**地图中立元素坐标** | `zones_text(turn)`：石矿/铁矿/铜矿/小贩/武器商店/任务点坐标 → 传闻方位词可锚定 |
+| 3 | 传闻**按天标注** | `observe(folk, day)` 记录天数；prompt 输出 `第N天传闻：…` |
+| 4 | **新传闻 → 重推**（可能补充/推翻旧推理） | `needs_inference`：去掉 `not plan.ready`，只要 `新线索 && !attempted` 就重推 |
+| 5 | prompt 给出**当前天数** | `prompt(..., day)`（IKIEEC 已加） |
+
+**未采纳**：`open_day=null`（未知开启日立即试）——与"召唤结果 2 会被记为失败点"冲突，保留"必须有开启日"。
+**新增测试**：`tests/test_issue_ikif4v.py`（9 项）。

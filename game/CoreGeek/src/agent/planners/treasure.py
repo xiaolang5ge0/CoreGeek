@@ -28,11 +28,47 @@ from ..protocol import (
     summon_treasure_command,
 )
 
-# 任务用品英文名（任务书 §4.6.3）——LLM 返回值须落在此集合内
+# 任务用品英文名（任务书 §4.6.3）——**仅作商店清单缺失时的兜底**（列表随地图刷出、不固定）
 TREASURE_ITEMS = (
     "AcientTablet", "StarSand", "FlameBreath", "FrostPotion", "ThornAmulet", "IronWhistle",
 )
+# 任务书 §4.6.3 固定的**非任务用品**：升级券 6 种 + 消耗品/召唤令 8 种。
+# 商店清单里不在本集合中的物品，即本张地图刷出的「任务用品」（祭品）。
+NON_OFFERING = frozenset({
+    "WeaponUpgradeVoucher1", "WeaponUpgradeVoucher2",
+    "WallUpgradeVoucher1", "WallUpgradeVoucher2",
+    "StationUpgradeVoucher1", "StationUpgradeVoucher2",
+    "WallFixer", "Medicine", "DizzyWeapon", "Bomb",
+    "SmallRobotSummonOrder", "MiddleRobotSummonOrder",
+    "LargeRobotSummonOrder", "BossRobotSummonOrder",
+})
 _JSON_BLOCK = re.compile(r"\{.*\}", re.S)
+_ZONE_LABEL = {
+    "stone": "石矿", "iron": "铁矿", "copper": "铜矿",
+    "vendor": "小贩", "weaponShop": "武器商店",
+}
+
+
+def offerings_from_shop(shop_names) -> tuple[str, ...]:
+    """从武器商店清单**动态识别**本图任务用品（参考 IKIF4V / IKIEEC）。
+
+    任务书 §4.6.3：任务用品列表随地图刷出、不固定 → 不能写死；商店清单里除固定商品
+    （见 `NON_OFFERING`）外的物品即任务用品。清单缺失/为空时退回 `TREASURE_ITEMS` 兜底。
+    """
+    names = tuple(str(n) for n in (shop_names or ()) if str(n) not in NON_OFFERING)
+    return names or TREASURE_ITEMS
+
+
+def zones_text(turn: Turn) -> str:
+    """中立元素（矿/小贩/商店/任务点）坐标清单——传闻里的方位词可据此锚定（参考 IKIF4V）。"""
+    items: list[str] = []
+    for pos, kind in sorted(turn.zones.items(), key=lambda kv: (kv[0].x, kv[0].y)):
+        label = _ZONE_LABEL.get(kind)
+        if label:
+            items.append("%s(%d,%d)" % (label, pos.x, pos.y))
+    for task in getattr(turn, "tasks", ()) or ():
+        items.append("任务点(%d,%d)" % (task.pos.x, task.pos.y))
+    return "；".join(items)
 
 
 @dataclass
@@ -55,17 +91,19 @@ class TreasurePlan:
 class TreasurePlanner:
     def __init__(self) -> None:
         self.legends: list[str] = []
+        self.legend_days: list[int] = []   # 每条传闻到来的天数（prompt 标注用）
         self.plan = TreasurePlan()
         self.attempted = False
         self._last_infer_len = 0   # 上次推断时的线索条数（新线索到来才再问 LLM，用户 2026-09-23）
         self.failed_sites: list[tuple[int, int]] = []   # 召唤失败过的坐标（结果 2/3，需换地点重推）
 
     # ---- 线索累积 ----
-    def observe(self, folk: str) -> bool:
+    def observe(self, folk: str, day: int = 0) -> bool:
         text = (folk or "").strip()
         if not text or text in self.legends:
             return False
         self.legends.append(text)
+        self.legend_days.append(int(day or 0))
         return True
 
     def mark_inferred(self) -> None:
@@ -76,19 +114,34 @@ class TreasurePlanner:
         return pos is not None and (pos.x, pos.y) in self.failed_sites
 
     def needs_inference(self) -> bool:
-        # 有新线索（条数增加）且计划未 ready → 再问 LLM（用户 2026-09-23：不是一次不成就放弃）
+        # 有新线索（条数增加）且尚未尝试召唤 → 再问 LLM。
+        # 参考 IKIF4V：新传闻可能**补充/推翻**旧推理 → 即使已有 ready 计划也重推（用户 2026-09-23：
+        # 不是一次不成就放弃；`attempted` 后不再重推）。
         return (
             bool(self.legends)
-            and not self.plan.ready
             and not self.attempted
             and len(self.legends) > self._last_infer_len
         )
 
     # ---- LLM 推断 ----
-    def prompt(self, width: int = 41, height: int = 32, day: int = 1) -> str:
-        parts = [
-            "=== 民间传闻（逐日累积）===\n" + "\n".join(self.legends),
-        ]
+    def prompt(
+        self,
+        width: int = 41,
+        height: int = 32,
+        day: int = 1,
+        zones: str = "",
+        offerings=None,
+    ) -> str:
+        offerings = tuple(offerings or TREASURE_ITEMS)
+        parts: list[str] = []
+        if zones:
+            # 中立元素坐标（参考 IKIF4V）：传闻里的「渡口/林场/矿区」等方位词可据此锚定
+            parts.append("=== 地图中立元素坐标 ===\n" + zones)
+        labeled = []
+        for i, text in enumerate(self.legends):
+            d = self.legend_days[i] if i < len(self.legend_days) else 0
+            labeled.append("第%d天传闻：%s" % (d or i + 1, text))
+        parts.append("=== 民间传闻（逐日累积）===\n" + "\n".join(labeled))
         if self.failed_sites:
             # 失败反馈（用户 IKIAE6 2026-09-24：召唤结果 2 = 地点/祭品不对）→ 换新地点重推
             bad = "、".join("(%d,%d)" % p for p in self.failed_sites[-5:])
@@ -118,11 +171,12 @@ class TreasurePlanner:
             "5. 先在 `reason` 里写清推断依据；为便于日志查看，**`reason` 放在 JSON 最后**。\n"
             '只返回 JSON：{"x":<int>,"y":<int>,"items":["AcientTablet",...],"day":<int>,"ready":<bool>,'
             '"reason":"<推断依据>"}。'
-            "信息不足时 ready=false。可用用品：" + ", ".join(TREASURE_ITEMS)
+            "信息不足时 ready=false。可用用品（**本图**任务用品）：" + ", ".join(offerings)
         )
         return "\n".join(parts)
 
-    def apply_llm(self, response: str, current_day: int = 0) -> bool:
+    def apply_llm(self, response: str, current_day: int = 0, offerings=None) -> bool:
+        offerings = tuple(offerings or TREASURE_ITEMS)
         obj = None
         t = (response or "").strip()
         for blob in [t, *_JSON_BLOCK.findall(t)]:
@@ -143,7 +197,7 @@ class TreasurePlanner:
         if not (0 <= x < 41 and 0 <= y < 32):
             return False
         items = tuple(
-            str(i) for i in (obj.get("items") or []) if str(i) in TREASURE_ITEMS
+            str(i) for i in (obj.get("items") or []) if str(i) in offerings
         )
         if not items:
             return False
