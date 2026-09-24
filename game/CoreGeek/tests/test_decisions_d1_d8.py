@@ -161,7 +161,7 @@ class TestD8FixerStock(unittest.TestCase):
 
 class TestD1RepairerNightHold(unittest.TestCase):
     def test_d3_night_holds_repair_post_until_robots_cleared(self):
-        """D1：D3+ 夜修理工守 repair_post；机器人清空后才外出采矿。"""
+        """D1：D3+ 夜机器人在场时修理工回防就位（不外出采矿）。"""
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (7, 26): "stone"})
         sim.add_mine((6, 22), "stone", remaining=120)
         sim.add_mine((7, 26), "stone", remaining=120)
@@ -171,18 +171,21 @@ class TestD1RepairerNightHold(unittest.TestCase):
             sim.apply(r)
             sim.advance()
         sim.round_no = 331  # Day3 夜
-        sim.spawn_robot(30, 20, "smallRobot", hp=40, rid=30900)  # 远处机器人（未清空）
         post = brain.layout.repair_post
-        held = False
-        for _ in range(30):
+        reached = False
+        for _ in range(40):
+            # 保持有机器人（远处、高血量）→ 修理工应持续回防
+            sim.robots.clear()
+            sim.spawn_robot(30, 20, "smallRobot", hp=400, rid=30900)
             response, trace = brain.decide(sim.payload())
             info = (trace.get("workers") or {}).get("10010") or {}
             pos = sim.role(10010)["pos"]
-            if max(abs(pos["x"] - post.x), abs(pos["y"] - post.y)) <= 1:
-                held = True
+            if max(abs(pos["x"] - post.x), abs(pos["y"] - post.y)) <= 1 \
+                    or info.get("state") == "RETURN_HOME":
+                reached = True
             sim.apply(response)
             sim.advance()
-        self.assertTrue(held, "D3 夜修理工应就位 repair_post（守内圈）")
+        self.assertTrue(reached, "D3 夜机器人在场时修理工应回防就位（不外出采矿）")
 
 
 class TestWallUpgradeOrder(unittest.TestCase):

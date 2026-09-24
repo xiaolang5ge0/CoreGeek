@@ -106,6 +106,7 @@ class WorkerFSM:
         self.build_phase = False
         self.returning = False       # 回防粘性：D4+ 一旦开始返回，持续到进墙
         self.return_since = 0        # 开始返回的回合（防死循环兜底）
+        self._home_block_runs = 0    # 连续归位受阻回合（>10 才退化采矿，IKI9XF）
         self._pos_hist: list = []    # 最近位置历史（检测 A→B→A 两格震荡）
         self._turn = None            # 当前 turn（震荡逃生用）
         self._unit = None            # 当前 unit（震荡逃生用）
@@ -254,7 +255,19 @@ class WorkerFSM:
             robots_alive = bool(getattr(ctx, "robot_cells", ()))
             if turn.day_index >= RETURN_STICKY_DAY and robots_alive:
                 # D3+ 且机器人未清空 → 就位 repair_post 守内圈（用户：清空前不外出采矿）
-                return self._go_home(turn, unit, ctx, anchor)
+                cmd = self._go_home(turn, unit, ctx, anchor)
+                if cmd is not None:
+                    self._home_block_runs = 0
+                    return cmd
+                # 归位受阻：短暂受阻（被占/被堵）先等一回合（下一回合常自行恢复）；
+                # **连续受阻 > 10 回合**才退化为采矿/自救流程
+                # （IKI9XF：修理工整夜 RETURN_HOME 无指令、手里有修复包却站着不动，墙被攻破）
+                self._home_block_runs += 1
+                if self._home_block_runs <= 10:
+                    return None
+                ctx.note(self.unit_id, "home_blocked_fallthrough")
+            else:
+                self._home_block_runs = 0
             return self._miner(turn, unit, ctx)
         # 白天
         if turn.day_index <= 1:
@@ -391,6 +404,18 @@ class WorkerFSM:
                 ctx.note(self.unit_id, "release_lock_batch_full")
                 self.mine = None
             return self._sell_chain(turn, unit, ctx, mandatory=True)
+        # 白天第 50 回合后强制变现（用户 2026-09-23）：**即使矿未采完也先卖**（入夜前清货）。
+        # 修 IKI9X2：此前只在 FREE 状态检查 `_should_sell` → 矿未采完时整段白天不卖，
+        # 金币枯竭（g=5）、修理工买不起修复包/墙券 → 墙一直不升级、D8 才升 L3。
+        if (
+            self.mine is not None
+            and turn.is_day
+            and turn.round_in_day >= DAY_FORCE_SELL_ROUND
+            and self._should_sell(turn, unit, ctx)
+        ):
+            ctx.note(self.unit_id, "force_sell_before_dusk")
+            self.mine = None
+            return self._sell_chain(turn, unit, ctx, mandatory=False)
         # 矿锁
         if self.mine is not None:
             # 矿锁与当前偏好不符（issue#26：修理工 Day1 建墙锁了石矿，入夜该采钱却仍走远石矿）
@@ -750,6 +775,11 @@ class WorkerFSM:
                 return None
             want = self._stock_qty(turn, unit, ctx, item, qty)
             if want <= 0:
+                # 买不起/没空间 → **清掉任务**，别死占修理工（IKI9X2 根因：备货任务卡死 318 回合，
+                # 阻断所有墙升级 → 墙一直停在 L1/L2、D8 才升 L3、被正面突破）。
+                # 规划器在金币不足时不会再下发该备货任务 → 修理工转而做墙升级。
+                self.upgrade = None
+                self.state = STATE_FREE
                 return None
             return self._buy_item(turn, unit, ctx, item, want)
         building = next(
@@ -770,8 +800,8 @@ class WorkerFSM:
             if not allow_buy:
                 return None  # 夜间不采购；留待白天买
             if turn.gold < cost:
-                self.upgrade = None
-                self.state = STATE_FREE
+                # 金币不足 → **保留任务**（不清掉），由采矿/卖货筹钱后再买；
+                # 清任务会导致"每回合重派同一墙、永远完不成"（IKI9X2 复现）。
                 return None
             want = self._voucher_qty(turn, unit, ctx, voucher, cost, kind)
             if want <= 0:
@@ -823,7 +853,13 @@ class WorkerFSM:
                 need = min(WALL_VOUCHER_BATCH, sum(1 for w in turn.walls() if w.level == lvl))
         else:
             need = sum(1 for w in turn.weapons() if w.level == lvl)
-        held = sum(u.backpack.count(voucher) for u in turn.ours)   # **全局统计**（含开拓者/其他工人；用户 2026-09-23）
+        if kind == "wall":
+            # 墙券由**修理工自己**使用 → 只算自己持有，否则开拓者/他人身上的券会让修理工
+            # 以为"已有券"而不买、却用不了（IKI9XF：3 张券在别人身上、修理工干看着）
+            held = unit.backpack.count(voucher)
+        else:
+            # 武器券共享（开拓者代买/使用）→ 全局统计，避免重复购买
+            held = sum(u.backpack.count(voucher) for u in turn.ours)
         want = max(0, need - held)
         if want <= 0:
             return 0
@@ -881,15 +917,15 @@ class WorkerFSM:
         return out
 
     def _critical_repair(self, turn: Turn, unit: Unit, ctx) -> dict[str, Any] | None:
-        """紧急抢修（用户 IKI8HA 2026-09-24）：墙血 < 35% 满血的 **L2+ 墙（含满级 L3）** 最优先。
+        """紧急抢修（用户 IKI8HA/IKI9XF 2026-09-24）：墙血 < 35% 满血的最优先。
 
         用户："围墙已经 3 级了，不可以用升级券，就要降级用围墙修复包才对。"
+        以及 IKI9XF："身上 3 个升级券 + 25 个修复包却没使用 → 被兵潮攻破"。
         → 有可升级的券先用券（升级=回满血且升一级），否则用 WallFixer；只从**内侧**接近。
+        **含 L1 墙**（夜间无法重建，临界 L1 被打掉即缺口；修复包远便宜于被破后的损失）。
         """
         cands: list = []
         for w in turn.walls():
-            if w.level < 2:
-                continue   # L1 墙不用修复包（白天重建/用 Voucher1 升级即可）
             maxhp = WALL_MAX_HP[min(max(w.level, 1), 3) - 1]
             ratio = w.health / maxhp
             if ratio < CRITICAL_REPAIR_RATIO:

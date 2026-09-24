@@ -17,6 +17,7 @@ SPLASH_DAMAGE = 10
 LETHAL_BONUS = 15      # 能杀死的优先（最快降低敌方 DPS）
 APPROACH_RADIUS = 12   # 距基地锚点 12 格内开始加权
 SELF_TEAM_BONUS = 5    # 以我方基地为目标的机器人优先（两批机器人分攻双方）
+BASE_SAFE_RADIUS = 8   # 基地安全半径：此半径内无来犯机器人 → 可腾手轰对面家（用户 IKI9XF）
 # U10 已由实战证据关闭：紧邻己方建筑的机器人必须能打（墙聚怪+火箭隔山打牛是核心玩法），
 # 不再扣友伤惩罚（2026-09-21 TeamB 实战：惩罚导致基地被啃时全面哑火）。
 MIN_SCORE = CENTER_DAMAGE
@@ -45,6 +46,18 @@ class JointFirePlanner:
         weapon = ready[self.cursor % len(ready)]
         targets, score = self._best_targets(turn, weapon)
         if not targets:
+            # 我方兵潮已清（射程内无有价值机器人）+ 基地安全 → 转而轰对面家
+            # （用户 IKI9XF 2026-09-24：对手火箭清完自家兵潮后就轰我们城区，我们也要这么做）
+            enemy = self._enemy_targets(turn, weapon) if self._base_safe(turn) else []
+            if enemy:
+                self.cursor += 1
+                commands[weapon.unit_id] = attack_command(pioneer.unit_id, enemy)
+                trace["fire"] = {
+                    "weapon": weapon.unit_id,
+                    "targets": [t.dump() for t in enemy],
+                    "mode": "enemy_base",
+                }
+                return
             trace["fire"] = {"reason": "no_valuable_target", "weapon": weapon.unit_id}
             return
         self.cursor += 1
@@ -54,6 +67,37 @@ class JointFirePlanner:
             "targets": [t.dump() for t in targets],
             "aoe_score": score,
         }
+
+    @staticmethod
+    def _base_safe(turn: Turn) -> bool:
+        """基地是否安全：附近没有冲我方来的机器人（用户：保证安全后再轰对面家）。"""
+        station = turn.station()
+        if station is None:
+            return False
+        return not any(
+            r.alive and r.target_team in ("", turn.team_type)
+            and distance(r.pos, station.pos) <= BASE_SAFE_RADIUS
+            for r in turn.robots
+        )
+
+    @staticmethod
+    def _enemy_targets(turn: Turn, weapon: Unit) -> list[Pos]:
+        """射程内的敌方建筑（优先基地/炮塔，其次围墙）——清完己方兵潮后拆对面家。"""
+        reach = weapon.range_of_attack()
+        rank = {"station": 0, "gatling": 1, "railgun": 1, "rocket": 1, "wall": 2}
+        cands = []
+        for u in turn.enemy:
+            if not u.alive:
+                continue
+            d = distance(weapon.pos, u.pos)
+            if not (1 <= d <= reach):
+                continue
+            cands.append((rank.get(u.kind, 3), u.health, d, u.pos.x, u.pos.y, u.pos))
+        if not cands:
+            return []
+        cands.sort()
+        n = max(1, weapon.level)
+        return [c[5] for c in cands[:n]]
 
     def _best_targets(self, turn: Turn, weapon: Unit) -> tuple[list[Pos], int]:
         reach = weapon.range_of_attack()
