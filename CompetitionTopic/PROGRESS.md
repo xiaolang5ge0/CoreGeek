@@ -631,6 +631,16 @@
 
 **新增测试**：`tests/test_fire_targets.py`（5 项）。
 
+## 实战修复记录·第 10 天紧急道具（2026-09-24）
+
+| 项 | 内容 |
+|---|---|
+| 策略 | 第 10 天**挖矿工**白天买 范围炸弹/眩晕法宝（各 ≤2），用于打**大型机器人/BOSS** |
+| 前置 | **必须保证围墙修复包**：已买齐，或扣款后金币仍 >= 买齐修复包缺口所需金币；否则不买 |
+| 使用 | `_emergency_item` 落点改为"3×3 密度 + **大型/BOSS 加权**"，Day10+ 有大型/BOSS 即可用 |
+
+**新增测试**：`tests/test_issue_day10.py`（6 项）。
+
 ## 维护约定
 - **事实**（RULE_ASSUMPTIONS）：实战证据到达即更新状态（UNKNOWN→CONFIRMED/CONFLICT），改代码前先查事实表。
 - **策略**（STRATEGY_DECISIONS）：与用户讨论的唯一入口；调参只改参数表；证据驱动流程 KEEP/REVERT/INCONCLUSIVE。

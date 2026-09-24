@@ -53,6 +53,7 @@ CORRIDOR_WIDTH = 5          # 机器人行军走廊半宽（出生点→我方�
 CORRIDOR_BASE_MARGIN = 8    # 走廊只算距基地 > 此值 的部分（近基地处有墙/炮塔保护，不算危险）
 BASE_DANGER_DIST = 4        # 机器人逼近基地此距离内 → 基地有危险（工人撤内圈而非迎面避让）
 WORKER_DANGER_DIST = 3      # 工人规避半径（≈机器人攻击射程）
+BIG_ROBOTS = ("largeRobot", "bossRobot")   # 大型机器人/BOSS（应急道具优先目标）
 BUILD_TRAVEL_BUFFER = 6     # 建墙预留回程缓冲（预留回合 = 待建墙数 + 缓冲）
 DUSK_AVOID_WINDOW = 12      # 白天临近入夜此回合数内，提前避开出生走廊矿/小贩
 COST_PER_WALL_BASE = 2      # 每墙基础回合（采集1+建造1）
@@ -670,10 +671,11 @@ class Brain:
                 if cmd:
                     commands[pioneer.unit_id] = cmd
                     ctx.reserve_from(cmd)
-        # 应急道具（Day6+，用户）：城墙危险时用炸弹/眩晕清群（占用开拓者动作，优先于开火）
+        # 应急道具：Day6+ 墙危险时清群；**Day10+ 只要场上有大型/BOSS 就用**（用户 2026-09-24：提高击杀效率）。
+        # 占用开拓者动作，优先于开火。
         if (
             pioneer is not None and pioneer.unit_id not in commands
-            and turn.day_index >= 6 and ctx.wall_danger
+            and (turn.day_index >= 10 or (turn.day_index >= 6 and ctx.wall_danger))
         ):
             item_cmd = self._emergency_item(turn, pioneer)
             if item_cmd is not None:
@@ -840,23 +842,36 @@ class Brain:
         return self.llm_calls_today < LLM_DAILY_LIMIT
 
     def _emergency_item(self, turn: Turn, pioneer) -> dict[str, Any] | None:
-        """应急道具（Day6+）：找机器人最密的格（3×3 内最多，且靠基地），用炸弹/眩晕。"""
+        """应急道具：找"最值钱"的落点（3×3 内机器人越多越优先，**大型/BOSS 加权**），用炸弹/眩晕。
+
+        - Day6+ 墙危险时（原逻辑）；
+        - **Day10+ 只要场上有大型机器人/BOSS 即可用**（用户 2026-09-24：提高击杀效率）。
+        """
         item = next((i for i in pioneer.backpack if i in ("Bomb", "DizzyWeapon")), None)
         if item is None:
             return None
         station = turn.station()
         robots = [r for r in turn.robots if r.alive]
-        if station is None or len(robots) < 3:
+        if station is None or not robots:
             return None
-        best, best_n = None, 0
+        has_big = any(r.kind in BIG_ROBOTS for r in robots)
+        if not (turn.day_index >= 10 and has_big):
+            if len(robots) < 3:
+                return None   # 非 Day10：仍要求足够密度
+
+        def value(pos) -> int:
+            near = [o for o in robots if distance(pos, o.pos) <= 1]
+            return len(near) + 2 * sum(1 for o in near if o.kind in BIG_ROBOTS)
+
+        best, best_s = None, 0
         for r in robots:
-            n = sum(1 for o in robots if distance(r.pos, o.pos) <= 1)
-            if n > best_n or (
-                n == best_n and best is not None
+            s = value(r.pos)
+            if s > best_s or (
+                s == best_s and best is not None
                 and distance(r.pos, station.pos) < distance(best, station.pos)
             ):
-                best, best_n = r.pos, n
-        if best is None or best_n < 3:
+                best, best_s = r.pos, s
+        if best is None or best_s < 3:
             return None
         return use_command(item, best)
 
