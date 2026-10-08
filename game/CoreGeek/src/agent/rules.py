@@ -12,15 +12,20 @@ from .protocol import (
     ACTIONS,
     CONTROLLABLE_TYPES,
     GATLING,
+    IMP,
+    LAND,
     MINE_TYPES,
     PIONEER,
     Pos,
     RAILGUN,
     RANGED_ITEMS,
+    STATION,
+    SUMMON_ORDERS,
     TARGETED_ITEMS,
     TOWER_TYPES,
     Turn,
     Unit,
+    VEHICLE_TYPES,
     VENDOR,
     WALL,
     WALL_ZONE_DIST,
@@ -32,15 +37,20 @@ from .protocol import (
     distance,
     footprint_distance,
     in_bounds,
+    is_summon_robot_id,
     parse_targets,
     station_footprint,
 )
 
 WORKER_ONLY = {"build", "remove", "collect"}
 PIONEER_ONLY = {"acceptTask", "submitAnswer", "summonTreasure"}
+IMP_ONLY = {"destroy"}  # 32进16：破坏仅捣乱鬼可用
 NIGHT_ONLY = {"attack"}
 # remove 夜间合法性未明（事实表 U-拆除），保守按白天处理
 DAY_ONLY = {"build", "remove"}
+# 可控机器人可用动作（32进16：roleCommandMap key 可为 30000/31000 段）
+ROBOT_ACTIONS = {"move", "attack"}
+ROBOT_ATTACK_RANGE = 3  # 任务书 4.7.2：机器人攻击距离 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +109,9 @@ class LegalityGuard:
     # ---- 单条校验 ----
     def check(self, unit_id: int, cmd: dict[str, Any]) -> Verdict:
         turn = self.turn
+        # 32进16：可控机器人（30000/31000 段）走独立校验通道
+        if isinstance(unit_id, int) and is_summon_robot_id(unit_id):
+            return self._check_robot(unit_id, cmd)
         unit = turn.find(unit_id)
         if unit is None:
             return Verdict(False, "unit_not_found")
@@ -113,6 +126,8 @@ class LegalityGuard:
             return Verdict(False, "worker_only")
         if action in PIONEER_ONLY and unit.kind != PIONEER:
             return Verdict(False, "pioneer_only")
+        if action in IMP_ONLY and unit.kind != IMP:
+            return Verdict(False, "imp_only")
         if action == "attack" and unit.kind not in TOWER_TYPES:
             return Verdict(False, "attack_requires_weapon")
         if action in NIGHT_ONLY and turn.is_day:
@@ -123,6 +138,34 @@ class LegalityGuard:
         if handler is None:
             return Verdict(True)
         return handler(unit, cmd)
+
+    # ---- 32进16：可控机器人指令校验 ----
+    def _check_robot(self, unit_id: int, cmd: dict[str, Any]) -> Verdict:
+        robot = self.turn.summon_robot(unit_id)
+        if robot is None:
+            return Verdict(False, "robot_not_found")
+        if not isinstance(cmd, dict):
+            return Verdict(False, "cmd_not_dict")
+        action = cmd.get("action")
+        if action not in ROBOT_ACTIONS:
+            return Verdict(False, f"robot_action_unknown:{action}")
+        targets = parse_targets(cmd.get("targetPos"))
+        if not targets:
+            return Verdict(False, "bad_targetPos")
+        for pos in targets:
+            if not in_bounds(pos, self.turn.width, self.turn.height):
+                return Verdict(False, "target_out_of_map")
+        if action == "move":
+            if len(targets) != 1 or distance(robot.pos, targets[0]) != 1:
+                return Verdict(False, "robot_move_not_adjacent")
+            return Verdict(True)
+        # attack：仅夜晚可用（同角色口径，待实战确认——RULE_ASSUMPTIONS U13）
+        if self.turn.is_day:
+            return Verdict(False, "night_only")
+        for pos in targets:
+            if distance(robot.pos, pos) > ROBOT_ATTACK_RANGE:
+                return Verdict(False, "target_out_of_range")
+        return Verdict(True)
 
     # ---- 公共小工具 ----
     def _targets(self, cmd: dict[str, Any], expect: int | None = None) -> tuple[Pos, ...] | None:
@@ -154,9 +197,11 @@ class LegalityGuard:
         targets = self._targets(cmd, expect=1)
         if targets is None:
             return Verdict(False, "bad_targetPos")
-        if distance(unit.pos, targets[0]) != 1:
-            return Verdict(False, "move_not_adjacent")
-        return Verdict(True)
+        dist = distance(unit.pos, targets[0])
+        # 32进16：驾驶小车时每次最多移动两格（第1格碰撞停原地/第2格碰撞停第2格，结算在判题器）
+        if dist == 1 or (unit.is_driving and dist == 2):
+            return Verdict(True)
+        return Verdict(False, "move_not_adjacent")
 
     def _check_attack(self, weapon: Unit, cmd: dict[str, Any]) -> Verdict:
         if weapon.cooldown > 0:
@@ -225,6 +270,9 @@ class LegalityGuard:
         target = targets[0]
         if distance(unit.pos, target) != 1:
             return Verdict(False, "build_not_adjacent")
+        # 32进16：小车所在格不可建造（含己方/敌方小车）——绝对否决，先于建造区校验
+        if any(target == vpos for vpos in self.turn.vehicle_cells()):
+            return Verdict(False, "target_on_vehicle_cell")
         # 建造区规则（CONFIRMED）：武器=距基地1格（蓝区），墙=距基地2格（黄区）
         station = self.turn.station()
         if station is not None:
@@ -317,4 +365,67 @@ class LegalityGuard:
             return Verdict(False, "no_mine_there")
         if unit.backpack_full:
             return Verdict(False, "backpack_full")
+        return Verdict(True)
+
+    # ---- 32进16 新动作 ----
+    def _check_destroy(self, unit: Unit, cmd: dict[str, Any]) -> Verdict:
+        """破坏矿物（仅捣乱鬼）：目标周围一格且为矿；连续 4 回合执行（进度在 FSM 跟踪）。"""
+        targets = self._targets(cmd, expect=1)
+        if targets is None:
+            return Verdict(False, "bad_targetPos")
+        target = targets[0]
+        if distance(unit.pos, target) != 1:
+            return Verdict(False, "mine_not_adjacent")
+        if self.turn.zones.get(target) not in MINE_TYPES:
+            return Verdict(False, "no_mine_there")
+        return Verdict(True)
+
+    def _check_catch(self, unit: Unit, cmd: dict[str, Any]) -> Verdict:
+        """抓捕（全部角色）：目标 8 邻域内、且该位置有**可见**敌方捣乱鬼。
+
+        保守口径：敌方 imp 仅 destroy 站桩期间全图可见；看不到就不发（防"指令错误"异常）。
+        """
+        targets = self._targets(cmd, expect=1)
+        if targets is None:
+            return Verdict(False, "bad_targetPos")
+        target = targets[0]
+        if distance(unit.pos, target) != 1:
+            return Verdict(False, "target_not_adjacent")
+        if not any(e.pos == target for e in self.turn.enemy_imps()):
+            return Verdict(False, "no_enemy_imp_there")
+        return Verdict(True)
+
+    def _check_use(self, unit: Unit, cmd: dict[str, Any]) -> Verdict:
+        name = cmd.get("name")
+        if not name or name not in unit.backpack:
+            return Verdict(False, "item_not_in_backpack")
+        if name in SUMMON_ORDERS:
+            return self._check_use_summon_order(cmd)
+        if name in TARGETED_ITEMS:
+            targets = self._targets(cmd, expect=1)
+            if targets is None:
+                return Verdict(False, "bad_targetPos")
+            if name not in RANGED_ITEMS and distance(unit.pos, targets[0]) != 1:
+                return Verdict(False, "use_not_adjacent")
+        return Verdict(True)
+
+    def _check_use_summon_order(self, cmd: dict[str, Any]) -> Verdict:
+        """召唤令（32进16）：use 必须携带召唤位置 targetPos（否则非法→异常红线）。
+
+        非法场景（任务书 4.6.3 注，非法=退还召唤令+指令错误风险）：
+        位置不在地图内 / 在任一基地建造区（距基地footprint ≤2）/ 在 NPC 处 /
+        与己方已使用待生成召唤位重叠（跨回合状态，由 brain 层规避）。
+        """
+        targets = self._targets(cmd, expect=1)
+        if targets is None:
+            return Verdict(False, "summon_need_targetPos")
+        target = targets[0]
+        stations = [u for u in self.turn.ours if u.kind == STATION]
+        stations += [u for u in self.turn.enemy if u.kind == STATION]
+        for station in stations:
+            fdist = footprint_distance(target, station_footprint(station.pos))
+            if 1 <= fdist <= 2:
+                return Verdict(False, "summon_in_build_zone")
+        if self.turn.zones.get(target, LAND) != LAND:
+            return Verdict(False, "summon_on_npc_or_blocked")
         return Verdict(True)

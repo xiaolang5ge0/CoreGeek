@@ -11,6 +11,7 @@ from typing import Any
 
 from .buildable_map import BuildableMap
 from .fire import JointFirePlanner
+from .fsm_imp import ImpFSM
 from .fsm_pioneer import (
     STATE_TASK_ACCEPT,
     STATE_TASK_TRAVEL,
@@ -27,6 +28,7 @@ from .planners.task import TaskPlanner, TaskSession
 from .planners.treasure import TreasurePlanner, offerings_from_shop, zones_text
 from .planners.upgrade import WALL_MAX_HP, UpgradePlanner
 from .protocol import (
+    IMP,
     Pos,
     ROCKET,
     ROUNDS_PER_DAY,
@@ -36,6 +38,7 @@ from .protocol import (
     WEAPON_BUILD_COST,
     WEAPON_LIMIT,
     build_response,
+    catch_command,
     distance,
     empty_response,
     move_command,
@@ -163,6 +166,7 @@ class Brain:
         self.threat = ThreatEstimator()
         self.upgrades = UpgradePlanner()
         self.pioneer_fsm = PioneerFSM()
+        self.imp_fsm = ImpFSM()
         self.task_planner = TaskPlanner()
         self.task_session = TaskSession()
         self.mine_blacklist: dict = {}
@@ -286,6 +290,9 @@ class Brain:
         _st = turn.station()
         ctx.layout_anchor = (_st.pos.x, _st.pos.y - 1) if _st is not None else None
         ctx.reserved = {u.pos for u in turn.controllable()}
+        _imp0 = turn.imp()
+        if _imp0 is not None:
+            ctx.reserved.add(_imp0.pos)
         ctx.mine_blacklist = self.mine_blacklist
         # 历史出生走廊（首夜起累积，全局固定）→ 夜间选矿/卖货避让
         ctx.spawn_cells = tuple(
@@ -308,6 +315,8 @@ class Brain:
             self._day(turn, commands, ctx)
         else:
             self._night(turn, commands, ctx)
+        # 32进16：捣乱鬼决策 + 全队反抓防御（敌 imp 仅站桩破坏时可见 → 可见即正在破坏）
+        self._imp_and_catch_defense(turn, commands, ctx)
 
         commands = LegalityGuard(turn).filter_commands(commands, trace)
         self.last_commands = dict(commands)
@@ -692,6 +701,41 @@ class Brain:
             ctx.reserve_from(cmd)
         self._maybe_medicine(turn, commands)
 
+    # ---- 32进16：捣乱鬼 + 反抓防御 ----
+    def _imp_and_catch_defense(self, turn: Turn, commands: dict[int, dict[str, Any]], ctx) -> None:
+        """捣乱鬼决策 + 全队抓捕防御。
+
+        抓捕策略：可见敌方 imp = 正在站桩破坏。
+        - 在**我方半区**破坏 → 邻接（距离1）的我方角色立即 catch（+20 金 + 除害），
+          可**覆盖**工人/捣乱鬼当前指令（1 回合损失 < 矿被破坏损失）；
+        - 在敌方半区 → 仅我方 imp 顺路抓（其他角色不远征）。
+        - 任务关键动作（submitAnswer/acceptTask/summonTreasure）永不被覆盖。
+        """
+        critical = {"submitAnswer", "acceptTask", "summonTreasure"}
+        for foe in turn.enemy_imps():
+            for role in (*turn.workers(), turn.pioneer(), turn.imp()):
+                if role is None:
+                    continue
+                if distance(role.pos, foe.pos) != 1:
+                    continue
+                if not turn.own_half(foe.pos) and role.kind != IMP:
+                    continue
+                existing = commands.get(role.unit_id)
+                if existing is not None and existing.get("action") in critical:
+                    continue
+                commands[role.unit_id] = catch_command(foe.pos)
+                ctx.trace.setdefault("catch_defense", []).append(
+                    {"role": role.unit_id, "foe": foe.pos.dump()}
+                )
+                break  # 一个敌人一个抓捕者
+        imp = turn.imp()
+        if imp is None or imp.unit_id in commands:
+            return
+        cmd = self._safe_unit(self.imp_fsm.decide, ctx.trace, "imp", turn, imp, ctx)
+        if cmd is not None:
+            commands[imp.unit_id] = cmd
+            ctx.reserve_from(cmd)
+
     def _corridor_cells(self, turn: Turn) -> tuple:
         """出生点质心 → 我方基地 的行军走廊采样格（B 方案安全矿定义）。
 
@@ -1020,7 +1064,7 @@ class Brain:
         for cmd in commands.values():  # 操控占用：控炮回合不能再用药
             if cmd.get("action") == "attack" and cmd.get("controllerId") == str(pioneer.unit_id):
                 return
-        if pioneer.health > 120:
+        if pioneer.health > 300:  # 32进16：HP 200→500，阈值等比例上调（原 120）
             return
         medicine = next(
             (item for item in pioneer.backpack if item.lower() == "medicine"), None

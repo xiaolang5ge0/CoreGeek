@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..protocol import Turn, distance, submit_answer_command
+from ..protocol import Turn, distance, parse_cmd_result, submit_answer_command
 from .. import config
 
 # ---- 阶段 ----
@@ -248,7 +248,10 @@ class TaskPlanner:
 
         # 1. 回收异步结果
         if session.pending_cmd is not None:
-            result = turn.last_cmd_result or ""
+            # 32进16 新格式：[exitCode:N]\n[durationMs:N]\n<输出>（兼容旧格式）
+            parsed = parse_cmd_result(turn.last_cmd_result or "")
+            result = parsed["output"]
+            # 失败语义透传给 transcript/LLM（TIMEOUT/JUDGER_ERROR 已由解析器加前缀）
             session.cmd_history.append((session.pending_cmd, result))
             self._on_cmd_result(session, session.pending_cmd, result)
             session.pending_cmd = None

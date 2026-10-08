@@ -27,16 +27,34 @@ STATION = "station"
 WALL = "wall"
 WORKER = "worker"
 PIONEER = "pioneer"
+IMP = "imp"  # 32进16 新角色：捣乱鬼（破坏/被抓，无背包）
 GATLING = "gatling"
 RAILGUN = "railgun"
 ROCKET = "rocket"
 TOWER_TYPES = (GATLING, RAILGUN, ROCKET)
 CONTROLLABLE_TYPES = (WORKER, PIONEER)
+ROLE_KINDS = (WORKER, PIONEER, IMP)  # 全部可控角色（imp 能否控炮待实战确认，暂不进 CONTROLLABLE_TYPES）
 MINE_TYPES = ("stone", "iron", "copper")
 VENDOR = "vendor"
 WEAPON_SHOP = "weaponShop"
 TASK_POINT_PREFIXES = ("challengerTaskPoint", "defenderTaskPoint")
 ROBOT_TYPES = ("smallRobot", "middleRobot", "largeRobot", "bossRobot")
+# 32进16：可驾驶小车（中立元素，分己方/敌方）
+CHALLENGER_VEHICLE = "challengerVehicle"
+DEFENDER_VEHICLE = "defenderVehicle"
+VEHICLE_TYPES = (CHALLENGER_VEHICLE, DEFENDER_VEHICLE)
+# 32进16：机器人召唤令（use 必须携带召唤位置 targetPos）
+SUMMON_ORDERS = (
+    "SmallRobotSummonOrder",
+    "MiddleRobotSummonOrder",
+    "LargeRobotSummonOrder",
+    "BossRobotSummonOrder",
+)
+
+
+def is_summon_robot_id(unit_id: int) -> bool:
+    """可控机器人 ID 段：30000/31000（接口文档 §2.1/roleCommandMap key）。"""
+    return 30000 <= int(unit_id) < 32000
 
 # 静态射程兜底表（RUNTIME_OVERRIDE：优先使用 Unit.attack_range）
 TOWER_RANGE_BY_LEVEL = {
@@ -45,10 +63,11 @@ TOWER_RANGE_BY_LEVEL = {
     ROCKET: (10, 15, 10**9),
 }
 
-# 动作码全集
+# 动作码全集（32进16 新增 destroy/catch）
 ACTIONS = (
     "move", "attack", "sell", "buy", "build", "remove",
     "acceptTask", "submitAnswer", "summonTreasure", "use", "drop", "collect",
+    "destroy", "catch",
 )
 
 # 需要 targetPos 的消耗品/券
@@ -131,6 +150,7 @@ class Unit:
     attack_power: int
     capacity: int | None
     backpack: tuple[str, ...]
+    is_driving: bool = False  # 32进16：是否处于驾驶小车状态
 
     @classmethod
     def load(cls, raw: dict[str, Any]) -> "Unit":
@@ -146,6 +166,7 @@ class Unit:
             attack_power=int(raw.get("attackPower") or 0),
             capacity=int(cap) if cap is not None else None,
             backpack=tuple(str(item) for item in (raw.get("backpack") or ())),
+            is_driving=bool(raw.get("isDriving") or False),
         )
 
     @property
@@ -273,6 +294,8 @@ class Turn:
     official_news: str
     folk_legends: str
     errors: tuple[tuple[int, str], ...]
+    mine_remain: dict[Pos, int] = None  # type: ignore[assignment]  # 32进16：矿剩余采集次数
+    summon_robots: tuple[Robot, ...] = ()  # 32进16：本方名下可控机器人（仅己方可见）
 
     @classmethod
     def load(cls, payload: dict[str, Any]) -> "Turn":
@@ -282,9 +305,16 @@ class Turn:
         robot = payload.get("robot") or {}
         news = payload.get("worldNews") or {}
         zones: dict[Pos, str] = {}
+        mine_remain: dict[Pos, int] = {}
         for zone in info.get("zones") or ():
             if isinstance(zone, dict) and isinstance(zone.get("pos"), dict):
-                zones[Pos.load(zone["pos"])] = str(zone.get("neutralType") or "")
+                zpos = Pos.load(zone["pos"])
+                zkind = str(zone.get("neutralType") or "")
+                zones[zpos] = zkind
+                # 32进16：矿区元素携带 remain（剩余采集次数 1~10）
+                remain = zone.get("remain")
+                if zkind in MINE_TYPES and isinstance(remain, (int, float)):
+                    mine_remain[zpos] = int(remain)
         return cls(
             round_no=int(payload.get("roundNo") or 0),
             width=int(info.get("width") or 41),
@@ -308,6 +338,10 @@ class Turn:
             official_news=str(news.get("officialNews") or ""),
             folk_legends=str(news.get("folkLegends") or ""),
             errors=_errors(payload.get("errors")),
+            mine_remain=mine_remain,
+            summon_robots=tuple(
+                Robot.load(r) for r in (team.get("summonRobotList") or ()) if isinstance(r, dict)
+            ),
         )
 
     # ---- 时间 ----
@@ -372,6 +406,41 @@ class Turn:
     def controllable(self) -> tuple[Unit, ...]:
         return tuple(sorted(self.alive(CONTROLLABLE_TYPES), key=lambda u: u.unit_id))
 
+    # ---- 32进16 新增查询 ----
+    def imp(self) -> Unit | None:
+        for unit in self.alive((IMP,)):
+            return unit
+        return None
+
+    def enemy_imps(self) -> tuple[Unit, ...]:
+        """可见敌方捣乱鬼（仅 destroy 站桩引导期间全图可见）。"""
+        return tuple(u for u in self.enemy if u.kind == IMP and u.alive)
+
+    def summon_robot(self, unit_id: int) -> Robot | None:
+        for robot in self.summon_robots:
+            if robot.robot_id == unit_id and robot.alive:
+                return robot
+        return None
+
+    def vehicle_cells(self) -> dict[Pos, str]:
+        return {pos: kind for pos, kind in self.zones.items() if kind in VEHICLE_TYPES}
+
+    def my_vehicle_side(self) -> str:
+        return CHALLENGER_VEHICLE if self.team_type == "challenger" else DEFENDER_VEHICLE
+
+    def half_of(self, pos: Pos) -> str:
+        """矿区半区（左下-右上对角线分界）：返回 "upper"/"lower"。
+
+        challenger 基地在左上（线上方），defender 在右下（线下方）。
+        分界线：y = (31/40)·x → y·40 > 31·x 为 upper。
+        """
+        return "upper" if pos.y * 40 >= 31 * pos.x else "lower"
+
+    def own_half(self, pos: Pos) -> bool:
+        """pos 是否在我方半区（challenger=upper / defender=lower）。"""
+        mine_half = "upper" if self.team_type == "challenger" else "lower"
+        return self.half_of(pos) == mine_half
+
     # ---- 地图元素 ----
     def mines(self, kind: str | None = None) -> tuple[Pos, ...]:
         kinds = (kind,) if kind else MINE_TYPES
@@ -402,8 +471,20 @@ class Turn:
         return frozenset(cells)
 
     def blocked(self, moving: Unit) -> frozenset[Pos]:
-        """对 moving 角色而言的阻挡格（建筑/角色/机器人/中立元素/矿区）。"""
-        cells = {pos for pos, kind in self.zones.items() if kind != LAND}
+        """对 moving 角色而言的阻挡格（建筑/角色/机器人/中立元素/矿区）。
+
+        32进16 小车特例（任务书 4.6.4）：
+        - 己方小车所在格**可驶入**（驶入即驾驶）→ 不算阻挡；
+        - 敌方小车所在格不可驶入 → 阻挡。
+        """
+        cells: set[Pos] = set()
+        my_vehicle = self.my_vehicle_side()
+        for pos, kind in self.zones.items():
+            if kind == LAND:
+                continue
+            if kind in VEHICLE_TYPES and kind == my_vehicle:
+                continue  # 己方小车格可驶入（上车）
+            cells.add(pos)
         cells.update(self.occupied_cells())
         cells.discard(moving.pos)
         for robot in self.robots:
@@ -479,6 +560,72 @@ def drop_command(name: str) -> dict[str, Any]:
 
 def collect_command(pos: Pos) -> dict[str, Any]:
     return {"action": "collect", "targetPos": [pos.dump()]}
+
+
+# ---- 32进16 新指令构造器 ----
+def destroy_command(pos: Pos) -> dict[str, Any]:
+    """破坏矿物（仅捣乱鬼）：需连续 4 回合站桩执行。"""
+    return {"action": "destroy", "targetPos": [pos.dump()]}
+
+
+def catch_command(pos: Pos) -> dict[str, Any]:
+    """抓捕 8 邻域内的敌方捣乱鬼（全部角色可用）：成功 +20 金币，目标阵亡。"""
+    return {"action": "catch", "targetPos": [pos.dump()]}
+
+
+# ---- lastCmdResult 解析（32进16 新格式）----
+# 完整形态："[exitCode:N]\n[durationMs:N]\n<输出>"
+# 超时："[TIMEOUT]\n[durationMs:N]\n<部分输出>"
+# 判题器异常："[JUDGER_ERROR]\n[durationMs:N]\n<原因>"
+# 超 64KB：输出末尾追加 "[TRUNCATED]"
+_CMD_STATUS = ("[TIMEOUT]", "[JUDGER_ERROR]")
+
+
+def parse_cmd_result(raw: str) -> dict[str, Any]:
+    """解析 executeCmd 的回合结果，兼容新旧两种格式。
+
+    返回 {status, exit_code, duration_ms, output, truncated}：
+    - status: "ok" / "timeout" / "judger_error" / "legacy"（无状态头 = 旧格式或空）
+    - output: 剥离状态头与 durationMs 后的正文（timeout/judger_error 保留状态标记前缀，
+      使 LLM/transcript 能看到失败语义）
+    """
+    text = raw or ""
+    if not text:
+        return {"status": "legacy", "exit_code": None, "duration_ms": None,
+                "output": "", "truncated": False}
+    lines = text.split("\n")
+    first = lines[0].strip()
+    status = "legacy"
+    exit_code: int | None = None
+    duration_ms: int | None = None
+    body_start = 0
+    if first.startswith("[exitCode:"):
+        status = "ok"
+        try:
+            exit_code = int(first[len("[exitCode:") : -1])
+        except (ValueError, IndexError):
+            exit_code = None
+        body_start = 1
+    elif first == "[TIMEOUT]":
+        status = "timeout"
+        body_start = 1
+    elif first == "[JUDGER_ERROR]":
+        status = "judger_error"
+        body_start = 1
+    # 第二行固定 [durationMs:N]（仅新格式有）
+    if body_start == 1 and len(lines) > 1 and lines[1].strip().startswith("[durationMs:"):
+        try:
+            duration_ms = int(lines[1].strip()[len("[durationMs:") : -1])
+        except (ValueError, IndexError):
+            duration_ms = None
+        body_start = 2
+    output = "\n".join(lines[body_start:])
+    truncated = output.rstrip().endswith("[TRUNCATED]")
+    if status in ("timeout", "judger_error"):
+        # 保留失败语义（供 transcript/LLM 感知），但避免与状态头解析混淆
+        output = f"[{status.upper()}]\n{output}"
+    return {"status": status, "exit_code": exit_code, "duration_ms": duration_ms,
+            "output": output, "truncated": truncated}
 
 
 # ---- 响应构造 ----
