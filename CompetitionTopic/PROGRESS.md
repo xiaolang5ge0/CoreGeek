@@ -659,7 +659,7 @@
 | M3 召唤机器人策略 | **暂缓**（用户决定：看他人录像后再定；指令链路+守卫已预留） | ⏸ 暂缓 | — |
 | M4 数值调优 | 药品阈值 120→300（HP 500）；其余参数待实战 | ✅ 部分 | — |
 | M5 小车+速度分 | move 2 格合法性+阻挡特例已做；**上车寻路/任务点轮转/部分提交策略待办** | ⬜ 剩余 | — |
-| M6 回归+打包 | 全量测试通过；**打包 dist 待 M5 后重做** | ✅ 部分 | 304/304 |
+| M6 回归+打包 | 全量测试通过；打包已重做（87773B/24 files，含 fsm_imp.py）；**解包冒烟通过**（Python tarfile 解包→v2.0 报文调 decide：响应含 executeCmd/prompt/roleCommandMap，worker catch 敌 imp、imp destroy 敌矿均正常） | ✅ | 304/304 tests + SMOKE OK |
 
 ## 32进16 待办清单（按用户优先级，拿日志/录像后逐个落地）
 
@@ -675,5 +675,6 @@
 | 8 | errorCode=5 收到即当日封禁非任务 LLM（防连续超限） | 顺手可做 | 低 |
 
 ## 打包提醒（进平台前必查）
-- [ ] `python tools/build_package.py` → dist/CoreGeek.tar.gz 顶层含 `CoreGeek/`（初赛封号教训）
+- [x] `python tools/build_package.py` → dist/CoreGeek.tar.gz 顶层含 `CoreGeek/`（初赛封号教训）✅ 2026-10-08 复打：87773B/24 files
+- [x] 解包冒烟测试（.workbuddy/tmp/smoke_v2_deploy.py）：tarfile 解包→仅用解包产物 import→v2.0 payload decide→SMOKE OK
 - [ ] 首战遥测确认：`catch_defense`/`imp_*` trace 正常落 stdout
