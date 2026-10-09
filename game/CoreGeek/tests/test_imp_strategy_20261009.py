@@ -47,7 +47,19 @@ class TestImpAllWeather(unittest.TestCase):
 
     def test_imp_destroys_at_night_not_retreat(self):
         # round 75 → (75-1)%130=74 ≥70 黑夜；imp (24,8) 邻接敌方半区铜矿 (25,8)
+        # IKKHUU-Q1-D：敌基地挪到 (40,10)（禁入圈外）——圈内夜间撤离是新预期行为
         turn = turn_at(75)
+        for r in turn.enemy:
+            if r.kind == "station":
+                r.pos.load({"x": 40, "y": 10}) if hasattr(r.pos, "load") else None
+        # Pos 是 frozen dataclass → 直接改 payload 重建
+        from test_v2_rules import base_payload
+        from agent.protocol import Turn as T
+        payload = base_payload(75)
+        for r in payload["teamEnemy"]["roles"]:
+            if r.get("roleType") == "station":
+                r["pos"] = {"x": 40, "y": 10}
+        turn = T.load(payload)
         fsm = ImpFSM()
         cmd = fsm.decide(turn, turn.imp(), _imp_ctx())
         self.assertIsNotNone(cmd)

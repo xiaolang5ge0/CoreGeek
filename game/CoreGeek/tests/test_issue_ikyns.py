@@ -42,7 +42,7 @@ class TestThreatEmptyDefense(unittest.TestCase):
 class TestWallVoucher2Jump(unittest.TestCase):
     def test_l2_damaged_wall_gets_voucher2(self):
         """正面 L2 墙低于阈值 → Voucher2（升 L3 回血）。"""
-        sim = make_sim(gold=200)
+        sim = make_sim(gold=400)   # IKKHUU-Q3-F：weapon_reserve 含 L3 预留 150
         sim.round_no = 261
         for pos in [(9, 20), (10, 20), (9, 21)]:
             sim.roles.append(sim._role(62000 + len(sim.weapons()), pos[0], pos[1], "rocket", 1500, level=2))

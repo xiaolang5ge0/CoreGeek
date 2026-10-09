@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .protocol import ROCKET, Pos, Turn, Unit, attack_command, distance
+from .protocol import ROCKET, WALL_MAX_HP, Pos, Turn, Unit, attack_command, distance
 
 CENTER_DAMAGE = 20
 SPLASH_DAMAGE = 10
@@ -26,6 +26,16 @@ STATION_HIT_BONUS = 15  # P1-5：station 掉血时对冲我方机器人的追加
 MIN_SCORE = CENTER_DAMAGE
 ROCKET_READY_GAP = 5   # P0-1 实测：间隔 5 回合起才可能成功（间隔 ≤4 实测 0 成功）
 FAIL_STREAK_SKIP = 2   # 连续失败该次数后本回合跳过该炮（换炮）
+# ---- G 积分射击（IKKHUU-Q4 用户裁决 2026-10-09）----
+ROBOT_POINTS = {
+    "smallRobot": 1, "middleRobot": 2, "largeRobot": 4, "bossRobot": 10,
+}
+POINTS_SCALE = 10      # 积分权重放大系数（压过 approach 等小项）
+FIXER_SAFE_STOCK = 8   # 工人 WallFixer 持有 ≥ 此值 → 防线"顶得住"（实测夜耗 1→14 逐日增长）
+WALL_CRITICAL_RATIO = 0.35  # 墙血 <35% 满血 → 防线不安全
+BIG_TYPES = ("largeRobot", "bossRobot")
+BURST_DAMAGE = CENTER_DAMAGE * 3  # 三炮一轮集火伤害（火力评估：能否击杀大型）
+BIG_STUCK_PENALTY = 150  # 杀不动的大型目标惩罚（>小型可击杀分，防止浪费冷却）
 
 
 class JointFirePlanner:
@@ -122,6 +132,23 @@ class JointFirePlanner:
             info["station_hp"] = station.health if station is not None else 0
         trace["fire"] = info
 
+    def _defense_safe(self, turn: Turn) -> bool:
+        """G 火力评估前半：防线是否"顶得住"（用户裁决 IKKHUU-Q4）——
+        工人 WallFixer 持有充足 + 无濒危墙。station 正在掉血时由调用方排除。"""
+        fixers = sum(
+            u.backpack.count("WallFixer")
+            for u in turn.ours if u.kind == "worker"
+        )
+        if fixers < FIXER_SAFE_STOCK:
+            return False
+        for w in turn.walls():
+            if w.level >= 3:
+                continue
+            max_hp = WALL_MAX_HP[min(max(w.level, 1), len(WALL_MAX_HP)) - 1]
+            if w.health < WALL_CRITICAL_RATIO * max_hp:
+                return False
+        return True
+
     def _best_targets(
         self, turn: Turn, weapon: Unit, station_hit: bool = False
     ) -> tuple[list[Pos], int]:
@@ -138,6 +165,14 @@ class JointFirePlanner:
         robots = ours if ours else in_range
         station = turn.station()
         anchor = station.pos if station is not None else weapon.pos
+        # G 积分模式（IKKHUU-Q4）：防线顶得住（修复包足+无濒危墙）且基地未掉血 →
+        # 积分优先；否则维持威胁优先（防御第一）。
+        points_mode = self._defense_safe(turn) and not station_hit
+        # 大型杀不动判定：血量 > 三炮一轮集火伤害 → 本轮击杀无望
+        big_stuck = {
+            r.robot_id for r in robots
+            if r.kind in BIG_TYPES and r.health > BURST_DAMAGE
+        }
         scored: list[tuple[int, int, int, int, int, Pos]] = []
         for robot in robots:
             cell = robot.pos
@@ -156,12 +191,24 @@ class JointFirePlanner:
             team_bonus = 0
             if robot.target_team == turn.team_type:
                 team_bonus = SELF_TEAM_BONUS + (STATION_HIT_BONUS if station_hit else 0)
-            score = (
-                damage
-                + LETHAL_BONUS * kills
-                + max(0, APPROACH_RADIUS - distance(cell, anchor))
-                + team_bonus
-            )
+            if points_mode:
+                # 积分主导：可击杀目标 ×2（命中即得分）；杀不动的大型目标重罚——
+                # 火力打不死 BOSS 但修复包顶得住 → 转射可击杀的小兵拿分（用户补规则）
+                pts = ROBOT_POINTS.get(robot.kind, 1)
+                stuck = robot.robot_id in big_stuck
+                score = (
+                    pts * POINTS_SCALE * (2 if kills else 1)
+                    + damage
+                    + team_bonus
+                    - (BIG_STUCK_PENALTY if stuck else 0)
+                )
+            else:
+                score = (
+                    damage
+                    + LETHAL_BONUS * kills
+                    + max(0, APPROACH_RADIUS - distance(cell, anchor))
+                    + team_bonus
+                )
             scored.append((score, -robot.health, -distance(weapon.pos, cell), cell.x, cell.y, cell))
         scored.sort(reverse=True)
         n_targets = max(1, weapon.level)

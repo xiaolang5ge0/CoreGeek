@@ -149,6 +149,42 @@ def _classify(text: str) -> str:
     return "engineering" if eng >= api else "api"
 
 
+# IKKHUU-健壮性（用户补充）：LLM 命令黑名单——破坏性/网络/交互式命令不下发
+_CMD_DESTRUCTIVE = (
+    "rm -rf /", "rm -fr /", "mkfs", "shutdown", "reboot", "> /dev/",
+    ":(){", "dd if=", "chmod -r 777 /", "chown -r ", "mv / ", "cp /dev/",
+)
+_CMD_NET = ("apt-get install", "apt install", "pip install", "yum install",
+            "git clone", "wget http", "wget ftp", "curl -o", "curl --output")
+_CMD_INTERACTIVE = {"vim", "vi", "nano", "top", "htop", "less", "more",
+                    "emacs", "ssh", "telnet", "mysql", "psql", "mongo"}
+
+
+def _llm_cmd_safe(cmd: str) -> tuple[bool, str]:
+    """LLM 返回命令的安全校验（返回 (是否放行, 拒绝原因)）。
+
+    逐行检查：破坏性/网络安装命令**全文**匹配；交互式命令按**行首 token**匹配
+    （避免 `desktop`/`stop` 等子串误杀）。被拒命令不消耗命令预算，原因写回
+    transcript 让 LLM 自纠。
+    """
+    low = (cmd or "").lower()
+    for pat in _CMD_DESTRUCTIVE:
+        if pat in low:
+            return False, f"包含破坏性操作 {pat!r}"
+    for pat in _CMD_NET:
+        if pat in low:
+            return False, f"包含网络/安装操作 {pat!r}（沙盒离线）"
+    for line in low.splitlines():
+        tok = line.strip()
+        for pre in ("sudo ", "doas "):
+            if tok.startswith(pre):
+                tok = tok[len(pre):]
+        head = tok.split(" ", 1)[0].split("/", 1)[-1]
+        if head in _CMD_INTERACTIVE:
+            return False, f"交互式命令 {head!r} 会在判题器挂起"
+    return True, ""
+
+
 def _safe_eval(expr: str) -> Any:
     """白名单算术求值（local_answer）：只允许常量与 + - * / // % ** 一元运算。"""
     try:
@@ -206,6 +242,7 @@ class TaskSession:
     timeout_rounds: int = 0                                 # 任务超时回合数（平台给）
     max_cmds: int = FORCE_SUBMIT_CMDS                       # 命令预算（按 timeout 动态）
     force_sent: bool = False                                # 是否已发过"强制答案"prompt
+    skip_explore: bool = False                              # IKKHUU-Q2-A：紧任务跳过健壮探索
     force_answer: bool = False                              # 强制只给答案模式（拒绝新命令）
     local_done: bool = False                                # local_answer 已判定（零 LLM 直答）
 
@@ -252,6 +289,11 @@ class TaskPlanner:
                 budget = max(2, (session.timeout_rounds - 4) // 2)
                 session.max_loops = min(MAX_LLM_LOOPS, budget)
                 session.max_cmds = min(MAX_LLM_LOOPS, budget)
+                # IKKHUU-Q2-A（实测：接任务→首 prompt 恒 3-5 回合死时间 + 2 回合/次交换，
+                # timeout=10 仅够 3 次交换）：**紧任务跳过健壮探索**（省 2 回合 = 多 1 次
+                # 交换机会），由 LLM 首条命令自行探索任务点名文件。
+                if session.timeout_rounds <= 10:
+                    session.skip_explore = True
             session.stage = ST_EXPLORE
 
         # 1. 回收异步结果
@@ -345,6 +387,10 @@ class TaskPlanner:
                     session.answer = ans
                     session.stage = ST_SUBMIT
                     return self._advance(turn, session, out)
+            # IKKHUU-Q2-A：紧任务跳过探索（独立标志，与 explore_sent 语义区分）
+            if getattr(session, "skip_explore", False):
+                session.stage = ST_LLM
+                return self._advance(turn, session, out)
             # 健壮探索（单条命令）
             if not session.explore_sent:
                 session.explore_sent = True
@@ -708,6 +754,16 @@ class TaskPlanner:
                 session.force_answer = True
                 session.stage = ST_LLM
                 return
+            # IKKHUU-健壮性（用户补充）：LLM 命令安全校验——非法命令不下发、
+            # 拒绝原因写回 transcript 让 LLM 自纠（不消耗命令预算）
+            ok, why = _llm_cmd_safe(cmd)
+            if not ok:
+                session.transcript.append(
+                    f"COMMAND REJECTED: {cmd[:150]}\n"
+                    f"RESULT: 该命令被平台拒绝（{why}）——请改用非交互只读命令"
+                )
+                session.stage = ST_LLM
+                return
             session.stage = ST_WAIT_CMD
             session._pending_llm_cmd = cmd  # type: ignore[attr-defined]
             return
@@ -857,7 +913,23 @@ class TaskPlanner:
                 "①统计口径（时间窗/状态过滤/是否去重）以**任务文档明示规则为准**；"
                 "②数据必须**全量**（分页取尽，默认页 ≠ 全部）；"
                 "③数字给出前在内部复核一遍口径与全量性。口径不确定时按文档字面规则执行。"
+                "④IKKHUU-Q2-C：**提交前必须用 python 脚本统计并把口径 echo 出来核对**"
+                "（脚本注释写明：统计范围/过滤条件/是否去重），answer 数字与脚本输出"
+                "完全一致才提交——**禁止目测估算**。"
             )
+        # IKKHUU-Q2-B：timeout≤10 的任务交换次数极少，明确告知预算
+        if 0 < session.timeout_rounds <= 10:
+            parts.append(
+                "【紧任务模式】本任务超时预算 ≤10 回合（**约 3 次交互**）：第 1 次交互就基于"
+                "任务描述与已有数据作答；**禁止 ls/find 等系统探索**，只读任务文本点名的"
+                "文件；宁可给出当前最佳答案也不要耗尽预算。"
+            )
+        # IKKHUU-健壮性（用户补充）：命令规范前置告知
+        parts.append(
+            "【命令规范】每次只返回**一条非交互 shell 命令**；禁止 sudo/安装包"
+            "（apt/pip install）/交互式编辑器（vim/top/less）/网络下载；大输出用 "
+            "head/tail/grep 限流；python 代码用 heredoc（python3 << 'EOF'）一次执行完。"
+        )
         if session.force_answer:
             parts.append(
                 "【强制提交】距任务超时/命令预算已到极限：**必须直接给出 answer，不得再返回 cmd**；"

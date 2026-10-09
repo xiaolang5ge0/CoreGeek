@@ -35,7 +35,12 @@ from .protocol import (
 )
 from .rules import LegalityGuard
 
-FLEE_DIST = 2              # 敌方角色进入此距离 → 贴边游走放哨（catch 需距离 1，留 1 格余量）
+FLEE_DIST = 2              # 敌方角色进入此距离 → 贴边游走放哨（catch 射程 1，留 1 格余量）
+IMP_FLEE_DIST = 4          # **敌 imp 专用**威胁距离（IKKHUU-Q1-E：敌 imp 是唯一能秒杀
+                           # 我们的单位——catch 瞬杀 500 血，等速追击逃不掉 → 更早脱离）
+NIGHT_BASE_CLEAR = 8       # 夜间/黄昏距敌基地 <8 格 → 强制撤出（IKKHUU-Q1-D：敌 imp
+                           # 夜间守家，r74 我方 imp 在敌基地门口被 catch 秒杀实锤）
+DUSK_LEAVE_MARGIN = 6      # 入夜前 6 回合开始出圈（白天可在圈内拆矿）
 ROBOT_AVOID_DIST = 3       # 机器人进入此距离 → 避让（=机器人攻击距离 3；IKKDR0-F24：
                            # 阈值 2 时序上晚一拍——请求快照时机器人已退到 3-4 格外，
                            # 结算时走近攻击，imp 在敌基地窄道 10 回合被磨死 500 血）
@@ -86,6 +91,21 @@ class ImpFSM:
             if step is not None:
                 self._break_stance(turn)
                 return move_command(step)
+        # 2.5 夜间/黄昏敌基地禁入圈（IKKHUU-Q1-D）：敌 imp 守家，门口=秒杀区；
+        #     黄昏前 6 回合即开始出圈（保证入夜时已在圈外）。进度清零但**不拉黑**目标矿
+        #     （次日白天可回桩）。
+        es = next((u for u in turn.enemy if u.kind == "station"), None)
+        if es is not None and (turn.is_night or turn.rounds_until_night <= DUSK_LEAVE_MARGIN):
+            if distance(imp.pos, es.pos) < NIGHT_BASE_CLEAR:
+                step = self._leave_circle_step(turn, imp, es.pos, ctx)
+                if step is not None:
+                    if self.destroy_progress > 0:
+                        ctx.note(imp.unit_id, "imp_base_clear_hold")
+                        self._reset_progress()
+                    else:
+                        ctx.note(imp.unit_id, "imp_base_clear")
+                    return move_command(step)
+                ctx.note(imp.unit_id, "imp_base_clear_stuck")  # 无路可走 → 原地硬抗
         # 3. 站桩破坏（目标矿仍在且邻接）
         if (
             self.destroy_target is not None
@@ -139,10 +159,15 @@ class ImpFSM:
     def _foe_threat(self, turn: Turn, imp: Unit) -> bool:
         """贴身且敌角色**在移动**才构成威胁（用户裁决 IKKE6Q-Q1-A：对手不会花大力气
         围捕——矿区静止采矿的工人不抓 imp，无需躲；移动中（巡逻/追击）的敌才贴边游走。
-        位置历史按敌 unit_id 记录近 4 回合。"""
+        位置历史按敌 unit_id 记录近 4 回合。
+        IKKHUU-Q1-E：**敌 imp 例外**——唯一秒杀威胁、见我就追，距离 ≤IMP_FLEE_DIST(4)
+        直接视为威胁（不看移动趋势）。"""
         for f in (u for u in turn.enemy if u.alive and u.kind in _THREAT_KINDS):
-            if distance(imp.pos, f.pos) > FLEE_DIST:
+            thr = IMP_FLEE_DIST if f.kind == "imp" else FLEE_DIST
+            if distance(imp.pos, f.pos) > thr:
                 continue
+            if f.kind == "imp":
+                return True
             hist = self._foe_hist.setdefault(f.unit_id, [])
             hist.append((turn.round_no, f.pos))
             if len(hist) > 4:
@@ -162,11 +187,30 @@ class ImpFSM:
     # ---- 威胁期贴边游走（用户裁决 IKKE6Q-Q1-D）----
     def _flee_cmd(self, turn: Turn, imp: Unit, ctx) -> dict[str, Any] | None:
         """敌方角色贴身 → 挪到与最近敌角色 ≥3 格、且**尽量贴近目标矿**的邻格
-        （放哨：绕矿保持安全距离，敌一离开立即回桩——代替逃远+拉黑自锁）。"""
+        （放哨：绕矿保持安全距离，敌一离开立即回桩——代替逃远+拉黑自锁）。
+        IKKHUU-Q1-E：**敌 imp 贴身 → 逃命模式**——不放哨，全力远离敌 imp 并
+        朝我方基地方向撤（等速追击下唯一活路是尽早拉开+回防圈）。"""
         foes = [u for u in turn.enemy if u.alive and u.kind in _THREAT_KINDS]
         if not foes:
             return None
         blocked = turn.blocked(imp)
+        imp_foes = [f for f in foes if f.kind == "imp"]
+        if imp_foes:
+            cands = []
+            for pos in imp.pos.neighbours():
+                if pos in blocked or not turn.land(pos) or pos in ctx.reserved:
+                    continue
+                d_imp = min((distance(pos, f.pos) for f in imp_foes), default=99)
+                home = 0
+                st = turn.station()
+                if st is not None:
+                    home = distance(pos, st.pos)
+                cands.append((-d_imp, home, pos.x, pos.y, pos))
+            if not cands:
+                return None
+            cands.sort()
+            ctx.note(imp.unit_id, "imp_flee_from_imp")
+            return move_command(cands[0][4])
         cands = []
         for pos in imp.pos.neighbours():
             if pos in blocked or not turn.land(pos) or pos in ctx.reserved:
@@ -180,6 +224,18 @@ class ImpFSM:
         cands.sort(key=lambda t: (t[0], t[1], t[2], t[3].x, t[3].y))
         ctx.note(imp.unit_id, "imp_sentry")
         return move_command(cands[0][3])
+
+    def _leave_circle_step(self, turn: Turn, imp: Unit, center: Pos, ctx) -> Pos | None:
+        """出敌基地禁入圈：选使距敌基地最远的可走邻格。"""
+        blocked = turn.blocked(imp)
+        best, best_key = None, None
+        for pos in imp.pos.neighbours():
+            if pos in blocked or not turn.land(pos) or pos in ctx.reserved:
+                continue
+            key = (distance(pos, center), pos.x, pos.y)
+            if best_key is None or key > best_key:
+                best, best_key = pos, key
+        return best
 
     def _robot_evade_step(self, turn: Turn, imp: Unit, ctx) -> Pos | None:
         """机器人避让：向"离最近机器人最远"的可走格挪一步；无路/挪不开 → 原地。"""
@@ -229,6 +285,12 @@ class ImpFSM:
                 continue  # 离我方更近/等距 → 我方经济圈，不拆
             if self.mine_blacklist.get(pos, 0) > turn.round_no:
                 continue  # 站桩被打断/失败 → 短期回避
+            # IKKHUU-Q1-D：黄昏/夜不选敌基地禁入圈内的矿（否则出圈后又走回去震荡）
+            if (
+                (turn.is_night or turn.rounds_until_night <= DUSK_LEAVE_MARGIN)
+                and distance(pos, enemy_station.pos) < NIGHT_BASE_CLEAR
+            ):
+                continue
             price = turn.vendor_prices.get(kind, 1)
             remain = turn.mine_remain.get(pos, 10)
             score = float(price * remain)

@@ -172,8 +172,15 @@ class UpgradePlanner:
         all_walls_l3 = bool(all_walls) and all(w.level >= 3 for w in all_walls)
 
         def weapon_reserve() -> int:
-            """武器升级预留金币（用户：L2炮台优先）：还有武器 <L2 → 100；否则 0。"""
-            return WEAPON_L1_COST if weapons_need_l2 else 0
+            """武器升级预留金币（用户：L2炮台优先）：还有武器 <L2 → 100；
+            已全 L2 → 为 L2→L3 预留一张券钱（IKKHUU-Q3-F：d3 尾 910 金被墙券全量
+            +WallFixer×30 清空、WeaponV2 150 金买不起 → L3 拖 2 天实锤；
+            预留 1 张的量保证 L3 采购通道始终有钱可用，不堵死墙死线支出）。"""
+            if weapons_need_l2:
+                return WEAPON_L1_COST
+            if any(w.level == 2 for w in weapons):
+                return WEAPON_L2_COST
+            return 0
         # FRONT 方向墙 = 离 CP 最远的一半（迎敌面）；有 WallRegistry 时用其标注的正面
         # rebuilt_pos = 前夜被攻破、次日补建的墙（回到 L1，必须重新纳入升级队列）
         rebuilt_pos: set = set()
