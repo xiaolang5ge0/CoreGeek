@@ -194,8 +194,9 @@ class TestQ3VoucherBatch(unittest.TestCase):
         v1 = [m for m in missions if m.voucher == "WallUpgradeVoucher1" and m.kind == "stock"]
         v2 = [m for m in missions if m.voucher == "WallUpgradeVoucher2" and m.kind == "stock"]
         self.assertTrue(v1 and v2, "死线未达标应派墙券备货")
-        # 正面+拐角：x=13 列 L1 有 2 面 → V1 qty=2；L1+L2 共 4 面 → V2 qty=4
-        self.assertEqual(v1[0].qty, 2)
+        # IKKE6Q-Q2-A：需求扩到全部墙——正面 L1×2（目标L3 需V1）+ 侧墙 L1×2（目标L2 需V1）= 4；
+        # V2 = 正面 L1×2 + L2×2（目标L3）= 4（侧墙目标 L2 不需 V2）
+        self.assertEqual(v1[0].qty, 4)
         self.assertEqual(v2[0].qty, 4)
         self.assertEqual(v1[0].priority, -1, "死线未达标应插队 WallFixer 之前")
         self.assertEqual(v2[0].priority, -1)
@@ -211,7 +212,32 @@ class TestQ3VoucherBatch(unittest.TestCase):
                   if m.voucher.startswith("WallUpgradeVoucher") and m.kind == "stock"]
         for m in stocks:
             self.assertNotEqual(m.priority, -1, "死线达标后不再插队")
-            self.assertLessEqual(m.qty, 6, "死线达标后恢复常规备货上限")
+        # IKKE6Q-Q2-A 核心断言：正面全 L3 后，侧墙 L1（目标 L2）仍能拿到券（修空转）
+        v1 = [m for m in stocks if m.voucher == "WallUpgradeVoucher1"]
+        self.assertTrue(v1, "正面达标后侧墙 L1×2 的 V1 需求必须仍被统计")
+        self.assertEqual(v1[0].qty, 2)
+
+    def test_worker_voucher_qty_counts_side_walls(self):
+        """修理工实际买券数量 `_voucher_qty` 同样按全墙目标缺口（与派单口径一致）。"""
+        from agent.fsm_worker import WorkerFSM
+
+        class _Ctx:
+            layout_anchor = (10, 23)
+            layout_front = "W"
+            weapon_need_l2 = False
+
+        payload = self._payload()
+        for r in payload["teamOur"]["roles"]:       # 正面全 L3，只剩侧墙 L1×2
+            if r.get("roleType") == "wall" and r["pos"]["x"] == 13:
+                r["level"] = 3
+        turn = Turn.load(payload)
+        unit = next(u for u in turn.ours if u.kind == "worker")
+        fsm = WorkerFSM(unit.unit_id)
+        # 侧墙 L1×2 目标 L2 → V1 需求 2；V2 需求 0（目标 L2 不需 V2）
+        self.assertEqual(
+            fsm._voucher_qty(turn, unit, _Ctx(), "WallUpgradeVoucher1", 20, "wall"), 2)
+        self.assertEqual(
+            fsm._voucher_qty(turn, unit, _Ctx(), "WallUpgradeVoucher2", 30, "wall"), 0)
 
 
 class TestQ4ImpMineBan(unittest.TestCase):

@@ -800,16 +800,24 @@ class WorkerFSM:
         """批量购买：min(刚需, 背包容量, 金币//单价)，扣除已持有（不多买）。"""
         lvl = 1 if voucher.endswith("1") else 2
         if kind == "wall":
-            # 墙券只按**优先墙（正面+拐角）**的实际需求买（用户 2026-09-23：
-            # "正面>拐角>侧面"，按升级需求，不多买无意义的券）
+            # 墙券按**全部墙的目标缺口**买（IKKE6Q-Q2-A 裁决：旧逻辑只数正面+拐角 →
+            # 侧面墙升级任务永远等不到券、空转 5 天；每面墙目标=wall_target_level，
+            # 升到目标所需：L1→V1（+V2 若目标 L3），L2→V2（若目标 L3））
             _anchor = getattr(ctx, "layout_anchor", None)
             _front = getattr(ctx, "layout_front", None)
             if _anchor is not None:
-                _prio = [
-                    w for w in turn.walls()
-                    if wall_rank(w.pos, _anchor, _front) in (WALL_FRONT, WALL_CORNER)
-                ]
-                need = min(WALL_VOUCHER_BATCH, sum(1 for w in _prio if w.level == lvl))
+                need = 0
+                for w in turn.walls():
+                    t = wall_target_level(w.pos, _anchor, _front)
+                    if w.level >= t:
+                        continue
+                    if lvl == 1:
+                        if w.level == 1 and t >= 2:
+                            need += 1
+                    else:
+                        if (w.level == 1 and t >= 3) or (w.level == 2 and t >= 3):
+                            need += 1
+                need = min(WALL_VOUCHER_BATCH, need)
             else:
                 need = min(WALL_VOUCHER_BATCH, sum(1 for w in turn.walls() if w.level == lvl))
         else:

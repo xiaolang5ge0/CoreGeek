@@ -321,6 +321,19 @@ class UpgradePlanner:
         #    每面各需一张）；解除 FRONT_STOCK_TARGET(6) 与 WALL_VOUCHER_CAP_D4 限制。
         #    （IKKDR0 实锤：旧逻辑小批计数 need=2 → 500 金只买 2 张 → 正面 (12,22) L1
         #    入夜被破。）
+        # ---- 券需求统计（IKKE6Q-Q2-A 裁决：扩到**全部墙**，按各自目标缺口）----
+        # 旧统计只覆盖正面+拐角 → 侧面墙升级任务（target L2）永远等不到券、空转
+        # （IKKE6Q 实锤：侧面 8 面墙 L1 从 d4 停摆到 d9、D9 夜被兵潮连拆 4 面）。
+        # 每面墙升到目标等级所需：L1→需 V1（+V2 若目标 L3）；L2→需 V2（若目标 L3）。
+        def needs_v1(w) -> bool:
+            return w.level == 1 and target_level(w) >= 2
+
+        def needs_v2(w) -> bool:
+            t = target_level(w)
+            if t <= w.level:
+                return False
+            return (w.level == 1 and t >= 3) or (w.level == 2 and t >= 3)
+
         if turn.day_index >= 3 and not weapons_need_l2:
             # 死线未达标 = 正面/拐角墙中存在未满 L3（用户 2026-10-09 Q3 口径：
             # "正面围墙等级不够"字面语义；全 L3 后自然转常规小批）
@@ -333,23 +346,15 @@ class UpgradePlanner:
             _cap = None if front_deadline_unmet else (
                 WALL_VOUCHER_CAP_D4 if turn.day_index < 4 else None
             )
-            for lvl, voucher, cost in ((1, "WallUpgradeVoucher1", 20),
-                                       (2, "WallUpgradeVoucher2", 30)):
-                if front_deadline_unmet:
-                    # 缺口全量：L1 墙每面需 V1+V2 各一；L2 墙每面需 V2 一
-                    if lvl == 1:
-                        need = sum(1 for w in front_wall_units if w.level == 1)
-                    else:
-                        need = sum(1 for w in front_wall_units if w.level in (1, 2))
-                else:
-                    need = sum(1 for w in front_wall_units if w.level == lvl)
+            for lvl, voucher, cost, needs in ((1, "WallUpgradeVoucher1", 20, needs_v1),
+                                              (2, "WallUpgradeVoucher2", 30, needs_v2)):
+                need = sum(1 for w in all_walls if needs(w))   # ← 全部墙的目标缺口
                 if need <= 0:
                     continue
                 held = sum(u.backpack.count(voucher) for u in turn.ours if u.kind == "worker")
-                if front_deadline_unmet:
-                    target = need
-                else:
-                    target = FIXER_STOCK_MAXED if (all_weapons_l3 and all_walls_l3) else FRONT_STOCK_TARGET
+                # 目标 = 精确缺口（全部墙、按各自目标等级）；需求统计已含侧面，
+                # 无需再按 FRONT_STOCK_TARGET 盲备（IKKE6Q-Q2-A：按需买券，修空转）
+                target = need
                 if _cap is not None:
                     headroom = _cap - _held_total
                     if headroom <= 0:
