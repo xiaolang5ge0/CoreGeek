@@ -31,6 +31,7 @@ from .protocol import (
     IMP,
     MINE_TYPES,
     Pos,
+    RAILGUN,
     ROCKET,
     ROUNDS_PER_DAY,
     TOWER_TYPES,
@@ -44,6 +45,7 @@ from .protocol import (
     empty_response,
     move_command,
     parse_targets,
+    remove_command,
     station_footprint,
     use_command,
 )
@@ -183,6 +185,7 @@ class Brain:
         self.wall_registry = WallRegistry()
         self.llm_day: int = 0
         self.llm_calls_today: int = 0
+        self._boss_used_day: int = -1  # IKKIBC-Q6：BOSS 召唤令当日已用（防同日重复 use）
         self.llm_ban_day: int = -1   # errorCode=5（LLM 超限）当日封禁非任务 LLM（防连续超限堆异常，U18 保守口径）
         self.imp_mine_ban: dict[str, int] = {}  # IKKDR0-Q4：敌 imp 破坏 → 矿种禁采至解禁回合
         self.tasks_exhausted: bool = False      # IKKDR0-Q5-E：平台任务投放枯竭（F16）
@@ -276,7 +279,10 @@ class Brain:
                         "turrets": [p.dump() for p in self.layout.turret_cells],
                         "cp": self.layout.control_point.dump(),
                         "walls": len(self.layout.wall_cells),
+                        "back_walls": len(self.layout.back_wall_cells),
                     }
+                    # IKKIBC-Q5：开口朝向注入火力规划（后方 BOSS 判定）
+                    self.fire.set_front(self.front, turn.station().pos if turn.station() else None)
             # 围墙缺口自愈（issue#26）：建造失败格 40 回合过期后可重建；
             # 布局缓存不会自动收回该格 → 白天定期重算布局，把恢复可用的墙格补回墙环。
             if (
@@ -289,6 +295,7 @@ class Brain:
                     self.layout = recomputed
                     self._layout_recomputed_round = turn.round_no
                     trace["layout_gap_recovered"] = len(recomputed.wall_cells)
+                    self.fire.set_front(self.front, turn.station().pos if turn.station() else None)
             # 围墙状态表刷新（识别攻破/补建，供修理工按需修复/升级）
             if self.layout is not None:
                 self.wall_registry.sync(turn, self.layout)
@@ -457,10 +464,73 @@ class Brain:
         weapon_slots = max(0, WEAPON_LIMIT - len(existing_weapons))
         turrets_missing = [
             c for c in layout.turret_cells if c not in existing_weapons and c not in occupied
-        ][:weapon_slots]
+        ]
+        # IKKIBC-Q4（实锤：敌召唤 BOSS 站上第 3 炮规划位 → 只建成 2 炮）：
+        # 炮位被机器人占据 → 用"邻接 CP 的可建空格"替补，保证凑满 3 座。
+        # Q7：电磁炮槽位 = layout.turret_cells[-1]（固定槽位判定，防随建造进度漂移）；
+        # 该槽被占替补时，替补格继承电磁炮身份。
+        rail_cells = {layout.turret_cells[-1]} if layout.turret_cells else set()
+        robot_cells = {r.pos for r in turn.hostile_robots}
+        if robot_cells:
+            # 武器建造区 = 距基地 1 格（ring1/蓝区，rules 硬校验）——替补格只能从这里找；
+            # 可挖性由 _night_control_goal（邻接任意武器的安全格）兜底，不要求贴 CP。
+            _st = turn.station()
+            _foot = set(station_footprint(_st.pos)) if _st is not None else set()
+            _ring1: set = set()
+            for _fc in _foot:
+                for _nb in _fc.neighbours():
+                    if _nb not in _foot and 0 <= _nb.x < turn.width and 0 <= _nb.y < turn.height:
+                        _ring1.add(_nb)
+            fixed = []
+            for c in turrets_missing:
+                if c not in robot_cells:
+                    fixed.append(c)
+                    continue
+                alt = next(
+                    (p2 for p2 in sorted(_ring1, key=lambda q: (q.x, q.y))
+                     if p2 != c and p2 not in existing_weapons and p2 not in existing_walls
+                     and p2 not in occupied and p2 not in robot_cells
+                     and p2 not in turrets_missing
+                     and turn.land(p2)),
+                    None,
+                )
+                if alt is not None:
+                    ctx.trace.setdefault("turret_substitute", []).append(
+                        {"from": c.dump(), "to": alt.dump()}
+                    )
+                    if c in rail_cells:
+                        rail_cells.add(alt)
+                    fixed.append(alt)
+                # 无替补格 → 该炮位放弃（宁缺勿卡：派单到非法格会每回合被守卫拒绝）
+            turrets_missing = fixed
+        turrets_missing = turrets_missing[:weapon_slots]
         walls_missing = [
             c for c in layout.wall_cells if c not in existing_walls and c not in occupied
         ]
+        # IKKIBC-Q5（用户裁决：背后也要造墙）：主墙齐后补背墙列（防敌方在我方
+        # 背后召唤 BOSS 直插炮位）；**门墙只在黄昏窗口纳入**——白天保持开口供
+        # 角色进出，入夜前由修理工封门；次日清晨再拆（见下方晨拆逻辑）。
+        if not walls_missing and layout.back_wall_cells:
+            back_perm = [
+                c for c in layout.back_wall_cells
+                if c != layout.door_cell and c not in existing_walls and c not in occupied
+            ]
+            walls_missing += back_perm
+            if (
+                layout.door_cell is not None
+                and layout.door_cell not in existing_walls
+                and layout.door_cell not in occupied
+                and 0 < turn.rounds_until_night <= 25
+            ):
+                # **封门时序**：仅当自家人（除常驻敌区的 imp）全部在内时才封——
+                # 否则把在外卖货的矿工锁在门外整夜，比背后敞一夜更糟。
+                st = turn.station()
+                all_home = st is not None and all(
+                    distance(u.pos, st.pos) <= 6
+                    for u in turn.ours if u.alive and u.kind != "imp"
+                )
+                if all_home:
+                    walls_missing.append(layout.door_cell)
         phase = self.phases.phase(turn, not (turrets_missing or walls_missing))
         ctx.trace.update(
             phase=phase, turrets_missing=len(turrets_missing), walls_missing=len(walls_missing)
@@ -535,7 +605,10 @@ class Brain:
             else:
                 pool = free       # 修理工阵亡 → 挖矿工接手
             worker = min(pool, key=lambda w: distance(w.pos, cell))
-            self._worker_fsm(worker).build = (cell, ROCKET)
+            # IKKIBC-Q7（用户裁决）：双火箭+电磁炮——固定槽位（含替补）建电磁炮
+            # （无冷却、能量 20×级穿透；L3=60/回合，对大怪纵队收益远超第 3 门火箭）
+            kind = RAILGUN if cell in rail_cells else ROCKET
+            self._worker_fsm(worker).build = (cell, kind)
             busy.add(worker.unit_id)
             gold_left -= WEAPON_BUILD_COST
         walls_left = len(walls_missing)
@@ -586,11 +659,11 @@ class Brain:
             def _adj_built(c) -> int:
                 return sum(1 for nb in c.neighbours() if nb in existing_wall_pos)
 
-            cand = [c for c in layout.wall_cells if c in walls_missing and c not in assigned]
+            cand = [c for c in walls_missing if c not in assigned]
             cand.sort(key=lambda c: (
                 0 if c in breached_missing else 1,
                 -_adj_built(c),
-                layout.wall_cells.index(c),
+                layout.wall_cells.index(c) if c in layout.wall_cells else 90 + c.x + c.y,
             ))
             cell = cand[0] if cand else None
             if cell is not None:
@@ -617,7 +690,53 @@ class Brain:
         # 修理工夜间就位点 = 内圈邻墙格（issue#26：D4+ 夜到 repair_post 就位，非只回家）
         ctx.repair_anchor = layout.repair_post or layout.control_point
 
+        # IKKIBC-Q5 门墙晨拆（用户裁决："第二天拆背部最低级的墙出门，下一天黑夜前
+        # 要补上"——每天清晨修理工拆门放行，黄昏建墙任务把门补上；见上方 walls_missing 门控）
+        if (
+            layout.door_cell is not None
+            and turn.rounds_until_night > 40   # 与黄昏建门窗口(≤30)不重叠
+        ):
+            door_wall = next(
+                (w for w in turn.walls() if w.pos == layout.door_cell), None
+            )
+            rid = next(
+                (w.unit_id for w in workers
+                 if self._worker_fsm(w).role == ROLE_REPAIRER), None
+            )
+            repairer = next((w for w in turn.workers() if w.unit_id == rid), None)
+            if door_wall is not None and repairer is not None and rid not in commands:
+                if distance(repairer.pos, layout.door_cell) <= 1:
+                    commands[rid] = remove_command(layout.door_cell)
+                    ctx.trace["door_removed"] = layout.door_cell.dump()
+                    ctx.reserve_from(commands[rid])
+                else:
+                    step = next_step(turn, repairer, layout.door_cell, ctx.reserved) \
+                        or next_step(turn, repairer, layout.door_cell)
+                    if step is not None:
+                        commands[rid] = move_command(step)
+                        ctx.reserve_from(commands[rid])
+        # IKKIBC-Q6 BOSS 召唤令使用（用户裁决：有路线直捣敌基地，否则拆墙开路）：
+        # 白天 use 登记召唤位（不得在任一基地建造区）→ 当夜首回合生成。
+        holder = next(
+            (u for u in turn.ours
+             if u.kind == "worker" and "BossRobotSummonOrder" in u.backpack),
+            None,
+        )
+        es = next((u for u in turn.enemy if u.kind == "station" and u.alive), None)
+        if (
+            holder is not None and es is not None and holder.unit_id not in commands
+            and self._boss_used_day != turn.day_index
+        ):
+            pos = self._boss_summon_pos(turn, es)
+            if pos is not None:
+                commands[holder.unit_id] = use_command("BossRobotSummonOrder", pos)
+                self._boss_used_day = turn.day_index
+                ctx.trace["boss_summon_use"] = pos.dump()
+                ctx.reserve_from(commands[holder.unit_id])
+
         for worker in workers:
+            if worker.unit_id in commands:
+                continue  # 晨拆门/召唤令等 brain 级指令优先，不被 FSM 覆盖
             cmd = self._safe_unit(self._worker_fsm(worker).decide, ctx.trace,
                                   "worker%d" % worker.unit_id, turn, worker, ctx)
             if cmd is None:
@@ -676,7 +795,7 @@ class Brain:
             ctx.home_anchor = self.layout.control_point
             ctx.repair_anchor = self.layout.repair_post or self.layout.control_point
         # 机器人危险圈 + 内圈安全锚点（实战教训：夜采/夜卖被兵潮打死）
-        ctx.robot_cells = tuple(r.pos for r in turn.robots if r.alive)
+        ctx.robot_cells = tuple(r.pos for r in turn.hostile_robots)  # IKKIBC-Q6：排除自家召唤
         interior = self._interior_cells(turn)
         ctx.safe_anchor = interior[0] if interior else ctx.home_anchor
         ctx.danger_workers = {
@@ -688,7 +807,7 @@ class Brain:
         ctx.base_in_danger = bool(
             station is not None and any(
                 distance(r.pos, cell) <= BASE_DANGER_DIST
-                for r in turn.robots if r.alive
+                for r in turn.hostile_robots
                 for cell in station_footprint(station.pos)
             )
         )
@@ -737,10 +856,16 @@ class Brain:
             turn, self.layout, ctx, sorted(turn.workers(), key=lambda w: w.unit_id),
             allow_stock=False,
         )
+        # IKKIBC-Q5：建造仅白天合法（§4.5.1）——夜间清掉在途建造任务，
+        # 防止修理工为"未建成的背墙"整夜站桩墙外（次日清晨 _day 会重新派单）。
+        for _w in turn.workers():
+            _fsm = self._worker_fsm(_w)
+            if _fsm.build is not None:
+                _fsm.build = None
         pioneer = turn.pioneer()
         if pioneer is not None and self.layout is not None:
             cp = self.layout.control_point
-            robots_alive = [r for r in turn.robots if r.alive]
+            robots_alive = list(turn.hostile_robots)
             # 兵潮已清 + 天亮前有余量 → 开拓者出行动（任务/买券），不再蹲守
             if not robots_alive and turn.rounds_until_dawn > 30:
                 prev = self.pioneer_fsm.state
@@ -773,10 +898,11 @@ class Brain:
                 if pioneer.unit_id in commands:
                     ctx.reserve_from(commands[pioneer.unit_id])
             else:
-                cp_danger = any(
-                    distance(rc, cp) <= PIONEER_FLEE_DIST for rc in ctx.robot_cells
+                # IKKIBC-Q4（实锤：敌 BOSS 站炮位旁 → CP 危险 → 躲内圈 → 全夜零开火）：
+                # 改为选"邻接最多武器"的**安全**控制格——保持控炮能力优先于绝对安全。
+                goal = self._night_control_goal(
+                    turn, ctx, pioneer, avoid=ctx.repair_anchor
                 )
-                goal = ctx.safe_anchor if (cp_danger and ctx.safe_anchor) else cp
                 cmd = self.pioneer_fsm.move_to_guard(turn, pioneer, goal, ctx)
                 if cmd:
                     commands[pioneer.unit_id] = cmd
@@ -792,13 +918,193 @@ class Brain:
         # 操控占用动作（已确认）：移动中不能控炮 → 仅当开拓者无指令时才开火
         if pioneer is not None and pioneer.unit_id not in commands:
             self.fire.plan(turn, pioneer, commands, ctx.trace)
+        # IKKIBC-Q7（用户裁决）：双火箭+电磁炮模式下，**挖矿工**操控第二座武器
+        # （修理工绝不离墙——夜间抢修优先；挖矿工入夜就位控制格，放弃夜采）。
+        if any(w.kind == RAILGUN for w in turn.weapons()):
+            miner = next(
+                (w for w in turn.workers()
+                 if self._worker_fsm(w).role == ROLE_MINER), None
+            )
+            if miner is not None and miner.unit_id not in commands:
+                if any(distance(miner.pos, w.pos) <= 1 for w in turn.weapons()):
+                    self.fire.plan(turn, miner, commands, ctx.trace)
+                else:
+                    goal = self._night_control_goal(
+                        turn, ctx, miner, avoid=ctx.repair_anchor
+                    )
+                    cmd = self.pioneer_fsm.move_to_guard(turn, miner, goal, ctx)
+                    if cmd:
+                        commands[miner.unit_id] = cmd
+                        ctx.reserve_from(cmd)
+        # IKKIBC-Q6：夜间驱动我方召唤机器人（有路线直捣敌基地，否则拆墙开路）
+        self._drive_summon_robots(turn, commands, ctx)
         for worker in turn.workers():
+            if worker.unit_id in commands:
+                continue  # 夜控/召回等 brain 级指令优先，不被 FSM 覆盖
             cmd = self._safe_unit(self._worker_fsm(worker).decide, ctx.trace,
                                   "worker%d" % worker.unit_id, turn, worker, ctx)
             if cmd:
                 commands[worker.unit_id] = cmd
             ctx.reserve_from(cmd)
         self._maybe_medicine(turn, commands)
+
+    # ---- IKKIBC-Q4：夜间控制格选择 ----
+    def _night_control_goal(
+        self, turn: Turn, ctx: "_Ctx", controller, avoid=None
+    ) -> Pos | None:
+        """选"邻接最多武器"的安全可达格作为夜控就位目标。
+
+        CP 有机器人贴脸（如敌方召唤 BOSS 占位）时不再二选一躲安全角——
+        在 CP/炮位邻域找无机器人贴脸、邻接武器最多的格；全部不安全才退安全锚点。"""
+        if self.layout is None:
+            return ctx.safe_anchor or ctx.home_anchor
+        cp = self.layout.control_point
+        robots = list(turn.hostile_robots)
+        occupied = turn.occupied_cells()
+        weapons = turn.weapons()
+        cands = {cp}
+        for w in weapons:
+            cands.update(w.pos.neighbours())
+        best, best_key = None, None
+        for c in cands:
+            if not (0 <= c.x < turn.width and 0 <= c.y < turn.height):
+                continue
+            if not turn.land(c):
+                continue
+            if c != controller.pos and c in occupied:
+                continue
+            if avoid is not None and c == avoid:
+                continue  # Q5：repair_post 是修理工的岗，操控者不得占位
+            adj = sum(1 for w in weapons if distance(c, w.pos) <= 1)
+            rmin = min((distance(c, r.pos) for r in robots), default=99)
+            unsafe = 1 if rmin <= PIONEER_FLEE_DIST else 0
+            key = (unsafe, -adj, -rmin, distance(c, cp), c.x, c.y)
+            if best_key is None or key < best_key:
+                best, best_key = c, key
+        if best is None:
+            return ctx.safe_anchor or cp
+        if best_key[0] == 1 and ctx.safe_anchor is not None:
+            return ctx.safe_anchor   # 全部控制格都贴脸 → 保命优先
+        return best
+
+    # ---- IKKIBC-Q6：BOSS 召唤位 / 夜间驱动 ----
+    def _boss_summon_pos(self, turn: Turn, es) -> Pos | None:
+        """召唤位：敌基地外围（距敌基地 6-9 格、避开建造区/占用/中立元素），
+        朝地图中心方向（夜间我方机器人来向的反向，生存窗口更大）。"""
+        cx, cy = (turn.width - 1) / 2.0, (turn.height - 1) / 2.0
+        dx, dy = cx - es.pos.x, cy - es.pos.y
+        norm = max(abs(dx), abs(dy)) or 1.0
+        ux, uy = dx / norm, dy / norm
+        occupied = turn.occupied_cells()
+        for dist in (8, 7, 9, 6):
+            for j in (0, 1, -1, 2, -2):
+                x = int(round(es.pos.x + ux * dist + uy * j))
+                y = int(round(es.pos.y + uy * dist - ux * j))
+                pos = Pos(x, y)
+                if not (0 <= x < turn.width and 0 <= y < turn.height):
+                    continue
+                if not turn.land(pos) or pos in occupied:
+                    continue
+                if distance(pos, es.pos) < 6:   # 避开建造区（平台规则）
+                    continue
+                return pos
+        return None
+
+    def _drive_summon_robots(self, turn: Turn, commands: dict, ctx: "_Ctx") -> None:
+        """夜间驱动我方召唤机器人（接口 §2.2/§4.5.4：可控机器人以机器人 ID 为 key
+        下发 move/attack；attack 可打对方英雄/基地/建筑）。
+        用户裁决 IKKIBC-Q6：**有路线直捣敌基地**；无路线 → 拆墙开路。"""
+        es = next((u for u in turn.enemy if u.kind == "station" and u.alive), None)
+        if es is None:
+            return
+        base_cells = station_footprint(es.pos)
+        for robot in turn.summon_robots:
+            if not robot.alive or robot.robot_id in commands:
+                continue
+            adj_base = next(
+                (c for c in base_cells if distance(robot.pos, c) <= 1), None
+            )
+            if adj_base is not None:
+                commands[robot.robot_id] = {
+                    "action": "attack", "targetPos": [adj_base.dump()],
+                }
+                ctx.trace.setdefault("boss_cmd", []).append(
+                    {"robot": robot.robot_id, "cmd": "attack_base"}
+                )
+                continue
+            step = self._robot_step_to(turn, robot.pos, base_cells)
+            if step is not None:
+                commands[robot.robot_id] = {
+                    "action": "move", "targetPos": [step.dump()],
+                }
+                continue
+            # 无路线 → 拆墙开路：邻接敌墙攻击之，否则走向最近敌墙
+            adj_wall = next(
+                (u.pos for u in turn.enemy
+                 if u.kind == "wall" and u.alive and distance(robot.pos, u.pos) <= 1),
+                None,
+            )
+            if adj_wall is not None:
+                commands[robot.robot_id] = {
+                    "action": "attack", "targetPos": [adj_wall.dump()],
+                }
+                ctx.trace.setdefault("boss_cmd", []).append(
+                    {"robot": robot.robot_id, "cmd": "attack_wall"}
+                )
+                continue
+            walls = [u for u in turn.enemy if u.kind == "wall" and u.alive]
+            if walls:
+                near = min(walls, key=lambda w: distance(robot.pos, w.pos))
+                step = self._robot_step_to(turn, robot.pos, [near.pos])
+                if step is not None:
+                    commands[robot.robot_id] = {
+                        "action": "move", "targetPos": [step.dump()],
+                    }
+
+    def _robot_step_to(self, turn: Turn, start: Pos, target_cells) -> Pos | None:
+        """机器人 BFS 寻路（8 向）：目标 = 邻接目标格的空格；阻挡 = 建筑/角色/
+        机器人/中立元素。返回应走的第一步；已邻接目标或不可达 → None。"""
+        from collections import deque
+
+        goals = set()
+        for c in target_cells:
+            for nb in c.neighbours():
+                if 0 <= nb.x < turn.width and 0 <= nb.y < turn.height:
+                    goals.add(nb)
+        if start in goals:
+            return None
+        blocked: set[Pos] = set()
+        for u in (*turn.ours, *turn.enemy):
+            if u.kind in ("wall", "station"):
+                blocked.update(turn.footprint(u))
+            else:
+                blocked.add(u.pos)
+        for r in turn.robots:
+            if r.alive:
+                blocked.add(r.pos)
+        blocked.update(turn.zones.keys())
+        blocked.discard(start)
+        prev: dict[Pos, Pos | None] = {start: None}
+        queue: deque[Pos] = deque([start])
+        while queue:
+            cur = queue.popleft()
+            if cur in goals:
+                node = cur
+                while prev[node] is not None and prev[node] != start:
+                    node = prev[node]
+                if prev[node] == start:
+                    return node
+                return None
+            for nb in cur.neighbours():
+                if nb in prev:
+                    continue
+                if not (0 <= nb.x < turn.width and 0 <= nb.y < turn.height):
+                    continue
+                if nb in blocked and nb not in goals:
+                    continue
+                prev[nb] = cur
+                queue.append(nb)
+        return None
 
     # ---- 32进16：捣乱鬼 + 反抓防御 ----
     # 追击派单参数（用户 2026-10-09 裁决，只采纳三点：邻接即抓 / 站桩中 2-4 步派单 / 不派开拓者）
@@ -912,7 +1218,7 @@ class Brain:
     def _wall_danger(self, turn: Turn) -> bool:
         """城墙危险阈值（问题4）：预计本夜机器人总伤害 > 城墙总HP×WALL_DANGER_RATIO → 危险。
         预计伤害 = 机器人总攻击力 × 清场回合数（清场回合 = 机器人总HP / 我方DPS，封顶 60）。"""
-        robots = [r for r in turn.robots if r.alive]
+        robots = list(turn.hostile_robots)
         if not robots:
             return False
         from .threat import ROBOT_ATK
@@ -933,7 +1239,7 @@ class Brain:
             near = bool(
                 station is not None and any(
                     distance(r.pos, cell) <= 6
-                    for r in turn.robots if r.alive
+                    for r in turn.hostile_robots
                     for cell in station_footprint(station.pos)
                 )
             )
@@ -1045,7 +1351,7 @@ class Brain:
         if item is None:
             return None
         station = turn.station()
-        robots = [r for r in turn.robots if r.alive]
+        robots = list(turn.hostile_robots)
         if station is None or len(robots) < 3:
             return None
         best, best_n = None, 0
@@ -1171,7 +1477,7 @@ class Brain:
         station = turn.station()
         if station is None:
             return
-        spawns = [(r.pos.x, r.pos.y) for r in turn.robots]
+        spawns = [(r.pos.x, r.pos.y) for r in turn.hostile_robots]  # Q6：排除自家召唤
         self.robot_spawn_log.append({"day": turn.day_index, "spawns": spawns})
         # 主来向：相对基地的 dominant axis（累计所有夜晚）；墙环应朝向来向（开口=其反向）
         sx = sum(x for day in self.robot_spawn_log for x, _ in day["spawns"])

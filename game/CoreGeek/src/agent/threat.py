@@ -49,9 +49,9 @@ class ThreatEstimator:
     def evaluate(self, turn: Turn) -> ThreatReport:
         robots = [
             r
-            for r in turn.robots
-            if r.alive and r.target_team in ("", turn.team_type)
-        ]
+            for r in turn.hostile_robots
+            if r.target_team in ("", turn.team_type)
+        ]  # IKKIBC-Q6：排除自家召唤
         if not robots:
             return ThreatReport(0, 0, 0, 99, 0.0, 0.0, float("inf"), SAFE)
 

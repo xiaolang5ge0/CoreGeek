@@ -11,13 +11,22 @@ from itertools import count
 from .protocol import Pos, Turn, Unit, distance
 
 
+def _corner_cut(turn: Turn, a: Pos, b: Pos, blocked: frozenset[Pos]) -> bool:
+    """对角移动的"禁切角"判定（IKKIBC-Q5 门洞实测教训）：a→b 为对角步且
+    其两个正交桥格都被阻挡 → 平台/沙盒判非法（find_path 规划得出、执行必败
+    → 门口反复震荡）。规划层直接禁掉，宁绕正交一步。"""
+    if abs(b.x - a.x) != 1 or abs(b.y - a.y) != 1:
+        return False
+    return (Pos(a.x, b.y) in blocked) and (Pos(b.x, a.y) in blocked)
+
+
 def find_path(
     turn: Turn,
     unit: Unit,
     goal: Pos,
     reserved: frozenset[Pos] = frozenset(),
 ) -> list[Pos] | None:
-    """A* 全路径（含起点终点）；不可达返回 None。"""
+    """A* 全路径（含起点终点）；不可达返回 None。对角步受"禁切角"约束。"""
     if unit.pos == goal:
         return [unit.pos]
     blocked = turn.blocked(unit)
@@ -46,6 +55,8 @@ def find_path(
         for step in current.neighbours():
             if step in blocked or step in reserved or not turn.land(step):
                 continue
+            if _corner_cut(turn, current, step, blocked):
+                continue  # 对角切角步执行必败 → 规划层禁止
             new_cost = cost + 1
             if new_cost >= best.get(step, new_cost + 1):
                 continue

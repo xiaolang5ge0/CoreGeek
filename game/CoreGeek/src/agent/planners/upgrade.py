@@ -388,6 +388,15 @@ class UpgradePlanner:
                 if held < 2:
                     # cost=50：v2.0 官方价（原 100，需求变更 2026-09-30；运行时价兜底）
                     add("Bomb", 50, None, "stock", 52)
+        # 11. BOSS 召唤令备货（IKKIBC-Q6 用户裁决 2026-10-09）：D5+ 金币富裕备 1 张。
+        #     白天 use 在敌基地外围登记召唤位 → 夜间首回合生成 → brain 每夜驱动其
+        #     直捣敌基地（有路线）或拆墙开路（无路线）。每天限用 10 张（平台规则）。
+        if turn.day_index >= 5 and turn.gold >= 500:
+            held_boss = sum(
+                u.backpack.count("BossRobotSummonOrder") for u in turn.ours
+            )
+            if held_boss < 1:
+                add("BossRobotSummonOrder", 120, None, "stock", 46)
         # 去重：同一建筑只保留最高优先（小=高）的一条任务
         seen: set = set()
         uniq: list[UpgradeMission] = []

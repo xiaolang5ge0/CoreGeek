@@ -65,15 +65,29 @@ class TestNightMining(unittest.TestCase):
         sim.robots.clear()
         sim.add_mine((6, 22), "stone", remaining=30)
         sim.add_mine((8, 20), "copper", remaining=30)
-        mined = False
+        ok = False
         for _ in range(8):
             response, trace = brain.decide(sim.payload())
             if any(c.get("action") == "collect" for c in response["roleCommandMap"].values()):
-                mined = True
+                ok = True
+                break
+            # IKKIBC-Q7（用户裁决：挖矿工操控电磁炮）：夜间挖矿工的岗位是
+            # 控制格——就位/开火都算"恢复行动"（不再震荡规避即达标）
+            mcmd = (response["roleCommandMap"] or {}).get(str(W2))
+            if mcmd and mcmd.get("action") == "attack":
+                ok = True
+                break
+            m = sim.role(W2)
+            if any(
+                abs(m["pos"]["x"] - w["pos"]["x"]) <= 1
+                and abs(m["pos"]["y"] - w["pos"]["y"]) <= 1
+                for w in sim.weapons()
+            ):
+                ok = True
                 break
             sim.apply(response)
             sim.advance()
-        self.assertTrue(mined, "机器人清空后应恢复采矿")
+        self.assertTrue(ok, "机器人清空后挖矿工应就位夜控（Q7）或恢复采矿")
 
 
 class TestMineSidePreference(unittest.TestCase):
@@ -152,16 +166,21 @@ class TestWallRebuild(unittest.TestCase):
         sim.add_mine((7, 26), "stone", remaining=80)
         brain = Brain()
         run_rounds(brain, sim, 130)  # Day1 + Day2（修理工 D1-D2 建墙）
-        self.assertEqual(len(sim.walls()), 14)
-        # 模拟夜战拆掉 3 面墙
+        # IKKIBC-Q5：14 主环 + 6 背墙（含门）
+        expected = {(c.x, c.y) for c in brain.layout.wall_cells} | {
+            (c.x, c.y) for c in brain.layout.back_wall_cells
+        }
+        built = {(w["pos"]["x"], w["pos"]["y"]) for w in sim.walls()}
+        self.assertEqual(built, expected, "主环 14 + 背墙列 6 应全部建成")
+        # 模拟夜战拆掉 3 面墙（20 面中拆 3 → 17）
         destroyed = sim.walls()[:3]
         sim.roles = [r for r in sim.roles if r not in destroyed]
-        self.assertEqual(len(sim.walls()), 11)
+        self.assertEqual(len(sim.walls()), 17)
         # 次日白天补矿重建
         sim.add_mine((6, 22), "stone", remaining=80)
         sim.add_mine((7, 26), "stone", remaining=80)
         run_rounds(brain, sim, 130)
-        self.assertGreaterEqual(len(sim.walls()), 13, "被拆的墙应重建")
+        self.assertGreaterEqual(len(sim.walls()), 19, "被拆的墙应重建（含背墙）")
 
 
 if __name__ == "__main__":

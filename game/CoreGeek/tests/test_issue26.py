@@ -175,14 +175,24 @@ class TestRepairPost(unittest.TestCase):
 
     def test_repairer_goes_to_repair_post_night_d4(self):
         """D4+ 夜：修理工无事可修时就位 repair_post（内圈），而非在外采矿/闲逛。"""
-        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (7, 26): "stone"})
+        sim = SimWorld(station_pos=(10, 24),
+                       mines={(6, 22): "stone", (7, 26): "stone", (16, 18): "copper"})
         sim.add_mine((6, 22), "stone", remaining=120)
         sim.add_mine((7, 26), "stone", remaining=120)
+        sim.add_mine((16, 18), "copper", remaining=120)
         brain = Brain()
         run_rounds(brain, sim, DAY1)
         sim.role(W1)["pos"] = {"x": 22, "y": 30}  # 修理工在远处墙外
         sim.gold = 0
         sim.round_no = 451  # Day4 夜
+        # IKKIBC-Q5：传送场景补开门口（真实对局清晨修理工会拆门，传送跳过了早晨）
+        _door = brain.layout.door_cell if brain.layout else None
+        if _door is not None:
+            sim.roles = [r for r in sim.roles if not (
+                r.get("roleType") == "wall"
+                and (r["pos"]["x"], r["pos"]["y"]) == (_door.x, _door.y)
+            )]
+
         post = brain.layout.repair_post
         reached = False
         for _ in range(40):

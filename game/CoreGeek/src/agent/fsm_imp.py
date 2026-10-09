@@ -139,8 +139,18 @@ class ImpFSM:
             self.destroy_target = self._pick_target(turn, imp, ctx)
         if self.destroy_target is None:
             return None  # 无矿可破坏 → 待命
-        # 5. 向目标矿的邻接操作格移动
+        # 5. 向目标矿的邻接操作格移动（IKKIA9-Q3 用户裁决：**路线危险预检**——
+        #    去拆矿的路上同时计算"敌方角色 + 敌方基地"双威胁；下一步不安全 →
+        #    换安全邻格绕行；没有安全路线 → **原地不动**（不要乱跑送死）。）
         step = step_toward(turn, imp, self.destroy_target, ctx.reserved)
+        if step is not None and self._pos_dangerous(turn, step, imp):
+            safe = self._safe_detour(turn, imp, self.destroy_target, ctx)
+            if safe is None:
+                ctx.note(imp.unit_id, "imp_travel_hold")   # 无安全路线 → 原地等待
+                if self.destroy_progress > 0:
+                    self._reset_progress()
+                return None
+            step = safe
         if step is None:
             if distance(imp.pos, self.destroy_target) <= 1 and imp.pos != self.destroy_target:
                 # 已邻接但上一步可能被打断 → 重新开始站桩
@@ -156,6 +166,49 @@ class ImpFSM:
         return move_command(step)
 
     # ---- 威胁判定 ----
+    def _nightish(self, turn: Turn) -> bool:
+        return turn.is_night or turn.rounds_until_night <= DUSK_LEAVE_MARGIN
+
+    def _pos_dangerous(self, turn: Turn, pos: Pos, imp: Unit) -> bool:
+        """双威胁源危险判定（IKKIA9-Q3 用户裁决）：敌方角色 + 敌方基地。
+
+        - 夜/黄昏踏入敌基地 NIGHT_BASE_CLEAR 圈 = 危险（敌 imp 守家秒杀区）；
+        - 可见敌 imp 距 ≤IMP_FLEE_DIST = 危险（唯一秒杀单位，等速追击逃不掉）；
+        - 其他敌角色邻接（≤1，catch 射程）= 危险（绝不走进可被抓格）。
+        """
+        es = next((u for u in turn.enemy if u.kind == "station"), None)
+        if (
+            es is not None
+            and self._nightish(turn)
+            and distance(pos, es.pos) < NIGHT_BASE_CLEAR
+        ):
+            return True
+        for f in turn.enemy:
+            if not f.alive or f.kind not in _THREAT_KINDS:
+                continue
+            if f.kind == "imp" and distance(pos, f.pos) <= IMP_FLEE_DIST:
+                return True
+            if f.kind != "imp" and distance(pos, f.pos) <= 1:
+                return True
+        return False
+
+    def _safe_detour(self, turn: Turn, imp: Unit, target: Pos, ctx) -> Pos | None:
+        """直行下一步危险 → 在邻格中找"安全且向目标推进"的绕行步；没有则 None。"""
+        blocked = turn.blocked(imp)
+        best, best_key = None, None
+        for pos in imp.pos.neighbours():
+            if pos in blocked or not turn.land(pos) or pos in ctx.reserved:
+                continue
+            if self._pos_dangerous(turn, pos, imp):
+                continue
+            key = (distance(pos, target), pos.x, pos.y)
+            if best_key is None or key < best_key:
+                best, best_key = pos, key
+        # 绕行步必须不比原地离目标更远（否则等于乱跑）
+        if best is not None and distance(best, target) <= distance(imp.pos, target):
+            return best
+        return None
+
     def _foe_threat(self, turn: Turn, imp: Unit) -> bool:
         """贴身且敌角色**在移动**才构成威胁（用户裁决 IKKE6Q-Q1-A：对手不会花大力气
         围捕——矿区静止采矿的工人不抓 imp，无需躲；移动中（巡逻/追击）的敌才贴边游走。
@@ -188,24 +241,42 @@ class ImpFSM:
     def _flee_cmd(self, turn: Turn, imp: Unit, ctx) -> dict[str, Any] | None:
         """敌方角色贴身 → 挪到与最近敌角色 ≥3 格、且**尽量贴近目标矿**的邻格
         （放哨：绕矿保持安全距离，敌一离开立即回桩——代替逃远+拉黑自锁）。
-        IKKHUU-Q1-E：**敌 imp 贴身 → 逃命模式**——不放哨，全力远离敌 imp 并
-        朝我方基地方向撤（等速追击下唯一活路是尽早拉开+回防圈）。"""
+        IKKIA9-Q3（用户裁决）：躲敌**不得闯入敌方基地禁入圈**（防"躲狼入虎口"）。
+        IKKHUU-Q1-E：**敌 imp 贴身 → 逃命模式**——全力远离敌 imp 并朝我方基地撤。"""
         foes = [u for u in turn.enemy if u.alive and u.kind in _THREAT_KINDS]
         if not foes:
             return None
         blocked = turn.blocked(imp)
+        es = next((u for u in turn.enemy if u.kind == "station"), None)
+
+        def _circle(pos: Pos) -> bool:
+            return (
+                es is not None
+                and self._nightish(turn)
+                and distance(pos, es.pos) < NIGHT_BASE_CLEAR
+            )
+
         imp_foes = [f for f in foes if f.kind == "imp"]
         if imp_foes:
             cands = []
             for pos in imp.pos.neighbours():
                 if pos in blocked or not turn.land(pos) or pos in ctx.reserved:
                     continue
+                if _circle(pos):
+                    continue  # 远离敌 imp 不等于可以闯敌基地
                 d_imp = min((distance(pos, f.pos) for f in imp_foes), default=99)
                 home = 0
                 st = turn.station()
                 if st is not None:
                     home = distance(pos, st.pos)
                 cands.append((-d_imp, home, pos.x, pos.y, pos))
+            if not cands:
+                # 全被堵/全是圈 → 允许闯圈保命（被 catch 必死，圈是概率死）
+                for pos in imp.pos.neighbours():
+                    if pos in blocked or not turn.land(pos) or pos in ctx.reserved:
+                        continue
+                    d_imp = min((distance(pos, f.pos) for f in imp_foes), default=99)
+                    cands.append((-d_imp, 0, pos.x, pos.y, pos))
             if not cands:
                 return None
             cands.sort()
@@ -215,12 +286,14 @@ class ImpFSM:
         for pos in imp.pos.neighbours():
             if pos in blocked or not turn.land(pos) or pos in ctx.reserved:
                 continue
+            if _circle(pos):
+                continue
             near = min((distance(pos, f.pos) for f in foes), default=99)
             tdist = distance(pos, self.destroy_target) if self.destroy_target else 0
             # 第一键：脱离危险（<3 格危险区）；第二键：贴近目标矿（放哨位）
             cands.append(((0 if near >= 3 else 1), tdist, -near, pos))
         if not cands:
-            return None
+            return None  # 无路可走（或只剩圈）→ 原地放哨
         cands.sort(key=lambda t: (t[0], t[1], t[2], t[3].x, t[3].y))
         ctx.note(imp.unit_id, "imp_sentry")
         return move_command(cands[0][3])

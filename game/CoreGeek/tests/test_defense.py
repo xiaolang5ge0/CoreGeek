@@ -187,7 +187,9 @@ class TestFireAdjacentRobot(unittest.TestCase):
 
 class TestControlExclusion(unittest.TestCase):
     def test_no_fire_while_walking(self):
-        """操控占用（已确认）：开拓者移动回合不得开火，归位后恢复开火。"""
+        """操控占用（已确认）：开拓者移动回合不得**由开拓者**开火，归位后恢复开火。
+        IKKIBC-Q7：双火箭+电磁炮模式下挖矿工可独立操控第二座武器——
+        开拓者移动时挖矿工开火是**合法**的（不算操控占用冲突）。"""
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
         brain = Brain()
         run_rounds(brain, sim, DAY1)
@@ -203,7 +205,10 @@ class TestControlExclusion(unittest.TestCase):
                 if c.get("action") == "attack"
             ]
             if pioneer_cmd and pioneer_cmd.get("action") == "move":
-                fired_while_walking += len(attacks)
+                # 只统计 controllerId=开拓者 的攻击（挖矿工的独立开火合法）
+                fired_while_walking += sum(
+                    1 for c in attacks if c.get("controllerId") == str(PIONEER)
+                )
             sim.apply(response)
             sim.advance()
         self.assertEqual(fired_while_walking, 0)

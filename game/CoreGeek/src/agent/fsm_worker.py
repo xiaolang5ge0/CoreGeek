@@ -250,9 +250,10 @@ class WorkerFSM:
             cmd = self._repair_cmd(turn, unit, ctx)
             if cmd is not None:
                 return cmd
-            robots_alive = bool(getattr(ctx, "robot_cells", ()))
-            if turn.day_index >= RETURN_STICKY_DAY and robots_alive:
-                # D3+ 且机器人未清空 → 就位 repair_post 守内圈（用户：清空前不外出采矿）
+            if turn.day_index >= RETURN_STICKY_DAY:
+                # IKKIBC-Q5（用户裁决：维修工黑夜来临之前提前进圈内）：D3+ 夜
+                # 无事可修 → **无条件就位 repair_post**（背墙封门后圈内就是岗；
+                # 不再外出夜采/夜卖——挖矿工已接夜控炮职责，修理工守墙第一）
                 return self._go_home(turn, unit, ctx, anchor)
             return self._miner(turn, unit, ctx)
         # 白天
@@ -530,8 +531,8 @@ class WorkerFSM:
 
     def _robots_near_path(self, turn: Turn, unit: Unit, pos: Pos, *, reach: int = 4) -> int:
         """去矿直线（1/4、1/2、3/4 采样）reach 格内的冲我方机器人数。"""
-        robots = [r.pos for r in turn.robots
-                  if r.alive and r.target_team in ("", turn.team_type)]
+        robots = [r.pos for r in turn.hostile_robots
+                  if r.target_team in ("", turn.team_type)]  # IKKIBC-Q6：排除自家召唤
         if not robots:
             return 0
         n = 0
@@ -634,8 +635,8 @@ class WorkerFSM:
             self._evading = False
             self._evade_until = 0
             return None
-        robots = [r for r in turn.robots
-                  if r.alive and r.target_team in ("", turn.team_type)]
+        robots = [r for r in turn.hostile_robots
+                  if r.target_team in ("", turn.team_type)]  # IKKIBC-Q6：排除自家召唤
         nearest = min((distance(unit.pos, r.pos) for r in robots), default=99)
         was_evading = turn.round_no < self._evade_until
         # 规避粘性（修 IKHZM0 两格震荡）：一旦进入危险距离，持续规避 EVADE_STICKY 回合，
@@ -671,8 +672,8 @@ class WorkerFSM:
 
     def _path_has_robots(self, turn: Turn, unit: Unit, target: Pos, *, reach: int = 4) -> bool:
         """去矿直线（1/4、1/2、3/4 采样）附近是否有冲我方机器人（动态避让，IKKDR0-Q2）。"""
-        robots = [(r.pos) for r in turn.robots
-                  if r.alive and r.target_team in ("", turn.team_type)]
+        robots = [(r.pos) for r in turn.hostile_robots
+                  if r.target_team in ("", turn.team_type)]  # IKKIBC-Q6：排除自家召唤
         if not robots:
             return False
         for f in (0.25, 0.5, 0.75):
@@ -684,7 +685,7 @@ class WorkerFSM:
         return False
 
     def _flee_step(self, turn: Turn, unit: Unit, ctx) -> Pos | None:
-        robots = [r.pos for r in turn.robots if r.alive and r.target_team in ("", turn.team_type)]
+        robots = [r.pos for r in turn.hostile_robots if r.target_team in ("", turn.team_type)]  # IKKIBC-Q6：排除自家召唤
         if not robots:
             return None
         blocked = turn.blocked(unit)

@@ -49,7 +49,16 @@ def _canonical_walls() -> list[Pos]:
     return cells
 
 
+def _canonical_back_walls() -> list[Pos]:
+    """背墙列（IKKIBC-Q5 用户裁决）：开口列（dx=-2）的 6 格。
+
+    敌方可在我方基地"背后"（开口侧）召唤 BOSS 直插炮位——开口列也要封。
+    其中 1 格为"门"（每天早上拆、黄昏前补，供角色进出），其余 5 格常驻。"""
+    return [Pos(-2, dy) for dy in range(-2, 4)]
+
+
 CANONICAL_WALLS = tuple(_canonical_walls())
+CANONICAL_BACK_WALLS = tuple(_canonical_back_walls())
 
 
 def choose_front(turn: Turn) -> str:
@@ -77,6 +86,8 @@ class BaseLayout:
     control_point: Pos
     wall_cells: tuple[Pos, ...]  # 按距 CP 由近到远（开口侧优先建造）
     repair_post: Pos | None = None  # 修理工夜间抢修就位点（内圈、邻墙最多、非炮台/CP）
+    back_wall_cells: tuple[Pos, ...] = ()  # 背墙列（IKKIBC-Q5）：开口侧 ring2，5 常驻 + 1 门
+    door_cell: Pos | None = None            # 门格（每天早拆黄昏补）= 距 repair_post 最近的背墙格
 
 
 def _ring_cells(xmin: int, ymin: int, dist: int) -> list[Pos]:
@@ -207,4 +218,33 @@ def compute_layout(
             repair_post = cell
     if repair_post is None:
         repair_post = cp
-    return BaseLayout(front, tuple(turrets), cp, tuple(walls), repair_post)
+    # ---- Q5 背墙列（IKKIBC）：开口侧 ring2 封堵，防敌方在我方背后召唤 BOSS 直插炮位。
+    # 门格选择（两轮实测教训）：
+    #   ① 角落格禁做门——对角入圈撞"禁切角"规则，拆了仍不连通；
+    #   ② **内侧邻格必须空闲**——门 (8,y) 的内侧 (9,y) 若是炮台/CP，拆了也进不去
+    #      （炮台列 x=9 三格被占，仅 y=25 一处可通行）。
+    # 满足两条件的背墙格中取距 repair_post 最近者。----
+    back_walls = [p for p in (to_abs(c) for c in CANONICAL_BACK_WALLS) if usable(p, "wall")]
+    back_walls.sort(key=lambda p: (p.x, p.y))
+    door: Pos | None = None
+    if back_walls:
+        corners = {back_walls[0], back_walls[-1]} if len(back_walls) >= 2 else set()
+        turret_cp = set(turrets) | {cp}
+        # 门有效条件：存在**正交**内侧邻格（ring1 且非炮台/CP）——对角入圈
+        # 会被"禁切角"挡住，必须留正向通道（与 FRONT 朝向无关，按绝对邻格判定）
+        inward_free = []
+        for p in back_walls:
+            if p in corners:
+                continue
+            orth = [
+                n for n in p.neighbours()
+                if n in ring1 and (n.x == p.x or n.y == p.y)
+            ]
+            if orth and orth[0] not in turret_cp:
+                inward_free.append(p)
+        pool = inward_free or [p for p in back_walls if p not in corners] or back_walls
+        door = min(pool, key=lambda p: (distance(p, repair_post), p.x, p.y))
+    return BaseLayout(
+        front, tuple(turrets), cp, tuple(walls), repair_post,
+        tuple(back_walls), door,
+    )

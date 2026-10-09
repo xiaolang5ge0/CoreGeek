@@ -156,6 +156,13 @@ class TestD1RepairerNightHold(unittest.TestCase):
             sim.apply(r)
             sim.advance()
         sim.round_no = 331  # Day3 夜
+        # IKKIBC-Q5：传送场景补开门口（真实对局清晨修理工会拆门，传送跳过了早晨）
+        _door = brain.layout.door_cell if brain.layout else None
+        if _door is not None:
+            sim.roles = [r for r in sim.roles if not (
+                r.get("roleType") == "wall"
+                and (r["pos"]["x"], r["pos"]["y"]) == (_door.x, _door.y)
+            )]
         sim.spawn_robot(30, 20, "smallRobot", hp=40, rid=30900)  # 远处机器人（未清空）
         post = brain.layout.repair_post
         held = False

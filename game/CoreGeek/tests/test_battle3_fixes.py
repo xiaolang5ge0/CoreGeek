@@ -58,7 +58,11 @@ class TestDay1Rush(unittest.TestCase):
         run_rounds(brain, sim, 200)  # Day1 + Day2
         built = {(w["pos"]["x"], w["pos"]["y"]) for w in sim.walls()}
         expected = {(c.x, c.y) for c in brain.layout.wall_cells}
-        self.assertEqual(built, expected, "D1-D2 应建满 14 墙环（无缺口）")
+        self.assertTrue(expected <= built, "D1-D2 应建满 14 墙环（无缺口）")
+        # IKKIBC-Q5：背墙列应建成（门为条件建造——黄昏且全员在内，允许缺席）
+        door = brain.layout.door_cell
+        back = {(c.x, c.y) for c in brain.layout.back_wall_cells if c != door}
+        self.assertTrue(back <= built, "背后墙列（防敌方背后召唤 BOSS）应建成")
 
     def test_miner_does_not_overbuild(self):
         """挖矿工专职采矿/卖钱，不乱建墙（除紧急）。"""

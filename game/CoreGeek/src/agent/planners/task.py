@@ -116,23 +116,45 @@ _extract_md_names = _extract_file_names
 
 
 def _parse_llm_json(text: str) -> dict | None:
-    """JSON 解析容忍：先直接 loads，失败再用正则提 {...} 块。"""
+    """JSON 解析容忍（IKKIA9/IKKIBC-Q8 实锤：LLM 返回 ```json 围栏/单引号 dict
+    会直接解析失败 → 白白烧掉一次交换）：
+    ① 直接 loads；② 剥离 markdown 围栏后 loads；③ 正则提 {...} 块；
+    ④ ast 兜底（python 风格单引号/尾逗号）。"""
     t = (text or "").strip()
     if not t:
         return None
-    try:
-        obj = json.loads(t)
-        return obj if isinstance(obj, dict) else None
-    except (json.JSONDecodeError, ValueError):
-        pass
+    candidates: list[str] = [t]
+    for m in re.finditer(r"```(?:json)?\s*([\s\S]+?)```", t):
+        candidates.append(m.group(1).strip())
     for blk in _JSON_BLOCK.findall(t):
+        if blk not in candidates:
+            candidates.append(blk)
+    for cand in candidates:
         try:
-            obj = json.loads(blk)
+            obj = json.loads(cand)
             if isinstance(obj, dict):
                 return obj
         except (json.JSONDecodeError, ValueError):
             continue
+    # ast 兜底：{"key": 'val',} 这类 python 风格字典
+    for cand in candidates:
+        if not cand.strip().startswith("{"):
+            continue
+        try:
+            obj = ast.literal_eval(cand)
+            if isinstance(obj, dict):
+                return obj
+        except (ValueError, SyntaxError):
+            continue
     return None
+
+
+def _answer_key(answer: Any) -> str:
+    """答案归一化键（复读检测用）：dict/str 统一成可比字符串。"""
+    try:
+        return json.dumps(answer, sort_keys=True, ensure_ascii=False).strip()
+    except (TypeError, ValueError):
+        return str(answer).strip()
 
 
 def _classify(text: str) -> str:
@@ -242,6 +264,7 @@ class TaskSession:
     timeout_rounds: int = 0                                 # 任务超时回合数（平台给）
     max_cmds: int = FORCE_SUBMIT_CMDS                       # 命令预算（按 timeout 动态）
     force_sent: bool = False                                # 是否已发过"强制答案"prompt
+    last_submitted: str = ""                                # IKKIA9-Q8：上次已提交答案的归一化键（复读拦截）
     skip_explore: bool = False                              # IKKHUU-Q2-A：紧任务跳过健壮探索
     force_answer: bool = False                              # 强制只给答案模式（拒绝新命令）
     local_done: bool = False                                # local_answer 已判定（零 LLM 直答）
@@ -360,6 +383,7 @@ class TaskPlanner:
                     else json.dumps(session.answer, ensure_ascii=False)
                 )
                 session.submitted = True
+                session.last_submitted = _answer_key(session.answer)  # Q8：复读拦截基准
                 # P1-8：平台无"提交已接收"回执（实战 r287 成功后 r293 重复提交的根因）。
                 # 进入静默确认期；completed/SOP 延迟到确认成功再记，
                 # errorCode=2 重答路径不再虚报完成数/污染 SOP。
@@ -744,6 +768,21 @@ class TaskPlanner:
                     session.stage = ST_DONE
                 else:
                     session.stage = ST_LLM
+                return
+            # IKKIA9-Q8（实锤 r15-24 五连拒）：errorCode=2 重答模式下 LLM 原样复读
+            # 上次被判错的答案 → 拒收并强制其"必须给出不同答案"（防复读死循环烧尽超时）
+            if (
+                session.force_answer
+                and session.last_submitted
+                and _answer_key(answer) == session.last_submitted
+            ):
+                session.transcript.append(
+                    "RESULT: 拒绝接收——你给出的答案与上次提交**完全相同**，"
+                    f"而它已被平台判错（错误：{session.last_error or '见上次反馈'}）。"
+                    "禁止原样重交：必须依据错误提示**修正数值/口径/字段**后给出不同的答案。"
+                )
+                session.stage = ST_LLM
+                session.need_refine = True
                 return
             session.answer = self._recompute_api_answer(session, answer)
             session.stage = ST_SUBMIT

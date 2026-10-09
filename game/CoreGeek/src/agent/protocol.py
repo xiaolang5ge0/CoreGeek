@@ -422,6 +422,16 @@ class Turn:
                 return robot
         return None
 
+    @property
+    def hostile_robots(self) -> tuple[Robot, ...]:
+        """存活**敌对**机器人 = 全部存活机器人 - 己方召唤（IKKIBC-Q6）。
+
+        我方召唤的机器人 target_team 可能与兵潮相同/为空，**按 ID 排除**才可靠。
+        火力/避让/威胁评估一律用本列表——绝不能把自家 BOSS 当敌人打。
+        """
+        ours = {r.robot_id for r in self.summon_robots}
+        return tuple(r for r in self.robots if r.alive and r.robot_id not in ours)
+
     def vehicle_cells(self) -> dict[Pos, str]:
         return {pos: kind for pos, kind in self.zones.items() if kind in VEHICLE_TYPES}
 

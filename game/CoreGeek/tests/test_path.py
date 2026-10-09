@@ -17,10 +17,12 @@ class TestPath(unittest.TestCase):
         turn = make_turn()
         worker = turn.find(10010)  # (9,23)
         step = next_step(turn, worker, Pos(15, 23))
-        # 任意最优步：相邻且缩短切比雪夫距离
+        # IKKIBC-Q5 禁切角：绕基地可能先增距（合法绕行），断言改为路径可达 + 首步为邻格
         self.assertIsNotNone(step)
         self.assertEqual(distance(step, worker.pos), 1)
-        self.assertLess(distance(step, Pos(15, 23)), distance(worker.pos, Pos(15, 23)))
+        path = find_path(turn, worker, Pos(15, 23))
+        self.assertIsNotNone(path)
+        self.assertEqual(path[-1], Pos(15, 23))
 
     def test_around_base(self):
         turn = make_turn()
