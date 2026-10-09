@@ -143,8 +143,8 @@ class TestQ4TurretSubstitute(unittest.TestCase):
         probe = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone"})
         probe_brain = Brain()
         probe_brain.decide(probe.payload())
-        victim = probe_brain.layout.turret_cells[-1]   # 电磁炮槽位
-        # 重开一局：敌方 BOSS 从第 1 回合就站在电磁炮槽位上（IKKIBC 实锤场景）
+        victim = probe_brain.layout.turret_cells[-1]   # 炮位槽（含替补判定）
+        # 重开一局：敌方 BOSS 从第 1 回合就站在该炮位上（IKKIBC 实锤场景）
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone"})
         brain = Brain()
         sim.spawn_robot(victim.x, victim.y, "bossRobot", hp=800, rid=30990)
@@ -155,65 +155,23 @@ class TestQ4TurretSubstitute(unittest.TestCase):
         self.assertTrue(hit, f"被占炮位 {victim} 应产生替补记录: {subs}")
         to_cell = Pos(hit[0]["to"]["x"], hit[0]["to"]["y"])
         builds = [fsm.build for fsm in brain.worker_fsms.values() if fsm.build]
-        self.assertTrue(any(b[0] == to_cell and b[1] == "railgun" for b in builds),
-                        f"替补格应继承电磁炮身份: {builds}")
+        # Q7 回退（IKKJ2x）：替补格恢复火箭身份（不再建电磁炮）
+        self.assertTrue(any(b[0] == to_cell and b[1] == "rocket" for b in builds),
+                        f"替补格应为火箭: {builds}")
 
 
 class TestQ5BackWallsAndDoor(unittest.TestCase):
-    """Q5：背墙列 + 门（非角落、内侧空闲、条件封门、清晨拆除）。"""
+    """Q5 已回退（IKKJ2x：day1 预算只够主墙 14 面，背墙+门导致开口整夜敞开、
+    三场全被推平基地）——保留占位类确认布局恢复旧语义。"""
 
-    def test_layout_back_walls_and_door(self):
+    def test_layout_has_no_back_walls(self):
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone"})
         turn = _turn(sim, 1)
         layout = compute_layout(turn, "W", None)
-        self.assertTrue(layout.back_wall_cells, "背墙列应非空")
-        self.assertIsNotNone(layout.door_cell)
-        self.assertIn(layout.door_cell, layout.back_wall_cells)
-        # 门非角落
-        xs = [p.x for p in layout.back_wall_cells]
-        ys = sorted(p.y for p in layout.back_wall_cells if p.x == layout.door_cell.x)
-        self.assertNotEqual(layout.door_cell.y, ys[0])
-        self.assertNotEqual(layout.door_cell.y, ys[-1], "角落格禁做门（禁切角）")
-
-    def test_door_not_sealed_when_ally_outside(self):
-        """黄昏有人在外（>6 格）→ 不封门（不把矿工锁外）。"""
-        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone"})
-        brain = Brain()
-        r, _ = brain.decide(sim.payload())
-        sim.apply(r); sim.advance()
-        layout = brain.layout
-        # 把矿工丢到远处（>6）
-        sim.role(10012)["pos"] = {"x": 30, "y": 4}
-        # 黄昏（距天黑 10 回合）
-        sim.round_no = 61
-        r, trace = brain.decide(sim.payload())
-        builds = [fsm.build for fsm in brain.worker_fsms.values() if fsm.build]
-        door = layout.door_cell
-        self.assertFalse(any(b[0] == door for b in builds),
-                         "有人在外时不得封门")
-
-    def test_door_removed_in_morning(self):
-        sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (7, 26): "stone"})
-        brain = Brain()
-        for _ in range(70):
-            r, _ = brain.decide(sim.payload())
-            sim.apply(r); sim.advance()
-        layout = brain.layout
-        door = layout.door_cell
-        has_door = any((w["pos"]["x"], w["pos"]["y"]) == (door.x, door.y)
-                       for w in sim.walls())
-        if not has_door:
-            self.skipTest("该局门未建（全员在内条件未满足）")
-        # 次日清晨：拆门
-        sim.round_no = 131   # Day2 round_in_day 0
-        removed = False
-        for _ in range(12):
-            r, trace = brain.decide(sim.payload())
-            if trace.get("door_removed"):
-                removed = True
-                break
-            sim.apply(r); sim.advance()
-        self.assertTrue(removed, "清晨应拆除门墙放行")
+        self.assertFalse(hasattr(layout, "back_wall_cells") and layout.back_wall_cells,
+                         "背墙列应已回退")
+        self.assertIsNone(getattr(layout, "door_cell", None), "门格应已回退")
+        self.assertEqual(len(layout.wall_cells), 14, "应恢复 14 面全封闭主环")
 
 
 class TestQ6BossSummon(unittest.TestCase):

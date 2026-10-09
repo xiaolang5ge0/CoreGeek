@@ -727,6 +727,14 @@
 > **P0-4 遥测红利兑现**：`tasks` 字段直接定案 P1-9（平台任务投放 D4 中午后枯竭，非我方 bug）。
 > 本场部署版本 = 2026-10-09 全量；异常红线全程 0；冷却账本实战生效（F21）。
 
+## 实施记录·IKKJ2x 灾难复盘：Q5/Q7 回退 + 任务绝对优先（2026-10-10 凌晨，407/407 + 待打包）
+
+> 复盘：`复盘_20261010_IKKJ2x.md`；裁决对照：`STRATEGY_DECISIONS.md §22`；事实 F46-F50：`RULE_ASSUMPTIONS.md §19`。
+> **三场 day1 夜基地被推平（268/278/134）**：Q5 背墙布局 day1 建不完开口夜不闭（主因）+ Q7 电磁炮双操控 errorCode=4 全废 + 任务流每天 40+ 轮真空。
+> 已实施：布局回退 14 面封闭环 / 三门火箭+pioneer 单操控 / 任务绝对优先+时间预算放宽 / 买券远征预算 / 任务卡死 stall 保险 / STATE_GUARD 未导入 NameError 修复。
+> 回归：407/407 OK（新增 test_ikkj2_fixes_20261009.py 7 测，更新 8 处旧测试）。
+> **待办：重打包 + 冒烟 + 推 gitee（下次上平台必做）。**
+
 ## 打包提醒（进平台前必查）
 - [x] `python tools/build_package.py` → dist/CoreGeek.tar.gz 顶层含 `CoreGeek/`（初赛封号教训）✅ 2026-10-09 下午再打：95448B/24 files（含顺手项三改：价格修订/errorCode=5 封禁/rules 死代码清理）
 - [x] 解包冒烟测试（.workbuddy/tmp/smoke_v2_deploy.py）：tarfile 解包→仅用解包产物 import→v2.0 payload decide→SMOKE OK

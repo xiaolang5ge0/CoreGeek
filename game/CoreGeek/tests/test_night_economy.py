@@ -166,21 +166,19 @@ class TestWallRebuild(unittest.TestCase):
         sim.add_mine((7, 26), "stone", remaining=80)
         brain = Brain()
         run_rounds(brain, sim, 130)  # Day1 + Day2（修理工 D1-D2 建墙）
-        # IKKIBC-Q5：14 主环 + 6 背墙（含门）
-        expected = {(c.x, c.y) for c in brain.layout.wall_cells} | {
-            (c.x, c.y) for c in brain.layout.back_wall_cells
-        }
+        # Q5 背墙列已回退（IKKJ2x）：布局只含主墙 14 面
+        expected = {(c.x, c.y) for c in brain.layout.wall_cells}
         built = {(w["pos"]["x"], w["pos"]["y"]) for w in sim.walls()}
-        self.assertEqual(built, expected, "主环 14 + 背墙列 6 应全部建成")
-        # 模拟夜战拆掉 3 面墙（20 面中拆 3 → 17）
+        self.assertEqual(built, expected, "主环 14 应全部建成")
+        # 模拟夜战拆掉 3 面墙（14 面中拆 3 → 11）
         destroyed = sim.walls()[:3]
         sim.roles = [r for r in sim.roles if r not in destroyed]
-        self.assertEqual(len(sim.walls()), 17)
+        self.assertEqual(len(sim.walls()), 11)
         # 次日白天补矿重建
         sim.add_mine((6, 22), "stone", remaining=80)
         sim.add_mine((7, 26), "stone", remaining=80)
         run_rounds(brain, sim, 130)
-        self.assertGreaterEqual(len(sim.walls()), 19, "被拆的墙应重建（含背墙）")
+        self.assertGreaterEqual(len(sim.walls()), 14, "被拆的墙应重建")
 
 
 if __name__ == "__main__":

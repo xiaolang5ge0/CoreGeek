@@ -13,6 +13,7 @@ from .buildable_map import BuildableMap
 from .fire import JointFirePlanner
 from .fsm_imp import ImpFSM
 from .fsm_pioneer import (
+    STATE_GUARD,
     STATE_TASK_ACCEPT,
     STATE_TASK_TRAVEL,
     STATE_TASK_WAIT_ACCEPT,
@@ -31,7 +32,6 @@ from .protocol import (
     IMP,
     MINE_TYPES,
     Pos,
-    RAILGUN,
     ROCKET,
     ROUNDS_PER_DAY,
     TOWER_TYPES,
@@ -45,7 +45,6 @@ from .protocol import (
     empty_response,
     move_command,
     parse_targets,
-    remove_command,
     station_footprint,
     use_command,
 )
@@ -70,6 +69,7 @@ RESERVE_GOLD = 30           # 升级预算保留金
 LLM_DAILY_LIMIT = 3         # 每日 LLM 调用上限（用户：每天只有 3 次）
 WALL_DANGER_RATIO = 0.8     # 城墙危险阈值：预计伤害 > 城墙总HP × 此值 → 危险
 DAY1_RUSH_DEADLINE = 50     # Day1 双工人建墙冲刺截止回合（预留收尾）
+TASK_STALL_LIMIT = 12       # P1-A：TASK_WORK 超此回合数无 LLM 推进 → 放弃任务（防站到超时）
 DAY1_WALL_TARGET = 12       # Day1 目标墙数
 PIONEER_FLEE_DIST = 1       # 机器人贴到 CP 才撤离（过早撤离=整夜哑火，实战权衡）
 
@@ -189,6 +189,7 @@ class Brain:
         self.llm_ban_day: int = -1   # errorCode=5（LLM 超限）当日封禁非任务 LLM（防连续超限堆异常，U18 保守口径）
         self.imp_mine_ban: dict[str, int] = {}  # IKKDR0-Q4：敌 imp 破坏 → 矿种禁采至解禁回合
         self.tasks_exhausted: bool = False      # IKKDR0-Q5-E：平台任务投放枯竭（F16）
+        self._task_work_since: int | None = None  # P1-A：TASK_WORK 最近一次 LLM 推进的回合
         self._tasks_dead_since: int = 0         # 两任务点同时失效的起始回合
         self._layout_recomputed_round: int = -100  # 上次布局自愈重算回合
         self.worker_fsms: dict[int, WorkerFSM] = {}
@@ -279,7 +280,6 @@ class Brain:
                         "turrets": [p.dump() for p in self.layout.turret_cells],
                         "cp": self.layout.control_point.dump(),
                         "walls": len(self.layout.wall_cells),
-                        "back_walls": len(self.layout.back_wall_cells),
                     }
                     # IKKIBC-Q5：开口朝向注入火力规划（后方 BOSS 判定）
                     self.fire.set_front(self.front, turn.station().pos if turn.station() else None)
@@ -467,9 +467,6 @@ class Brain:
         ]
         # IKKIBC-Q4（实锤：敌召唤 BOSS 站上第 3 炮规划位 → 只建成 2 炮）：
         # 炮位被机器人占据 → 用"邻接 CP 的可建空格"替补，保证凑满 3 座。
-        # Q7：电磁炮槽位 = layout.turret_cells[-1]（固定槽位判定，防随建造进度漂移）；
-        # 该槽被占替补时，替补格继承电磁炮身份。
-        rail_cells = {layout.turret_cells[-1]} if layout.turret_cells else set()
         robot_cells = {r.pos for r in turn.hostile_robots}
         if robot_cells:
             # 武器建造区 = 距基地 1 格（ring1/蓝区，rules 硬校验）——替补格只能从这里找；
@@ -498,8 +495,6 @@ class Brain:
                     ctx.trace.setdefault("turret_substitute", []).append(
                         {"from": c.dump(), "to": alt.dump()}
                     )
-                    if c in rail_cells:
-                        rail_cells.add(alt)
                     fixed.append(alt)
                 # 无替补格 → 该炮位放弃（宁缺勿卡：派单到非法格会每回合被守卫拒绝）
             turrets_missing = fixed
@@ -507,30 +502,6 @@ class Brain:
         walls_missing = [
             c for c in layout.wall_cells if c not in existing_walls and c not in occupied
         ]
-        # IKKIBC-Q5（用户裁决：背后也要造墙）：主墙齐后补背墙列（防敌方在我方
-        # 背后召唤 BOSS 直插炮位）；**门墙只在黄昏窗口纳入**——白天保持开口供
-        # 角色进出，入夜前由修理工封门；次日清晨再拆（见下方晨拆逻辑）。
-        if not walls_missing and layout.back_wall_cells:
-            back_perm = [
-                c for c in layout.back_wall_cells
-                if c != layout.door_cell and c not in existing_walls and c not in occupied
-            ]
-            walls_missing += back_perm
-            if (
-                layout.door_cell is not None
-                and layout.door_cell not in existing_walls
-                and layout.door_cell not in occupied
-                and 0 < turn.rounds_until_night <= 25
-            ):
-                # **封门时序**：仅当自家人（除常驻敌区的 imp）全部在内时才封——
-                # 否则把在外卖货的矿工锁在门外整夜，比背后敞一夜更糟。
-                st = turn.station()
-                all_home = st is not None and all(
-                    distance(u.pos, st.pos) <= 6
-                    for u in turn.ours if u.alive and u.kind != "imp"
-                )
-                if all_home:
-                    walls_missing.append(layout.door_cell)
         phase = self.phases.phase(turn, not (turrets_missing or walls_missing))
         ctx.trace.update(
             phase=phase, turrets_missing=len(turrets_missing), walls_missing=len(walls_missing)
@@ -605,9 +576,9 @@ class Brain:
             else:
                 pool = free       # 修理工阵亡 → 挖矿工接手
             worker = min(pool, key=lambda w: distance(w.pos, cell))
-            # IKKIBC-Q7（用户裁决）：双火箭+电磁炮——固定槽位（含替补）建电磁炮
-            # （无冷却、能量 20×级穿透；L3=60/回合，对大怪纵队收益远超第 3 门火箭）
-            kind = RAILGUN if cell in rail_cells else ROCKET
+            # Q7 回退（IKKJ2x 实锤：电磁炮+挖矿工操控双败伤，且 day1 防线被推平）：
+            # 恢复三门火箭 + pioneer 单操控。
+            kind = ROCKET
             self._worker_fsm(worker).build = (cell, kind)
             busy.add(worker.unit_id)
             gold_left -= WEAPON_BUILD_COST
@@ -690,31 +661,6 @@ class Brain:
         # 修理工夜间就位点 = 内圈邻墙格（issue#26：D4+ 夜到 repair_post 就位，非只回家）
         ctx.repair_anchor = layout.repair_post or layout.control_point
 
-        # IKKIBC-Q5 门墙晨拆（用户裁决："第二天拆背部最低级的墙出门，下一天黑夜前
-        # 要补上"——每天清晨修理工拆门放行，黄昏建墙任务把门补上；见上方 walls_missing 门控）
-        if (
-            layout.door_cell is not None
-            and turn.rounds_until_night > 40   # 与黄昏建门窗口(≤30)不重叠
-        ):
-            door_wall = next(
-                (w for w in turn.walls() if w.pos == layout.door_cell), None
-            )
-            rid = next(
-                (w.unit_id for w in workers
-                 if self._worker_fsm(w).role == ROLE_REPAIRER), None
-            )
-            repairer = next((w for w in turn.workers() if w.unit_id == rid), None)
-            if door_wall is not None and repairer is not None and rid not in commands:
-                if distance(repairer.pos, layout.door_cell) <= 1:
-                    commands[rid] = remove_command(layout.door_cell)
-                    ctx.trace["door_removed"] = layout.door_cell.dump()
-                    ctx.reserve_from(commands[rid])
-                else:
-                    step = next_step(turn, repairer, layout.door_cell, ctx.reserved) \
-                        or next_step(turn, repairer, layout.door_cell)
-                    if step is not None:
-                        commands[rid] = move_command(step)
-                        ctx.reserve_from(commands[rid])
         # IKKIBC-Q6 BOSS 召唤令使用（用户裁决：有路线直捣敌基地，否则拆墙开路）：
         # 白天 use 登记召唤位（不得在任一基地建造区）→ 当夜首回合生成。
         holder = next(
@@ -766,7 +712,25 @@ class Brain:
                 ctx.execute_cmd = out.execute_cmd
                 if out.submit is not None:
                     commands[pioneer.unit_id] = out.submit
+                    self._task_work_since = turn.round_no  # P1-A：提交=推进 → 重置卡死计时
                     ctx.trace.setdefault("task", {})["submit"] = True
+                # P1-A（IKKJ2K 实锤）：TASK_WORK 连续 12+ 轮无 submit（LLM 响应
+                # 丢失/求解器卡死）→ 放弃任务拉黑该任务点，回 GUARD 重选，否则
+                # pioneer 站到被平台超时终止，20 轮全废。prompt 每轮重发不算推进。
+                if (
+                    commands.get(pioneer.unit_id) is None
+                    and self._task_work_since is not None
+                    and turn.round_no - self._task_work_since > TASK_STALL_LIMIT
+                ):
+                    ctx.trace["task_stall_abort"] = turn.round_no - self._task_work_since
+                    if self.pioneer_fsm.task_point is not None:
+                        self.pioneer_fsm.failed_task_points.add(
+                            self.pioneer_fsm.task_point
+                        )
+                    self.task_session.reset()
+                    self.pioneer_fsm.state = STATE_GUARD
+                    self.pioneer_fsm.task_point = None
+                    self._task_work_since = None
             elif self.task_session.stage == ST_CONFIRM:
                 # P1-8：提交后任务被平台撤下/FSM 已退出任务态 → 求解器门控不再命中，
                 # 但确认收尾（completed/SOP）必须补跑，否则成功提交被静默丢弃。
@@ -782,6 +746,9 @@ class Brain:
             # 新任务确认 → 重置求解会话（同文本任务重复接取也必须全新开始）
             if self.pioneer_fsm.state == STATE_TASK_WORK and prev_state != STATE_TASK_WORK:
                 self.task_session.reset()
+                self._task_work_since = turn.round_no
+            elif self.pioneer_fsm.state != STATE_TASK_WORK:
+                self._task_work_since = None
         self._maybe_medicine(turn, commands)
 
     # ---- 黑夜 ----
@@ -875,6 +842,7 @@ class Brain:
                     self.task_session.llm_resp_ok = self.llm_owner in ("", "task")
                     out = self.task_planner.work(turn, self.task_session)
                     if out.prompt:
+                        self._task_work_since = turn.round_no  # P1-A：推进即重置
                         ctx.prompt = out.prompt
                         if self._llm_waiting:
                             ctx.trace["llm_preempt"] = self._llm_waiting
@@ -884,6 +852,24 @@ class Brain:
                     ctx.execute_cmd = out.execute_cmd
                     if out.submit is not None:
                         commands[pioneer.unit_id] = out.submit
+                        self._task_work_since = turn.round_no  # P1-A：提交=推进
+                    # P1-A：同 _day——夜间任务卡死同样放弃（回 CP 守炮更值）
+                    if (
+                        commands.get(pioneer.unit_id) is None
+                        and self._task_work_since is not None
+                        and turn.round_no - self._task_work_since > TASK_STALL_LIMIT
+                    ):
+                        ctx.trace["task_stall_abort_night"] = (
+                            turn.round_no - self._task_work_since
+                        )
+                        if self.pioneer_fsm.task_point is not None:
+                            self.pioneer_fsm.failed_task_points.add(
+                                self.pioneer_fsm.task_point
+                            )
+                        self.task_session.reset()
+                        self.pioneer_fsm.state = STATE_GUARD
+                        self.pioneer_fsm.task_point = None
+                        self._task_work_since = None
                 elif self.task_session.stage == ST_CONFIRM:
                     # P1-8：同 _day——提交后任务撤下也要补跑确认收尾
                     self.task_planner.work(turn, self.task_session)
@@ -895,6 +881,9 @@ class Brain:
                         ctx.reserve_from(cmd)
                 if self.pioneer_fsm.state == STATE_TASK_WORK and prev != STATE_TASK_WORK:
                     self.task_session.reset()
+                    self._task_work_since = turn.round_no
+                elif self.pioneer_fsm.state != STATE_TASK_WORK:
+                    self._task_work_since = None
                 if pioneer.unit_id in commands:
                     ctx.reserve_from(commands[pioneer.unit_id])
             else:
@@ -918,24 +907,9 @@ class Brain:
         # 操控占用动作（已确认）：移动中不能控炮 → 仅当开拓者无指令时才开火
         if pioneer is not None and pioneer.unit_id not in commands:
             self.fire.plan(turn, pioneer, commands, ctx.trace)
-        # IKKIBC-Q7（用户裁决）：双火箭+电磁炮模式下，**挖矿工**操控第二座武器
-        # （修理工绝不离墙——夜间抢修优先；挖矿工入夜就位控制格，放弃夜采）。
-        if any(w.kind == RAILGUN for w in turn.weapons()):
-            miner = next(
-                (w for w in turn.workers()
-                 if self._worker_fsm(w).role == ROLE_MINER), None
-            )
-            if miner is not None and miner.unit_id not in commands:
-                if any(distance(miner.pos, w.pos) <= 1 for w in turn.weapons()):
-                    self.fire.plan(turn, miner, commands, ctx.trace)
-                else:
-                    goal = self._night_control_goal(
-                        turn, ctx, miner, avoid=ctx.repair_anchor
-                    )
-                    cmd = self.pioneer_fsm.move_to_guard(turn, miner, goal, ctx)
-                    if cmd:
-                        commands[miner.unit_id] = cmd
-                        ctx.reserve_from(cmd)
+        # Q7 回退（IKKJ2x）：挖矿工夜控第二座武器整段撤销——errorCode=4 实锤
+        # （fire.plan 只占武器指令，worker 循环照常给挖矿工下发 move → 同轮
+        # "操控+行动"被平台拒绝，电磁炮开火与挖矿工移动双双作废）。
         # IKKIBC-Q6：夜间驱动我方召唤机器人（有路线直捣敌基地，否则拆墙开路）
         self._drive_summon_robots(turn, commands, ctx)
         for worker in turn.workers():

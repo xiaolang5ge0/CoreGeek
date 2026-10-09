@@ -164,13 +164,6 @@ class TestRepairerReturnHome(unittest.TestCase):
         sim.role(W1)["pos"] = {"x": 22, "y": 30}  # 把修理工丢到远处墙外
         sim.gold = 0                               # 排除采购干扰
         sim.round_no = 321                         # Day3 白天后段（距天黑 10 回合）
-        # IKKIBC-Q5：传送场景补开门口（真实对局清晨修理工会拆门，传送跳过了早晨）
-        _door = brain.layout.door_cell if brain.layout else None
-        if _door is not None:
-            sim.roles = [r for r in sim.roles if not (
-                r.get("roleType") == "wall"
-                and (r["pos"]["x"], r["pos"]["y"]) == (_door.x, _door.y)
-            )]
 
         cp = brain.layout.control_point
         states = set()

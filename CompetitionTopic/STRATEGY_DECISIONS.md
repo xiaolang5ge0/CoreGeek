@@ -866,3 +866,30 @@ EXPLORE_FILES ──┬─(engineering)→ ENGINEER_PROBE → ENGINEER_FIX? ─�
 - 可控机器人 **attack 指令格式**（机器人 ID 为 key、无 controllerId）与**白天是否存续**（U24）：看 boss_cmd trace 与召唤令 fb。
 - 门洞通行冲突（友好单位停门口采矿堵死走廊）：本轮矿工夜控后概率大降，仍需日志盯 `door_removed/imp_travel_hold`。
 - 双操控实际开火节奏：期望火箭各 ~12 发/夜 + 电磁炮近全程（无冷却）。
+
+
+## 二十二、IKKJ2E/IKKJ2J/IKKJ2K 灾难复盘 + Q5/Q7 回退（2026-10-10 凌晨用户裁决，407/407）
+
+> 复盘报告：`复盘_20261010_IKKJ2x.md`；事实登记：`RULE_ASSUMPTIONS.md §19`。
+> **三场全部 day1 夜基地被推平（268/278/134 分）**——部署 = 9f52b64（§21 版）。
+
+### 22.1 裁决 → 实施对照
+
+| # | 用户裁决 | 实施 | 文件 |
+|---|---|---|---|
+| P0-D | **回退 Q5 布局**：背墙+门 day1 建不完（20 面需求 vs day1 预算），西面开口列整夜敞开被推平 | 删 back_wall_cells/door_cell/晨拆门/黄昏封门/背墙补建；恢复 14 面全封闭主环（IKKIBC 实证可闭环活 7+ 天）；防召唤 BOSS 保留 fire 后方大怪加成（set_front/REAR_BIG_BONUS） | layout/brain |
+| Q7 回退 | **恢复三门火箭 + pioneer 单操控**（电磁炮+挖矿工双操控 errorCode=4 实锤，电磁炮从未开过火） | 删 rail_cells/电磁炮建造/挖矿工夜控块；kind=ROCKET；fire 弹道代码保留为 dead code | brain/fire |
+| P0-B | **任务绝对优先**（每天 40+ 轮任务真空 = 240-480 分/天损失；IKKIBC 已存在非本版新增） | ① `_day_cmd` 统一任务优先不分天数；② 时间预算去 home 项（任务做完夜里赶回）；③ 买券远征预算 = 往返+归家 ≤ min(最早任务cooldown, 40)+2；④ 金币不足不站桩（GUARD→任务流兜底） | fsm_pioneer |
+| P1-A | 任务卡死保险：TASK_WORK 连续 12 轮无 submit → 放弃+拉黑任务点（IKKJ2K 任务1 卡 14 轮被平台超时，20 轮全废） | `_task_work_since` 计时（submit 才算推进，prompt 每轮重发不算），_day/_night 双路 | brain |
+
+### 22.2 实施中挖出的隐藏坑（已修）
+
+5. **stall 块 `STATE_GUARD` 未导入 NameError**：触发即炸整个白天决策、被 decide 兜底吞成
+   fatal 空响应——与 §21.2-1 同款坑（trace/scope 错误全被红线兜底掩盖）。本以插桩追出。
+   **教训：新增跨模块引用必须立刻跑一次能触发该分支的测试**。
+
+### 22.3 保留项
+
+- Q1 回退集火 / Q2 补刀线 / Q3 imp 双威胁 / Q6 召唤BOSS / Q8 任务健壮性 / A* 禁切角 /
+  夜间清在途建造 / 统一轮转+轮转回退 / 炮位替补（替补身份改 rocket）——全部保留。
+- 亮点实证：夜间 pioneer 操控开火正常（IKKJ2J 夜袭 +21 分）；imp 破坏零星得分；指令成功率 98%+。

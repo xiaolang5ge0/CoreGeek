@@ -39,6 +39,8 @@ RETURN_MARGIN_TASK = 2   # 任务中归位余量（更紧：任务优先，只�
 EST_TASK_ROUNDS = 6      # 单任务预估耗时（接任务前时间预算用）
 WEAPON_L1_COST = 100
 WEAPON_L2_COST = 150
+SHOP_TRIP_LIMIT = 8      # （保留备用）距商店硬上限
+UPGRADE_TRIP_CAP = 40    # P0-B：买券远征硬上限（往返+归家，防跨天远征；IKKJ2E 实锤远征 46 轮被拦）
 
 
 class PioneerFSM:
@@ -141,25 +143,18 @@ class PioneerFSM:
             if self.state == STATE_RETURN_HOME:
                 self.state = STATE_GUARD
                 self.upgrade_target = None
-        # 前 2 天（用户 2026-09-23）：**任务优先**，剩余时间买券升级；
-        # D3+：武器升级优先（任务间隙插空）。
-        if turn.day_index <= 2:
-            has_task = in_task or self._choose_task_point(turn, pioneer) is not None
-            if has_task:
-                return self._task_flow(turn, pioneer, cp, ctx)
-            if not in_task and self.state != STATE_RETURN_HOME:
-                cmd = self._weapon_upgrade_cmd(turn, pioneer, ctx)
-                if cmd is not None:
-                    return cmd
+        # P0-B（IKKJ2x 实锤 2026-10-09，用户裁决）：**任务绝对优先，不分天**。
+        # 旧 D3+"升级优先"导致：任务 cooldown 期间跑远路买券 → 金币耗尽站桩 →
+        # 任务刷新时离家太远被时间预算否决 → 提前回家站桩，每天 40+ 轮任务真空，
+        # 每天白丢 240-480 分。改为：任务可接/任务中 → 任务；无任务 → 近距升级
+        # → 宝藏 → 归位。
+        if in_task or self._choose_task_point(turn, pioneer) is not None:
             return self._task_flow(turn, pioneer, cp, ctx)
-        # 2/3. 武器升级计划（买券 / 用券）——仅在未进行任务且非归位时
-        if not in_task and self.state != STATE_RETURN_HOME:
+        if self.state != STATE_RETURN_HOME:
             cmd = self._weapon_upgrade_cmd(turn, pioneer, ctx)
             if cmd is not None:
                 return cmd
-        # 4. 宝藏（用户 2026-09-24：**低优先级**——无任务可接 + 炮塔全 L3 才去；白天回防回合
-        #    由上面的 must_return 提前预留，备齐祭品后到开启日再召唤）
-        if not in_task and self.state != STATE_RETURN_HOME:
+        if self.state != STATE_RETURN_HOME:
             cmd = self._treasure_cmd(turn, pioneer, ctx)
             if cmd is not None:
                 return cmd
@@ -182,13 +177,28 @@ class PioneerFSM:
             return None
         voucher = f"WeaponUpgradeVoucher{weapon.level}"
         needs = self._shopping_needs(turn, pioneer)
-        # 采购：缺券就去店；在店里把当前所有缺口一次买齐（避免买了立刻回去升级再出来）
+        # P0-B（IKKJ2x）：买券远征按**任务冷却窗口**做预算——
+        # 往返（人→店→武器）+ 升级后归家 ≤ 最早冷却任务剩余 cooldown + 余量
+        # 才远征（r30-r48 跑到地图另一头买券，回来任务已刷新、离家太远接不了
+        # → 每天任务真空）。无任务可接（GUARD 站桩零价值）时放宽到硬上限，
+        # 保证升级链不死（修理工只在 pioneer 任务中才代买）。
         if needs and (self.state == STATE_WEAPON_BUY or pioneer.backpack.count(voucher) < 1):
             affordable = [n for n in needs if turn.gold >= n[1]]
             if affordable:
                 shop = self._nearest_shop(turn, pioneer)
                 if shop is None:
                     return None
+                if pioneer.backpack.count(voucher) < 1:
+                    trip = distance(pioneer.pos, shop) + distance(shop, target)
+                    home_after = distance(target, getattr(ctx, "home_anchor", None) or shop)
+                    cooldowns = [
+                        t.cooldown_rounds for t in turn.tasks
+                        if t.is_valid and t.cooldown_rounds > 0
+                    ]
+                    budget = min(min(cooldowns, default=999), UPGRADE_TRIP_CAP)
+                    if trip + home_after > budget + RETURN_MARGIN_TASK:
+                        self.upgrade_target = None
+                        return None
                 self.state = STATE_WEAPON_BUY
                 if pioneer.pos != shop and distance(pioneer.pos, shop) <= 1:
                     v, c, _want = affordable[0]
@@ -297,11 +307,13 @@ class PioneerFSM:
                 if cmd is not None:
                     return cmd
                 return self.move_to_guard(turn, pioneer, cp, ctx)
-            # 时间预算：来不及"去任务点+做任务+回基地"则不接，避免开了又被迫放弃
+            # 时间预算（P0-B 放宽）：只要来得及"赶到+接任务+做任务"就接——
+            # **不再计入回家路程**（任务做完夜里照样能走回，task reward 120 分
+            # 远比提前 10 轮站 CP 值钱；IKKJ2E r51 因预算含 home 12 步而放弃
+            # 身边 4 步的任务点，是每天 240-480 分损失的主因之一）。
             if turn.is_day:
                 to_task = distance(pioneer.pos, target)
-                home = self._travel_rounds(turn, pioneer, cp, ctx)
-                if turn.rounds_until_night < to_task + EST_TASK_ROUNDS + home + RETURN_MARGIN_TASK:
+                if turn.rounds_until_night < to_task + EST_TASK_ROUNDS + RETURN_MARGIN_TASK:
                     return self.move_to_guard(turn, pioneer, cp, ctx)
             self.task_point = target
             self.state = STATE_TASK_TRAVEL

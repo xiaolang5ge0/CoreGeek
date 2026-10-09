@@ -40,9 +40,9 @@ class TestDay1Bootstrap(unittest.TestCase):
         # 3 火箭全部建成且都在布局炮台位上
         weapons = self.sim.weapons()
         self.assertEqual(len(weapons), 3)
-        # IKKIBC-Q7（用户裁决）：双火箭+电磁炮——第 3 座为 railgun
+        # Q7 回退（IKKJ2x）：恢复三门火箭（电磁炮+挖矿工操控 errorCode=4 实锤）
         kinds = sorted(w["roleType"] for w in weapons)
-        self.assertEqual(kinds, ["railgun", "rocket", "rocket"])
+        self.assertEqual(kinds, ["rocket", "rocket", "rocket"])
         # 围墙批量建成（≥6）
         self.assertGreaterEqual(len(self.sim.walls()), 6)
         # 开拓者归位于控制点

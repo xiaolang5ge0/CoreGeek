@@ -332,3 +332,21 @@
 | F45 | **禁切角**（沙盒/平台结算）：对角移动的两正交桥格皆堵 → 移动失败；A* 规划层已同步禁止（门口震荡根因） | CONFIRMED（沙盒） |
 | U23 | 电磁炮弹道是否被**围墙**阻挡（文档只说火箭"不会被阻挡"）——若被挡，密封圈内电磁炮只能覆盖开口侧 | UNKNOWN（下局 fb/击杀分布定案） |
 | U24 | 可控机器人白天是否存续（系统兵潮白天消失；召唤机器人未明） | UNKNOWN（下局 boss_cmd trace） |
+
+
+## 19. 实战验证记录·2026-10-10 凌晨 IKKJ2E / IKKJ2J / IKKJ2K（32进16 第 8/9/10 场）
+
+> 数据源：gitee issue IKKJ2E / IKKJ2J / IKKJ2K。复盘：`复盘_20261010_IKKJ2x.md`。
+> 本场部署 = 9f52b64（§21 版）。§22 回退实施在其后。
+
+| # | 实测事实 | 状态 |
+|---|---|---|
+| F46 | **三场全部 day1 夜基地被推平**（日志断更 r85/101/85，用户确认对局已结束）：IKKJ2E r85 墙况=主墙 13/14（缺 (9,21)）+ 背墙 0/6 + 门未封——**西面开口列整夜敞开**，仅 380hp 残墙 (7,21)。Q5 布局已回退（§22-P0D） | CONFIRMED |
+| F47 | **errorCode=4 `controller 10012 cannot act and control a weapon in the same round`**（IKKJ2E r82-85 连续 4 轮 / IKKJ2J r85/88/94）：fire.plan 只占武器指令不占操控者 → worker 循环照常给挖矿工发 move → 操控+行动全拒。**挖矿工操控的电磁炮从未成功开火**。Q7 已整体回退（§22） | CONFIRMED |
+| F48 | **任务流每天 40+ 轮真空**：pioneer 任务 cooldown 期被升级吸走跑远路买券（IKKJ2E r30-48 共 18 轮）→ 金币耗尽站桩 → r51 任务刷新被时间预算（含 home 14 步）否决 → 提前 12 轮回家。任务流死亡自 IKKIBC 已存在（r86 后 900 轮零分），非 9f52b64 新增。P0-B 已实施 | CONFIRMED |
+| F49 | **IKKJ2K 任务1 TASK_WORK 卡 14 轮无任何 LLM 交换**（r11-r24，r25 timeout err）→ 被平台终止。P1-A stall 保险已实施 | CONFIRMED |
+| F50 | 正常对局 = 白天 60 轮 + 夜 60 轮 = 130 轮/天；任务点一次 reward 120分/120金，cooldown ≈ 20-22 轮；IKKJ2J 夜间开火击杀 +1~2 分/次 | CONFIRMED |
+| U25 | 夜间（is_day=False）平台是否接受 acceptTask（日志显示夜里任务点 valid+cooldown=0 但从未尝试） | UNKNOWN |
+| U26 | day1 主墙第 14 面 (9,21) 缺口过夜的生存风险（日终在途建造被"夜间清在途"清掉，day2 晨补；IKKIBC 旧版 13 面+临时墙活过夜） | UNKNOWN |
+
+> U23（电磁炮弹道）随 Q7 回退失效；U24（召唤机器人白天存续）继续保留。
