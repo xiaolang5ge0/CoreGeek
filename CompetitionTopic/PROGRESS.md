@@ -8,8 +8,8 @@
 | 项 | 状态 |
 |---|---|
 | 当前阶段 | **初赛 P0~P5 + 三十四轮实战修复完成；复赛（32进16）M1/M2/M4/M6 完成，M3 暂缓、M5 剩余；10-08 三场复盘措施已全部实施** |
-| 测试 | **328/328 通过**（2026-10-09 下午新增 12 个 imp 策略回归 `test_imp_strategy_20261009.py`） |
-| 打包 | `game/CoreGeek/dist/CoreGeek.tar.gz`（**tar 顶层 CoreGeek/ 目录**，平台父目录解包后运行 `<root>/CoreGeek/main3.py`；2026-10-09 下午重打 95071B/24 files，解包冒烟 OK） |
+| 测试 | **335/335 通过**（2026-10-09 下午再增 7 个顺手项回归 `test_quickwins_20261009.py`） |
+| 打包 | `game/CoreGeek/dist/CoreGeek.tar.gz`（**tar 顶层 CoreGeek/ 目录**，平台父目录解包后运行 `<root>/CoreGeek/main3.py`；2026-10-09 下午重打 95448B/24 files，解包冒烟 OK） |
 | 代码 | `game/CoreGeek/`，Python ≥3.11 纯标准库，6607 行 22 模块 |
 | 当前行为 | **四角色**：开拓者（任务+夜间控3炮）/修理工（建墙升级抢修）/挖矿工（采矿卖钱，前3天夜不回防）/**捣乱鬼（全天候敌方半区毁矿：撤退/包夹/机器人避让+拉黑+同类连击，2026-10-09）**；Day1 建满14墙+3火箭；火箭冷却账本（间隔≥5）；任务 LLM 驱动+结构校验+提交确认（ST_CONFIRM）；宝藏传闻推断+结果码重试；**反抓三点（邻接即抓/站桩2-4步派工人追击/不派开拓者）**；升级优先级 WallFixer备货>正面L3>拐角>L2炮>受损墙>L2墙>L3炮>L3墙>基地>券备货>炸弹 |
 | 遥测 | 每回合 stdout 精简加密（密钥 12345678，`tools/decrypt_log.py`）；v2.0 已补 ts/tasks/esc/fb/imp 映射/z 任务点小车映射 |
@@ -685,11 +685,11 @@
 | 5 | 模拟器 v2：imp/小车/新数值/半区刷矿（当前仿真不含 imp，imp 仅单测覆盖） | M5 前 | 中 |
 | 6 | U12~U20 逐项确认（RULE_ASSUMPTIONS §13） | 每场对弈日志 | 随日志滚动 |
 | 7 | imp 控炮（若 U12 确认可控炮 → 夜间加入火力轮转） | U12 确认 | 随日志 |
-| 8 | errorCode=5 收到即当日封禁非任务 LLM（防连续超限） | 顺手可做 | 低 |
+| 8 | errorCode=5 收到即当日封禁非任务 LLM（防连续超限） | ✅ **已实施 2026-10-09 下午**（brain `_decide_core` 设 `llm_ban_day` + trace `llm_ban`；跨天自动解封；仅封非任务 LLM，任务期不受影响） | 完成 |
 | 9 | **P0 措施×4**：冷却账本 / error 结构校验（乙）/ LLM 通道仲裁（双保险）/ 遥测补 6 字段 | ✅ **已实施 2026-10-09**（316 测试全过，§十七 17.6） | 完成 |
 | 10 | P1 措施×5：station 受击响应 / 宝藏结果码重试（含结果码 0/3 修订）/ 祭品收集反馈 / 提交后确认 | ✅ **已实施 2026-10-09**；仅 P1-9 Day5 停摆待 P0-4 下一局日志定案 | 高（剩 P1-9） |
 | 11 | U12~U16/U19 未验证项随下局日志滚动（imp attack 试探 / 可控机器人试探 / catch 边界 / 小车驾驶） | 每场对弈日志 | 随日志滚动 |
-| 12 | **硬编码价格修订**：upgrade.py 派单门控 WallFixer cost 10→15、Bomb cost 100→50（v2.0 官方价）；`_stock_qty` 已用运行时价，仅门控偏松/偏保守，无非法风险（§十八 18.4） | 随下轮代码改动顺手修 | 低 |
+| 12 | **硬编码价格修订**：upgrade.py mission cost WallFixer 10→15、Bomb 100→50（v2.0 官方价）；rules.py 旧版 `_check_use` 死代码删除 | ✅ **已实施 2026-10-09 下午**（`test_quickwins_20261009.py` 7 回归；335/335 全过 + 重打包 95448B + 冒烟 OK） | 完成 |
 
 ## 实战复盘·32进16 第一轮（2026-10-08：IKK7EF / IKK7EE / IKK7ED）
 
@@ -717,6 +717,6 @@
 | 待日志验证 | 夜间敌是否摸过来 catch（若我方 imp 夜间死于 catch 再加保守度）；追击命中率（对手不放 imp 则零成本空转）；连击是否导致跨图追一种矿 |
 
 ## 打包提醒（进平台前必查）
-- [x] `python tools/build_package.py` → dist/CoreGeek.tar.gz 顶层含 `CoreGeek/`（初赛封号教训）✅ 2026-10-09 下午复打：95071B/24 files（含 imp 全天候+反抓追击）
+- [x] `python tools/build_package.py` → dist/CoreGeek.tar.gz 顶层含 `CoreGeek/`（初赛封号教训）✅ 2026-10-09 下午再打：95448B/24 files（含顺手项三改：价格修订/errorCode=5 封禁/rules 死代码清理）
 - [x] 解包冒烟测试（.workbuddy/tmp/smoke_v2_deploy.py）：tarfile 解包→仅用解包产物 import→v2.0 payload decide→SMOKE OK
 - [x] 首战遥测确认（2026-10-08 三场）：加密遥测正常落 stdout，解密 95%+；发现 6 字段盲区（P0-4：lastSummonTreasureResult / playerTasks / z 撞车 / imp "?" / fb_fail 原始 map / 敌方 sc）

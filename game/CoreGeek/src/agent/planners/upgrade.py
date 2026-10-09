@@ -247,7 +247,8 @@ class UpgradePlanner:
                 # 优先级 **0**：**先买修复包再升级**（用户 2026-09-23：修理工不能只买升级券；
                 # 修复包是夜间防御的前提，必须最先备足，否则会被纯正面升级任务饿死）
                 missions.append(
-                    UpgradeMission("WallFixer", 10, None, "stock", 0, qty=desired)
+                    # cost=15：v2.0 官方价（任务书 §4.6.3；实际购买量由 _stock_qty 按运行时价计算）
+                    UpgradeMission("WallFixer", 15, None, "stock", 0, qty=desired)
                 )
         # 0. 受损/紧急墙（用户 2026-09-23）：最受损优先 → 用券升级回血（比 WallFixer 划算）。
         #    - 受损：ratio < 0.5
@@ -351,7 +352,8 @@ class UpgradePlanner:
                     for u in turn.ours
                 )
                 if held < 2:
-                    add("Bomb", 100, None, "stock", 52)
+                    # cost=50：v2.0 官方价（原 100，需求变更 2026-09-30；运行时价兜底）
+                    add("Bomb", 50, None, "stock", 52)
         # 去重：同一建筑只保留最高优先（小=高）的一条任务
         seen: set = set()
         uniq: list[UpgradeMission] = []

@@ -336,18 +336,6 @@ class LegalityGuard:
                 return Verdict(False, f"item_missing:{item}")
         return Verdict(True)
 
-    def _check_use(self, unit: Unit, cmd: dict[str, Any]) -> Verdict:
-        name = cmd.get("name")
-        if not name or name not in unit.backpack:
-            return Verdict(False, "item_not_in_backpack")
-        if name in TARGETED_ITEMS:
-            targets = self._targets(cmd, expect=1)
-            if targets is None:
-                return Verdict(False, "bad_targetPos")
-            if name not in RANGED_ITEMS and distance(unit.pos, targets[0]) != 1:
-                return Verdict(False, "use_not_adjacent")
-        return Verdict(True)
-
     def _check_drop(self, unit: Unit, cmd: dict[str, Any]) -> Verdict:
         name = cmd.get("name")
         if not name or name not in unit.backpack:

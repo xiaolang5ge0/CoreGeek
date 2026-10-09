@@ -181,6 +181,7 @@ class Brain:
         self.wall_registry = WallRegistry()
         self.llm_day: int = 0
         self.llm_calls_today: int = 0
+        self.llm_ban_day: int = -1   # errorCode=5（LLM 超限）当日封禁非任务 LLM（防连续超限堆异常，U18 保守口径）
         self._layout_recomputed_round: int = -100  # 上次布局自愈重算回合
         self.worker_fsms: dict[int, WorkerFSM] = {}
         self.layout: BaseLayout | None = None
@@ -321,6 +322,10 @@ class Brain:
         ctx.night_now = turn.is_night
         ctx.prompt = ""
         ctx.execute_cmd = ""
+        # errorCode=5（LLM 超限）→ 当日封禁非任务 LLM（防连续超限堆异常，U18 保守口径）
+        if any(code == 5 for code, _ in turn.errors) and self.llm_ban_day != turn.day_index:
+            self.llm_ban_day = turn.day_index
+            trace["llm_ban"] = {"day": turn.day_index, "round": turn.round_no}
         self._record_news(turn, ctx)      # 可能设置 ctx.prompt（news/宝藏 LLM 提问）
         ctx.price_boost_map = self.news_economy.boosts(turn.day_index)
         if turn.is_day:
@@ -961,14 +966,18 @@ class Brain:
             break  # 每回合最多 1 个
 
     def _llm_budget_ok(self, turn: Turn) -> bool:
-        """每日 LLM 上限 3 次（跨天重置）。
+        """每日 LLM 上限 3 次（跨天重置）；errorCode=5 → 当日封禁。
 
         注意：**仅用于非任务期 LLM**（如宝藏推断）。自进化任务执行期间 LLM 不限次且
         不占额度（接口文档 errorCode=5），任务求解不调用本函数。
+        errorCode=5 = 平台告知 LLM 额度超限（ban 状态由 _decide_core 设置并记 trace）
+        → 当日本模块不再发任何非任务 prompt，防止连续超限持续计数/堆异常。
         """
         if turn.day_index != self.llm_day:
             self.llm_day = turn.day_index
             self.llm_calls_today = 0
+        if self.llm_ban_day == turn.day_index:
+            return False  # 当日已因超限被封
         return self.llm_calls_today < LLM_DAILY_LIMIT
 
     def _emergency_item(self, turn: Turn, pioneer) -> dict[str, Any] | None:
