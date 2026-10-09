@@ -15,7 +15,6 @@ from agent.fsm_imp import (
     DESTROY_ROUNDS,
     FLEE_DIST,
     MINE_BLACKLIST_ROUNDS,
-    PINCER_DIST,
     ImpFSM,
 )
 from agent.protocol import Pos, Turn, distance
@@ -88,36 +87,36 @@ class TestImpAllWeather(unittest.TestCase):
         self.assertIsNone(fsm.destroy_target)
         self.assertEqual(fsm.destroy_progress, 0)
 
-    def test_flee_breaks_stance_and_blacklists(self):
-        # 第一回合：正常站桩 r1
+    def test_flee_keeps_target_without_blacklist(self):
+        # IKKE6Q-Q1-B：flee 打断站桩 → 进度清零但**保留目标、不拉黑**（威胁暂态）
         turn = turn_at(40)
         fsm = ImpFSM()
         cmd = fsm.decide(turn, turn.imp(), _imp_ctx())
         self.assertEqual(cmd["action"], "destroy")
         self.assertEqual(fsm.destroy_progress, 1)
-        # 第二回合：敌方 worker 贴脸 → 撤退 + 拉黑该矿
+        # 敌方 worker 贴脸 → 贴边游走（不拉黑）
         payload = base_payload(40)
         payload["teamEnemy"]["roles"].append(_foe_worker(24, 7))
         turn = Turn.load(payload)
         cmd = fsm.decide(turn, turn.imp(), _imp_ctx())
         self.assertEqual(cmd["action"], "move")
-        self.assertIn(Pos(25, 8), fsm.mine_blacklist)
-        self.assertIsNone(fsm.destroy_target)
-        # 第三回合：敌人走了 → 被拉黑的唯一敌半区矿不再选中 → 待命
+        self.assertNotIn(Pos(25, 8), fsm.mine_blacklist, "flee 打断不拉黑")
+        self.assertEqual(fsm.destroy_target, Pos(25, 8), "目标保留，敌走后回桩")
+        # 敌人走了 → 回到原矿继续站桩
         turn = turn_at(41)
         cmd = fsm.decide(turn, turn.imp(), _imp_ctx())
-        self.assertIsNone(cmd)
+        self.assertEqual(cmd["action"], "destroy")
+        self.assertEqual(cmd["targetPos"], [{"x": 25, "y": 8}])
 
-    def test_pincer_foes_trigger_flee_even_at_distance(self):
-        # 两个敌角色各距 4（≤PINCER_DIST、>FLEE_DIST）→ 包夹 → 弃桩撤
+    def test_pincer_removed_no_flee_at_distance_4(self):
+        # IKKE6Q-Q1-A：包夹判定删除——两个敌角色 4 格外（≤旧 PINCER_DIST 5）不触发 flee
         payload = base_payload(40)
         payload["teamEnemy"]["roles"].append(_foe_worker(20, 8, 20010))
         payload["teamEnemy"]["roles"].append(_foe_worker(28, 8, 20011))
         turn = Turn.load(payload)
         fsm = ImpFSM()
         cmd = fsm.decide(turn, turn.imp(), _imp_ctx())
-        self.assertIsNotNone(cmd)
-        self.assertEqual(cmd["action"], "move")
+        self.assertEqual(cmd["action"], "destroy", "4 格外的敌人不构成威胁，继续站桩")
 
     def test_destroy_illegal_blacklists_and_stops(self):
         payload = base_payload(40)

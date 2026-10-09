@@ -78,6 +78,9 @@ class TreasurePlan:
     day: int = 0
     ready: bool = False
     raw: str = ""
+    # IKKE6Q-Q3（用户采纳）：候选坐标列表（主选之后的备选，按 LLM 给出顺序）——
+    # ts=2 依次换下一个候选召唤，全部用尽才重推 LLM（不再单点押注一次方向换算）
+    candidates: tuple[Pos, ...] = ()
 
     def dump(self) -> dict:
         return {
@@ -85,6 +88,7 @@ class TreasurePlan:
             "items": list(self.items),
             "day": self.day,
             "ready": self.ready,
+            "candidates": [p.dump() for p in self.candidates],
         }
 
 
@@ -191,7 +195,9 @@ class TreasurePlanner:
             f"且**不得早于当前天数（第 {day} 天）**（早于今天的计划无效）。\n"
             "5. 先在 `reason` 里写清推断依据；为便于日志查看，**`reason` 放在 JSON 最后**。\n"
             '只返回 JSON：{"x":<int>,"y":<int>,"items":["AcientTablet",...],"day":<int>,"ready":<bool>,'
-            '"reason":"<推断依据>"}。'
+            '"candidates":[{"x":<int>,"y":<int>}],"reason":"<推断依据>"}。'
+            "candidates=**备选坐标**（主选之外最有可能的 1-2 个，按可能性排序、可为空数组）——"
+            "主选召唤失败会依次尝试备选，不必重复推断。\n"
             "信息不足时 ready=false。可用用品（**本图**任务用品）：" + ", ".join(offerings)
         )
         return "\n".join(parts)
@@ -235,7 +241,18 @@ class TreasurePlanner:
         # 已失败过的坐标不再接受（用户 IKIAE6：结果 2 = 地点不对 → 必须换地点）
         if (x, y) in self.failed_sites:
             return False
-        self.plan = TreasurePlan(Pos(x, y), items, day, ready, (response or "")[:200])
+        # IKKE6Q-Q3（用户采纳）：解析候选列表（主选之后的备选，最多 2 个，界内、未失败）
+        cands = []
+        for c in (obj.get("candidates") or [])[:2]:
+            try:
+                cx, cy = int(c.get("x")), int(c.get("y"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if (0 <= cx < 41 and 0 <= cy < 32) and (cx, cy) not in self.failed_sites \
+                    and (cx, cy) != (x, y):
+                cands.append(Pos(cx, cy))
+        self.plan = TreasurePlan(Pos(x, y), items, day, ready, (response or "")[:200],
+                                 candidates=tuple(cands))
         return True
 
     def mark_summon_sent(self) -> None:
@@ -266,11 +283,21 @@ class TreasurePlanner:
         elif code in (2, 3):
             self.summon_tries = 0
             if code == 2:
-                # 地点错：记失败地点，整计划作废重推
+                # 地点错：记失败地点
                 if self.plan.location is not None:
                     site = (self.plan.location.x, self.plan.location.y)
                     if site not in self.failed_sites:
                         self.failed_sites.append(site)
+                # IKKE6Q-Q3（用户采纳）：还有候选坐标 → 依次切换（保 items/day 不动），
+                # 全部用尽才作废计划重推 LLM
+                if self.plan.candidates:
+                    nxt = self.plan.candidates[0]
+                    self.plan = TreasurePlan(
+                        location=nxt, items=self.plan.items, day=self.plan.day,
+                        ready=self.plan.ready, raw=self.plan.raw,
+                        candidates=self.plan.candidates[1:])
+                    self.attempted = False
+                    return
                 self.plan = TreasurePlan()
             else:
                 # 祭品错：地点可能正确（文档 §1.1 结果码语义）→ 保留地点，

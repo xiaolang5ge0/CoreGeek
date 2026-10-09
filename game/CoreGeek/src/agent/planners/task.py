@@ -850,6 +850,14 @@ class TaskPlanner:
                     "已有全部所需数据。只依据已有数据修正被判错的字段/数值，"
                     "**只返回 answer，不得返回 cmd**。"
                 )
+        if session.task_type in ("api", "general"):
+            # IKKE6Q-Q3（用户采纳）：统计类答案连续两场数值错（total_events/total_failures）
+            parts.append(
+                "【统计类作答纪律】给出任何统计数字（total/数量/计数）前，必须先确认并遵循："
+                "①统计口径（时间窗/状态过滤/是否去重）以**任务文档明示规则为准**；"
+                "②数据必须**全量**（分页取尽，默认页 ≠ 全部）；"
+                "③数字给出前在内部复核一遍口径与全量性。口径不确定时按文档字面规则执行。"
+            )
         if session.force_answer:
             parts.append(
                 "【强制提交】距任务超时/命令预算已到极限：**必须直接给出 answer，不得再返回 cmd**；"

@@ -35,9 +35,7 @@ from .protocol import (
 )
 from .rules import LegalityGuard
 
-FLEE_DIST = 2              # 敌方角色进入此距离 → 撤退（catch 需距离 1，留 1 格余量）
-PINCER_FOE_N = 2           # 可见敌角色数 ≥ 此值 且全在 ≤PINCER_DIST → 包夹 → 弃桩撤
-PINCER_DIST = 5
+FLEE_DIST = 2              # 敌方角色进入此距离 → 贴边游走放哨（catch 需距离 1，留 1 格余量）
 ROBOT_AVOID_DIST = 3       # 机器人进入此距离 → 避让（=机器人攻击距离 3；IKKDR0-F24：
                            # 阈值 2 时序上晚一拍——请求快照时机器人已退到 3-4 格外，
                            # 结算时走近攻击，imp 在敌基地窄道 10 回合被磨死 500 血）
@@ -59,6 +57,7 @@ class ImpFSM:
         self.destroy_progress: int = 0  # 连续 destroy 计数（4 回合满 → 矿消失）
         self.mine_blacklist: dict[Pos, int] = {}   # pos → 解禁回合
         self.last_destroyed: tuple[str, int] | None = None  # (矿种, 回合) → 连击加成
+        self._foe_hist: dict[int, list] = {}       # 敌角色 unit_id → 近 4 回合位置（移动趋势判据）
 
     def decide(self, turn: Turn, imp: Unit, ctx) -> dict[str, Any] | None:
         # 0. 机会抓捕：可见敌方捣乱鬼（=正在站桩破坏）在我邻接格 → 必抓
@@ -66,13 +65,21 @@ class ImpFSM:
             if distance(imp.pos, foe.pos) <= 1:
                 ctx.note(imp.unit_id, "imp_catch_opportunity")
                 return catch_command(foe.pos)
-        # 1. 自保：敌角色贴身 / 双向包夹 → 弃桩撤退（站桩中即拉黑该矿）
+        # 0.5 敌基地消失 → 不再破坏（用户裁决 IKKE6Q-Q1-C：敌基地都没了，拆矿无意义）
+        if next((u for u in turn.enemy if u.kind == "station"), None) is None:
+            return None
+        # 1. 自保：敌角色贴身 → **贴边游走放哨**（用户裁决 IKKE6Q-Q1-D：与敌保持 3-4 格
+        #    绕目标矿游走，敌一离开立即回桩——代替逃远+拉黑自锁）
+        #    Q1-A：**包夹判定删除**（对手不会花大力气围捕，矿区人多≠围捕）；
+        #    Q1-B：flee 打断**不拉黑**目标矿（威胁暂态，进度清零但保留目标）。
         if self._foe_threat(turn, imp):
+            if self.destroy_progress > 0:
+                ctx.note(imp.unit_id, "imp_threat_hold")
+                self._reset_progress()          # 规则：未执行 destroy 即清零，但保留目标
             flee = self._flee_cmd(turn, imp, ctx)
-            self._break_stance(turn)
             if flee is not None:
                 return flee
-            return None  # 无路可退 → 原地待命（不站桩送进度）
+            return None  # 无路可走 → 原地放哨
         # 2. 机器人避让（夜间兵潮/白天残留；机器人全图可见）
         if self._robot_threat(turn, imp):
             step = self._robot_evade_step(turn, imp, ctx)
@@ -130,13 +137,21 @@ class ImpFSM:
 
     # ---- 威胁判定 ----
     def _foe_threat(self, turn: Turn, imp: Unit) -> bool:
-        foes = [u for u in turn.enemy if u.alive and u.kind in _THREAT_KINDS]
-        near = [f for f in foes if distance(imp.pos, f.pos) <= FLEE_DIST]
-        if near:
-            return True
-        # 包夹：≥2 个可见敌角色都在 ≤PINCER_DIST → 撤退方向可能被封 → 弃桩
-        visible = [f for f in foes if distance(imp.pos, f.pos) <= PINCER_DIST]
-        return len(visible) >= PINCER_FOE_N
+        """贴身且敌角色**在移动**才构成威胁（用户裁决 IKKE6Q-Q1-A：对手不会花大力气
+        围捕——矿区静止采矿的工人不抓 imp，无需躲；移动中（巡逻/追击）的敌才贴边游走。
+        位置历史按敌 unit_id 记录近 4 回合。"""
+        for f in (u for u in turn.enemy if u.alive and u.kind in _THREAT_KINDS):
+            if distance(imp.pos, f.pos) > FLEE_DIST:
+                continue
+            hist = self._foe_hist.setdefault(f.unit_id, [])
+            hist.append((turn.round_no, f.pos))
+            if len(hist) > 4:
+                hist.pop(0)
+            recent = [p for rn, p in hist if turn.round_no - rn <= 3]
+            if len(set(recent)) > 1 or len(recent) < 2:
+                return True     # 在移动（或历史不足）→ 视为威胁
+            # 静止敌（采矿中）→ 无视
+        return False
 
     def _robot_threat(self, turn: Turn, imp: Unit) -> bool:
         return any(
@@ -144,9 +159,10 @@ class ImpFSM:
             for r in turn.robots if r.alive
         )
 
-    # ---- 撤退（敌方角色）----
+    # ---- 威胁期贴边游走（用户裁决 IKKE6Q-Q1-D）----
     def _flee_cmd(self, turn: Turn, imp: Unit, ctx) -> dict[str, Any] | None:
-        """敌方角色贴身/包夹 → 向"离所有敌角色最远"的可走格撤一步。"""
+        """敌方角色贴身 → 挪到与最近敌角色 ≥3 格、且**尽量贴近目标矿**的邻格
+        （放哨：绕矿保持安全距离，敌一离开立即回桩——代替逃远+拉黑自锁）。"""
         foes = [u for u in turn.enemy if u.alive and u.kind in _THREAT_KINDS]
         if not foes:
             return None
@@ -155,13 +171,15 @@ class ImpFSM:
         for pos in imp.pos.neighbours():
             if pos in blocked or not turn.land(pos) or pos in ctx.reserved:
                 continue
-            risk = min((distance(pos, f.pos) for f in foes), default=99)
-            cands.append((risk, distance(pos, self.destroy_target) if self.destroy_target else 0, pos))
+            near = min((distance(pos, f.pos) for f in foes), default=99)
+            tdist = distance(pos, self.destroy_target) if self.destroy_target else 0
+            # 第一键：脱离危险（<3 格危险区）；第二键：贴近目标矿（放哨位）
+            cands.append(((0 if near >= 3 else 1), tdist, -near, pos))
         if not cands:
             return None
-        cands.sort(key=lambda t: (-t[0], t[1], t[2].x, t[2].y))
-        ctx.note(imp.unit_id, "imp_flee")
-        return move_command(cands[0][2])
+        cands.sort(key=lambda t: (t[0], t[1], t[2], t[3].x, t[3].y))
+        ctx.note(imp.unit_id, "imp_sentry")
+        return move_command(cands[0][3])
 
     def _robot_evade_step(self, turn: Turn, imp: Unit, ctx) -> Pos | None:
         """机器人避让：向"离最近机器人最远"的可走格挪一步；无路/挪不开 → 原地。"""
@@ -201,15 +219,14 @@ class ImpFSM:
         ):
             combo_kind = self.last_destroyed[0]
         best, best_key = None, None
+        # 敌方矿判定：按基地距离（用户裁决 IKKDR0-Q1）；敌基地消失时 decide 已直接待命
+        if enemy_station is None or station is None:
+            return None
         for pos, kind in turn.zones.items():
             if kind not in MINE_TYPES:
                 continue
-            # 敌方矿判定：优先用基地距离（用户裁决）；基地缺失时退回对角线
-            if enemy_station is not None and station is not None:
-                if distance(pos, enemy_station.pos) >= distance(pos, station.pos):
-                    continue  # 离我方更近/等距 → 我方经济圈，不拆
-            elif turn.own_half(pos):
-                continue
+            if distance(pos, enemy_station.pos) >= distance(pos, station.pos):
+                continue  # 离我方更近/等距 → 我方经济圈，不拆
             if self.mine_blacklist.get(pos, 0) > turn.round_no:
                 continue  # 站桩被打断/失败 → 短期回避
             price = turn.vendor_prices.get(kind, 1)
@@ -228,7 +245,8 @@ class ImpFSM:
 
     # ---- 状态工具 ----
     def _break_stance(self, turn: Turn) -> None:
-        """站桩被打破（撤退/避让）→ 拉黑该矿 + 清进度（敌方蹲守该矿=已暴露，别回头送）。"""
+        """站桩被打破（机器人避让）→ 拉黑该矿 + 清进度。
+        （用户裁决 IKKE6Q-Q1-B：flee 打断**不拉黑**——已在 decide 内联处理。）"""
         if self.destroy_progress > 0 and self.destroy_target is not None:
             self._blacklist(turn, self.destroy_target)
             self.destroy_target = None
