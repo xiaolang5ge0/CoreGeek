@@ -314,31 +314,53 @@ class UpgradePlanner:
         ):
             v, c = voucher_for("station", station.level)
             add(v, c, station.pos, "station", 45)
-        # 9. 正面墙对应升级券备货（用户 2026-09-23）：正面墙 L1→Voucher1、L2→Voucher2，
-        #    D3+ 按正面墙等级各备 ≥5（金币不够则不要求）；武器+墙全满后不限制。
+        # 9. 正面墙对应升级券备货（用户 2026-09-23）：正面墙 L1→Voucher1、L2→Voucher2。
         #    门控：武器未到 L2 时不为墙券花钱（"金币充足时武器优先"）。
+        #    IKKDR0-Q3（用户裁决 2026-10-09 采纳）：**正面 L3 死线未达标 → 按缺口一次买齐**
+        #    ——V1 需求 = 正面/拐角 L1 数；V2 需求 = 正面/拐角 L2 数 + L1 数（L1→L2→L3
+        #    每面各需一张）；解除 FRONT_STOCK_TARGET(6) 与 WALL_VOUCHER_CAP_D4 限制。
+        #    （IKKDR0 实锤：旧逻辑小批计数 need=2 → 500 金只买 2 张 → 正面 (12,22) L1
+        #    入夜被破。）
         if turn.day_index >= 3 and not weapons_need_l2:
-            # D4 前墙升级券总持有上限（用户 2026-09-24）：避免屯券挤占炮台升级金币
+            # 死线未达标 = 正面/拐角墙中存在未满 L3（用户 2026-10-09 Q3 口径：
+            # "正面围墙等级不够"字面语义；全 L3 后自然转常规小批）
+            front_deadline_unmet = any(w.level < 3 for w in front_wall_units)
+            # D4 前墙升级券总持有上限（用户 2026-09-24）：死线达标后才生效（防屯券挤占炮台）
             _wv = ("WallUpgradeVoucher1", "WallUpgradeVoucher2")
             _held_total = sum(
                 u.backpack.count(v) for u in turn.ours if u.kind == "worker" for v in _wv
             )
-            _cap = WALL_VOUCHER_CAP_D4 if turn.day_index < 4 else None
+            _cap = None if front_deadline_unmet else (
+                WALL_VOUCHER_CAP_D4 if turn.day_index < 4 else None
+            )
             for lvl, voucher, cost in ((1, "WallUpgradeVoucher1", 20),
                                        (2, "WallUpgradeVoucher2", 30)):
-                need = sum(1 for w in front_wall_units if w.level == lvl)
+                if front_deadline_unmet:
+                    # 缺口全量：L1 墙每面需 V1+V2 各一；L2 墙每面需 V2 一
+                    if lvl == 1:
+                        need = sum(1 for w in front_wall_units if w.level == 1)
+                    else:
+                        need = sum(1 for w in front_wall_units if w.level in (1, 2))
+                else:
+                    need = sum(1 for w in front_wall_units if w.level == lvl)
                 if need <= 0:
                     continue
                 held = sum(u.backpack.count(voucher) for u in turn.ours if u.kind == "worker")
-                target = FIXER_STOCK_MAXED if (all_weapons_l3 and all_walls_l3) else FRONT_STOCK_TARGET
+                if front_deadline_unmet:
+                    target = need
+                else:
+                    target = FIXER_STOCK_MAXED if (all_weapons_l3 and all_walls_l3) else FRONT_STOCK_TARGET
                 if _cap is not None:
                     headroom = _cap - _held_total
                     if headroom <= 0:
                         continue
                     target = min(target, held + headroom)
                 if held < target and turn.gold >= RESERVE_GOLD + cost + weapon_reserve():
+                    # 死线未达标 → 优先级 **-1**（排在 WallFixer 备货(0) 之前，先买齐券再备包；
+                    # 否则 WallFixer 目标 30 会一直占坑、券永远轮不到——IKKDR0 r559-r686 实锤）
                     missions.append(
-                        UpgradeMission(voucher, cost, None, "stock", 47, qty=target)
+                        UpgradeMission(voucher, cost, None, "stock",
+                                       -1 if front_deadline_unmet else 47, qty=target)
                     )
         # 10. 应急道具（Day6+，用户 2026-09-23）：关键围墙/炮塔升级后、有余钱时备炸弹/眩晕
         #     （危险夜用炸弹清群/眩晕拖时间，占用开拓者动作）

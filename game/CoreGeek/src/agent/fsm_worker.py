@@ -100,6 +100,8 @@ class WorkerFSM:
         self._last_bag = -1
         self._evading = False
         self._evade_until = 0        # 规避粘性截止回合（IKHZM0：防 evade↔采矿 横跳）
+        self._evade_trips = 0        # 去程被机器人打断次数（IKKDR0-Q2：≥3 次弃矿换目标）
+        self._evade_trips_mine = None  # 计数所属矿（换矿即清零）
         self.build_phase = False
         self.returning = False       # 回防粘性：D4+ 一旦开始返回，持续到进墙
         self.return_since = 0        # 开始返回的回合（防死循环兜底）
@@ -471,6 +473,10 @@ class WorkerFSM:
             if ctx.dusk_avoid and ctx.mine_unsafe(pos):
                 continue
             kind = turn.zones.get(pos)
+            # IKKDR0-Q4：敌 imp 破坏 → 该类矿在本半区 10 回合不补刷 → 禁采至解禁
+            ban_until = getattr(ctx, "imp_mine_ban", {}).get(kind, 0)
+            if ban_until > turn.round_no:
+                continue
             our_dist = distance(station.pos, pos) if station is not None else distance(unit.pos, pos)
             entry = (pos, kind, distance(unit.pos, pos), our_dist)
             if prefer == "stone":
@@ -499,6 +505,12 @@ class WorkerFSM:
         for pos, kind, dist, our_dist in pool:
             side = 12.0 if (enemy_station is not None
                             and distance(enemy_station.pos, pos) < our_dist) else 0.0
+            # IKKDR0-Q2（用户裁决：避让真实机器人而非静态走廊）：夜间去矿路径上有
+            # 冲我方机器人 → 跳过该候选（≥2 个）或重罚（1 个），机器人被清掉后自然解禁
+            if turn.is_night:
+                n_path = self._robots_near_path(turn, unit, pos)
+                if n_path >= 2:
+                    continue
             if prefer == "stone":
                 key = (dist + our_dist * 0.6 + side, dist, pos.x, pos.y)
             else:
@@ -509,10 +521,27 @@ class WorkerFSM:
                 #   rate = 一矿收益 / 往返；**加大去矿距离权重**（近矿优先，减少长途空跑，用户 2026-09-23）。
                 vendor_dist = min((distance(pos, v) for v in vendors), default=0)
                 rate = (price * 10.0 + boost) / (1.7 * dist + vendor_dist + 6.0)
+                if turn.is_night:
+                    rate -= 2.0 * self._robots_near_path(turn, unit, pos)
                 key = (-rate, our_dist * 0.1 + side, dist, pos.x, pos.y)
             if best is None or key < best_key:
                 best, best_key = pos, key
         return best
+
+    def _robots_near_path(self, turn: Turn, unit: Unit, pos: Pos, *, reach: int = 4) -> int:
+        """去矿直线（1/4、1/2、3/4 采样）reach 格内的冲我方机器人数。"""
+        robots = [r.pos for r in turn.robots
+                  if r.alive and r.target_team in ("", turn.team_type)]
+        if not robots:
+            return 0
+        n = 0
+        for f in (0.25, 0.5, 0.75):
+            sx = round(unit.pos.x + (pos.x - unit.pos.x) * f)
+            sy = round(unit.pos.y + (pos.y - unit.pos.y) * f)
+            sp = Pos(sx, sy)
+            if any(distance(sp, rp) <= reach for rp in robots):
+                n += 1
+        return n
 
     # ---- 卖货 ----
     def _should_sell(self, turn: Turn, unit: Unit, ctx) -> bool:
@@ -605,15 +634,32 @@ class WorkerFSM:
             self._evading = False
             self._evade_until = 0
             return None
-        nearest = min(
-            (distance(unit.pos, r.pos) for r in turn.robots
-             if r.alive and r.target_team in ("", turn.team_type)),
-            default=99,
-        )
+        robots = [r for r in turn.robots
+                  if r.alive and r.target_team in ("", turn.team_type)]
+        nearest = min((distance(unit.pos, r.pos) for r in robots), default=99)
+        was_evading = turn.round_no < self._evade_until
         # 规避粘性（修 IKHZM0 两格震荡）：一旦进入危险距离，持续规避 EVADE_STICKY 回合，
         # 期间不因机器人抖动立刻切回采矿（否则 evade↔mine 每回合横跳、原地打转）。
         if nearest <= WORKER_DANGER_DIST:
+            if not was_evading and self.mine is not None:
+                # IKKDR0-Q2：去程被机器人打断计数；同矿 ≥3 次 → 该矿当夜放弃（机器人
+                # 行军流会持续过境，反复横跳净采集为 0），拉黑后重选就近安全矿。
+                if self._evade_trips_mine != self.mine:
+                    self._evade_trips_mine = self.mine
+                    self._evade_trips = 0
+                self._evade_trips += 1
+                if self._evade_trips >= 3:
+                    ctx.note(self.unit_id, f"mine_abandon_robot_flow({self.mine.x},{self.mine.y})")
+                    ctx.block_mine(self.mine, turn.round_no + 40)
+                    self.mine = None
+                    self._evade_trips = 0
+                    self.state = STATE_FREE
+                    return None
             self._evade_until = turn.round_no + EVADE_STICKY
+        elif was_evading and self.mine is not None and self._path_has_robots(turn, unit, self.mine):
+            # 粘性到期但**去矿路径前方仍有机器人** → 继续等（不计新次数），
+            # 杜绝"刚恢复前进又被同一股机器人打断"的残余横跳。
+            self._evade_until = turn.round_no + 1
         if turn.round_no >= self._evade_until:
             self._evading = False
             return None
@@ -622,6 +668,20 @@ class WorkerFSM:
         step = self._flee_step(turn, unit, ctx)
         self.state = STATE_EVADE
         return self._move(step, ctx) if step is not None else None
+
+    def _path_has_robots(self, turn: Turn, unit: Unit, target: Pos, *, reach: int = 4) -> bool:
+        """去矿直线（1/4、1/2、3/4 采样）附近是否有冲我方机器人（动态避让，IKKDR0-Q2）。"""
+        robots = [(r.pos) for r in turn.robots
+                  if r.alive and r.target_team in ("", turn.team_type)]
+        if not robots:
+            return False
+        for f in (0.25, 0.5, 0.75):
+            sx = round(unit.pos.x + (target.x - unit.pos.x) * f)
+            sy = round(unit.pos.y + (target.y - unit.pos.y) * f)
+            sp = Pos(sx, sy)
+            if any(distance(sp, rp) <= reach for rp in robots):
+                return True
+        return False
 
     def _flee_step(self, turn: Turn, unit: Unit, ctx) -> Pos | None:
         robots = [r.pos for r in turn.robots if r.alive and r.target_team in ("", turn.team_type)]

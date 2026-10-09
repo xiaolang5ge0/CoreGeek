@@ -185,8 +185,13 @@ class ImpFSM:
 
     # ---- 选矿 ----
     def _pick_target(self, turn: Turn, imp: Unit, ctx) -> Pos | None:
-        """选敌方半区价值最高矿：评分 = 小贩价 × remain ×（同类连击加成）；
-        跳过我方半区矿与拉黑矿；平分取更近。"""
+        """选目标矿（用户裁决 2026-10-09 IKKDR0-Q1）：**按"离敌方基地更近"判定敌方矿**，
+        替代对角线半区——矿无归属，敌方工人实际采的是他们基地附近的矿；
+        对角线敌方三角里的左下角矿（如 (6,2)）离我方更近、敌方根本不会去采，不值得跑 16 格。
+        评分 = 小贩价 × remain ×（同类连击加成）；跳过拉黑矿；平分取更近。
+        """
+        station = turn.station()
+        enemy_station = next((u for u in turn.enemy if u.kind == "station"), None)
         combo_kind = None
         if (
             self.last_destroyed is not None
@@ -195,8 +200,14 @@ class ImpFSM:
             combo_kind = self.last_destroyed[0]
         best, best_key = None, None
         for pos, kind in turn.zones.items():
-            if kind not in MINE_TYPES or turn.own_half(pos):
-                continue  # 只破坏对方半区
+            if kind not in MINE_TYPES:
+                continue
+            # 敌方矿判定：优先用基地距离（用户裁决）；基地缺失时退回对角线
+            if enemy_station is not None and station is not None:
+                if distance(pos, enemy_station.pos) >= distance(pos, station.pos):
+                    continue  # 离我方更近/等距 → 我方经济圈，不拆
+            elif turn.own_half(pos):
+                continue
             if self.mine_blacklist.get(pos, 0) > turn.round_no:
                 continue  # 站桩被打断/失败 → 短期回避
             price = turn.vendor_prices.get(kind, 1)
@@ -204,6 +215,8 @@ class ImpFSM:
             score = float(price * remain)
             if combo_kind is not None and kind == combo_kind:
                 score *= COMBO_BONUS
+            # 用户原则 2（IKKDR0-Q1）：优先就近——距离进评分（12 格÷2.2、16 格÷2.6）
+            score /= 1.0 + 0.1 * distance(imp.pos, pos)
             key = (score, -distance(imp.pos, pos))
             if best_key is None or key > best_key:
                 best, best_key = pos, key

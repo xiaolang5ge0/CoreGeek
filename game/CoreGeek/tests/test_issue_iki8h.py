@@ -109,8 +109,24 @@ class TestWallVoucherCap(unittest.TestCase):
         return [m for m in plan if m.kind == "stock" and "WallUpgradeVoucher" in m.voucher]
 
     def test_cap_blocks_stock_at_15_before_d4(self):
-        self.assertEqual(self._wall_stock(self._plan(15)), [],
-                         "D4 前持券已达 15 → 不得再囤墙升级券")
+        # IKKDR0-Q3（2026-10-09）：死线未达标（存在未满 L3 的正面/拐角墙）→ 帽豁免、按缺口买齐
+        plan = self._plan(15)
+        stocks = self._wall_stock(plan)
+        self.assertTrue(stocks, "正面未满 L3 → D4 帽豁免，仍按缺口补券")
+        # V1 已持 15 ≥ 缺口 4 → 不派 V1；V2 缺口 4（L1→L3 每面一张）→ 派 V2 qty=4
+        self.assertTrue(all(m.voucher == "WallUpgradeVoucher2" for m in stocks))
+        self.assertEqual(stocks[0].qty, 4)
+
+    def test_cap_blocks_when_front_all_l3(self):
+        # 死线达标（正面+拐角全 L3）→ D4 帽恢复生效：持券 15 → 不得再囤
+        sim = make_sim()
+        sim.round_no = 261   # D3 白天
+        for y in (22, 23, 24, 25):   # FRONT(W) 列 L3 墙
+            sim.roles.append(sim._role(40000 + y, 13, y, "wall", 1500, level=3))
+        sim.role(W1)["backpack"] = ["WallUpgradeVoucher1"] * 15
+        turn = Turn.load(sim.payload())
+        plan = UpgradePlanner().plan(turn, cp=Pos(10, 24), front="W")
+        self.assertEqual(self._wall_stock(plan), [], "正面全 L3 后帽生效，不再囤券")
 
     def test_stock_allowed_below_cap(self):
         self.assertTrue(self._wall_stock(self._plan(5)), "未到上限应允许按需求备货")

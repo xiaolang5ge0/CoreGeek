@@ -103,6 +103,7 @@ class _Ctx:
     share_mines: bool = False
     robot_cells: tuple = ()
     spawn_cells: tuple = ()   # 历史夜间出生点（全局固定，首夜起累积）
+    imp_mine_ban: dict = {}   # IKKDR0-Q4：敌 imp 破坏 → 矿种禁采表（brain 注入）
     corridor_cells: tuple = ()  # 出生点→我方基地 的行军走廊采样格（B 方案）
     base_in_danger: bool = False  # 机器人逼近基地 → 工人撤内圈；否则直接避让
     dusk_avoid: bool = False  # 夜间 或 白天临近入夜 → 提前避开出生走廊
@@ -182,6 +183,7 @@ class Brain:
         self.llm_day: int = 0
         self.llm_calls_today: int = 0
         self.llm_ban_day: int = -1   # errorCode=5（LLM 超限）当日封禁非任务 LLM（防连续超限堆异常，U18 保守口径）
+        self.imp_mine_ban: dict[str, int] = {}  # IKKDR0-Q4：敌 imp 破坏 → 矿种禁采至解禁回合
         self._layout_recomputed_round: int = -100  # 上次布局自愈重算回合
         self.worker_fsms: dict[int, WorkerFSM] = {}
         self.layout: BaseLayout | None = None
@@ -307,6 +309,7 @@ class Brain:
         if _imp0 is not None:
             ctx.reserved.add(_imp0.pos)
         ctx.mine_blacklist = self.mine_blacklist
+        ctx.imp_mine_ban = self.imp_mine_ban   # IKKDR0-Q4：敌 imp 破坏 → 矿种禁采
         # 历史出生走廊（首夜起累积，全局固定）→ 夜间选矿/卖货避让
         ctx.spawn_cells = tuple(
             Pos(x, y) for entry in self.robot_spawn_log for (x, y) in entry["spawns"]
@@ -342,8 +345,37 @@ class Brain:
         return build_response(commands, prompt=ctx.prompt, execute_cmd=ctx.execute_cmd), trace
 
     # ---- 反馈学习 ----
+    def _learn_imp_mine_ban(self, turn: Turn, trace: dict[str, Any]) -> None:
+        """IKKDR0-Q4（用户裁决 2026-10-09：需要记忆）：敌 imp 破坏我方矿 → 该类矿禁采 10 回合。
+
+        判定：上一回合存在、本回合消失的矿 + 上一回合**可见敌 imp 邻接**（破坏站桩期
+        全图可见）+ 矿在我方对角线半区（平台不补刷规则按对角线半区生效）。
+        → `imp_mine_ban[矿种] = 本回合 + 10`；工人选矿跳过该矿种至解禁
+        （该半区该类矿 10 回合不会刷新，避免矿工在被清空的矿区空跑）。
+        """
+        if self.last_turn is None:
+            return
+        prev_mines = {p: k for p, k in self.last_turn.zones.items() if k in MINE_TYPES}
+        foes = self.last_turn.enemy_imps()
+        if not prev_mines or not foes:
+            return
+        for pos, kind in prev_mines.items():
+            if turn.zones.get(pos) == kind:
+                continue  # 仍在
+            if not turn.own_half(pos):
+                continue
+            if not any(distance(foe.pos, pos) <= 1 for foe in foes):
+                continue
+            until = turn.round_no + 10
+            if self.imp_mine_ban.get(kind, 0) < until:
+                self.imp_mine_ban[kind] = until
+                trace.setdefault("imp_mine_ban", []).append(
+                    {"kind": kind, "pos": pos.dump(), "until": until}
+                )
+
     def _learn(self, turn: Turn, trace: dict[str, Any]) -> None:
         relearn = False
+        self._learn_imp_mine_ban(turn, trace)
         for role_id, ok in turn.last_action_results.items():
             cmd = self.last_commands.get(role_id)
             if not cmd:
