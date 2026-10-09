@@ -288,6 +288,10 @@ class TaskPlanner:
             # 关键：提交后 stage=DONE，必须拉回 LLM 重试，否则干等到超时（IKHYQC/IKHYQB 根因）
             session.stage = ST_LLM
             session.llm_loops = max(0, session.llm_loops - 2)  # 给重试留 2 次循环余量
+            # IKKDR0-Q5-F（实锤 r411-417：重答期间再探索 → 15 回合耗尽超时）：
+            # 强制只重算模式——**禁止再执行任何命令**，只依据 transcript 已有数据
+            # 修正答案重交（复用 force_answer 机制：LLM 返 cmd 被拒、prompt 强制 answer）。
+            session.force_answer = True
 
         # 2. 阶段推进
         return self._advance(turn, session, out)
@@ -840,6 +844,12 @@ class TaskPlanner:
             parts.append("你上一次的返回未按要求仅返回JSON，请勿再犯。")
         if session.last_error:
             parts += ["=== 上次提交被判错（必须据此修正答案） ===", session.last_error]
+            if session.force_answer:
+                parts.append(
+                    "【只重算模式】**禁止再执行任何命令/重新读文件/探索**——transcript 里"
+                    "已有全部所需数据。只依据已有数据修正被判错的字段/数值，"
+                    "**只返回 answer，不得返回 cmd**。"
+                )
         if session.force_answer:
             parts.append(
                 "【强制提交】距任务超时/命令预算已到极限：**必须直接给出 answer，不得再返回 cmd**；"

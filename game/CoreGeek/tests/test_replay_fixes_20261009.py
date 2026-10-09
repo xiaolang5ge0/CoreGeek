@@ -195,6 +195,9 @@ class TestChannelOwner(unittest.TestCase):
         class FakeTreasure:
             plan = SimpleNamespace(ready=False, location=None, items=[], day=0)
 
+            def needs_inference(self) -> bool:
+                return False   # 无新推断需求（只测 mismatch 不互喂）
+
             def apply_llm(self, *a, **k):
                 applied.append(a)
                 return True

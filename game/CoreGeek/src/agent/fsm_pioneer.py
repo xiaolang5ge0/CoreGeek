@@ -268,12 +268,17 @@ class PioneerFSM:
         - 炮塔**全 L3** → 直接允许（用户原始条件）。
         - 炮塔未全 L3 但**已无买得起的升级券**（升级计划已尽/金币不够）→ 也允许，
           否则会像 IKI8KL 那样一直等不到"全 L3"、错过开启日（用户 2026-09-24 反馈宝藏失败）。
+        - **任务枯竭转产**（IKKDR0-Q5-E，F16：平台任务投放 D4 中午后枯竭）→
+          豁免全部前置（任务永远不会来了，宝藏是唯一高分项，蹲守=纯浪费）。
         """
         planner = getattr(ctx, "treasure", None)
         if planner is None or not getattr(planner.plan, "ready", False) or planner.attempted:
             return False
-        if self._has_task_available(turn):
+        exhausted = getattr(ctx, "tasks_exhausted", False)
+        if self._has_task_available(turn) and not exhausted:
             return False          # 有任务可接 → 宝藏不抢占（低优先级）
+        if exhausted:
+            return True           # 任务枯竭 → 宝藏优先于升级炮塔
         weapons = turn.weapons()
         if weapons and any(w.level < 3 for w in weapons):
             lvl = 1 if any(w.level == 1 for w in weapons) else 2

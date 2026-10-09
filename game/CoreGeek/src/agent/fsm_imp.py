@@ -38,7 +38,9 @@ from .rules import LegalityGuard
 FLEE_DIST = 2              # 敌方角色进入此距离 → 撤退（catch 需距离 1，留 1 格余量）
 PINCER_FOE_N = 2           # 可见敌角色数 ≥ 此值 且全在 ≤PINCER_DIST → 包夹 → 弃桩撤
 PINCER_DIST = 5
-ROBOT_AVOID_DIST = 2       # 机器人进入此距离 → 避让（攻击射程 3，留 1 格余量）
+ROBOT_AVOID_DIST = 3       # 机器人进入此距离 → 避让（=机器人攻击距离 3；IKKDR0-F24：
+                           # 阈值 2 时序上晚一拍——请求快照时机器人已退到 3-4 格外，
+                           # 结算时走近攻击，imp 在敌基地窄道 10 回合被磨死 500 血）
 MINE_BLACKLIST_ROUNDS = 20  # 站桩被打断/失败 → 该矿短期回避回合数
 DESTROY_ROUNDS = 4         # 连续 destroy 回合数（任务书：满 4 矿消失）
 COMBO_WINDOW = 10          # 同类矿连击加成窗口（回合）

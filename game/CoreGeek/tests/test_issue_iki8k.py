@@ -28,7 +28,8 @@ class TestTreasurePromptBounds(unittest.TestCase):
         p = TreasurePlanner()
         p.observe("西部有一石门，门需三钥")
         text = p.prompt(41, 32)
-        self.assertIn("方位词换算", text)
+        self.assertIn("地图坐标系", text)      # IKKDR0-F18：坐标语义勘误段
+        self.assertIn("之北 = y+1", text)
         self.assertIn("西部", text)
         self.assertIn("石门", text)
         self.assertIn("reason", text)

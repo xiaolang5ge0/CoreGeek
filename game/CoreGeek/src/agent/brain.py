@@ -104,6 +104,7 @@ class _Ctx:
     robot_cells: tuple = ()
     spawn_cells: tuple = ()   # 历史夜间出生点（全局固定，首夜起累积）
     imp_mine_ban: dict = {}   # IKKDR0-Q4：敌 imp 破坏 → 矿种禁采表（brain 注入）
+    tasks_exhausted: bool = False  # IKKDR0-Q5-E：平台任务投放枯竭（brain 注入）
     corridor_cells: tuple = ()  # 出生点→我方基地 的行军走廊采样格（B 方案）
     base_in_danger: bool = False  # 机器人逼近基地 → 工人撤内圈；否则直接避让
     dusk_avoid: bool = False  # 夜间 或 白天临近入夜 → 提前避开出生走廊
@@ -184,6 +185,8 @@ class Brain:
         self.llm_calls_today: int = 0
         self.llm_ban_day: int = -1   # errorCode=5（LLM 超限）当日封禁非任务 LLM（防连续超限堆异常，U18 保守口径）
         self.imp_mine_ban: dict[str, int] = {}  # IKKDR0-Q4：敌 imp 破坏 → 矿种禁采至解禁回合
+        self.tasks_exhausted: bool = False      # IKKDR0-Q5-E：平台任务投放枯竭（F16）
+        self._tasks_dead_since: int = 0         # 两任务点同时失效的起始回合
         self._layout_recomputed_round: int = -100  # 上次布局自愈重算回合
         self.worker_fsms: dict[int, WorkerFSM] = {}
         self.layout: BaseLayout | None = None
@@ -310,6 +313,7 @@ class Brain:
             ctx.reserved.add(_imp0.pos)
         ctx.mine_blacklist = self.mine_blacklist
         ctx.imp_mine_ban = self.imp_mine_ban   # IKKDR0-Q4：敌 imp 破坏 → 矿种禁采
+        ctx.tasks_exhausted = self.tasks_exhausted  # IKKDR0-Q5-E：任务枯竭 → 开拓者转产
         # 历史出生走廊（首夜起累积，全局固定）→ 夜间选矿/卖货避让
         ctx.spawn_cells = tuple(
             Pos(x, y) for entry in self.robot_spawn_log for (x, y) in entry["spawns"]
@@ -345,6 +349,28 @@ class Brain:
         return build_response(commands, prompt=ctx.prompt, execute_cmd=ctx.execute_cmd), trace
 
     # ---- 反馈学习 ----
+    def _learn_tasks_exhausted(self, turn: Turn, trace: dict[str, Any]) -> None:
+        """IKKDR0-Q5-E（F16 定案）：平台任务投放会枯竭——任务点冷却归 0 但 isValid
+        恒 false、奖励归 0（IKKDR0 实锤：D4 中午后全场无任务）。
+        检测：两任务点全部 (not is_valid and coldDownRounds==0) 持续 >30 回合 → 枯竭，
+        开拓者转产（宝藏主线优先，不再 GUARD 蹲守）。出现任何有效任务即复位。
+        """
+        live = any(t.is_valid or t.cooldown_rounds > 0 for t in turn.tasks)
+        if not turn.tasks:
+            return  # 任务数据缺失 → 不判定（平台偶发不下发，避免误判/误复位）
+        if live:
+            if self.tasks_exhausted:
+                trace["tasks_revived"] = True
+            self.tasks_exhausted = False
+            self._tasks_dead_since = 0
+            return
+        if self._tasks_dead_since == 0:
+            self._tasks_dead_since = turn.round_no
+        if not self.tasks_exhausted and turn.round_no - self._tasks_dead_since > 30:
+            self.tasks_exhausted = True
+            trace["tasks_exhausted"] = {"since": self._tasks_dead_since,
+                                        "round": turn.round_no}
+
     def _learn_imp_mine_ban(self, turn: Turn, trace: dict[str, Any]) -> None:
         """IKKDR0-Q4（用户裁决 2026-10-09：需要记忆）：敌 imp 破坏我方矿 → 该类矿禁采 10 回合。
 
@@ -375,6 +401,7 @@ class Brain:
 
     def _learn(self, turn: Turn, trace: dict[str, Any]) -> None:
         relearn = False
+        self._learn_tasks_exhausted(turn, trace)
         self._learn_imp_mine_ban(turn, trace)
         for role_id, ok in turn.last_action_results.items():
             cmd = self.last_commands.get(role_id)
@@ -1082,17 +1109,20 @@ class Brain:
         if folk:
             if self.treasure.observe(folk, turn.day_index):
                 trace["treasure_clue"] = len(self.treasure.legends)
-            # 线索足够且尚未召唤 → LLM 推断宝藏（地点/祭品/时间）；新传闻会**重推**（参考 IKIF4V）
-            if self.treasure.needs_inference() and not in_task:
-                _tp = self.treasure.prompt(
-                    turn.width, turn.height, turn.day_index,
-                    zones=zones_text(turn),
-                    offerings=offerings_from_shop(turn.shop_prices),
-                )
-                if self._ask_llm(turn, ctx, "treasure", _tp):
-                    trace["treasure_llm"] = True
-                    trace["treasure_llm_prompt"] = _tp[:600]
-                    self.treasure.mark_inferred()   # 记下已就本批线索问过
+        # 线索足够且尚未召唤 → LLM 推断宝藏（地点/祭品/时间）。
+        # IKKDR0-Q5（F18 根因 2）：旧逻辑包在 `if folk:` 里——ts=2/3 重推把
+        # _last_infer_len 清零后，当天无新传闻就永不重推（宝藏死案）。
+        # 移出：每回合检查 needs_inference（召唤失败重置计数 → 主动重推，不等新传闻）。
+        if self.treasure.needs_inference() and not in_task:
+            _tp = self.treasure.prompt(
+                turn.width, turn.height, turn.day_index,
+                zones=zones_text(turn),
+                offerings=offerings_from_shop(turn.shop_prices),
+            )
+            if self._ask_llm(turn, ctx, "treasure", _tp):
+                trace["treasure_llm"] = True
+                trace["treasure_llm_prompt"] = _tp[:600]
+                self.treasure.mark_inferred()   # 记下已就本批线索问过
         if not official and not folk:
             return
         entry = {"round": turn.round_no, "day": turn.day_index,
