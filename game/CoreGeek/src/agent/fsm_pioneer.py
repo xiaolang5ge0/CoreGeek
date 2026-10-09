@@ -358,15 +358,22 @@ class PioneerFSM:
         return len(path) - 1 if path else distance(pioneer.pos, cp)
 
     def _choose_task_point(self, turn: Turn, pioneer: Unit) -> Pos | None:
-        """§12.7：两任务点交替（优先与上次不同类型）+ 最近可用点。"""
+        """§12.7：两任务点交替（优先与上次不同类型）+ 最近可用点。
+        P2-11（用户 2026-10-09）：任务点 2 完成奖励小车 → 同等条件下优先。"""
         cands = [
             t for t in turn.tasks
             if t.is_valid and t.cooldown_rounds == 0 and t.pos not in self.failed_task_points
         ]
         if not cands:
             return None
+
+        def _vehicle_rank(t) -> int:
+            # 任务点 2 优先（taskType 含序号 "2"；平台 taskType 无序号时退化为原排序）
+            return 0 if "2" in (t.task_type or "") else 1
+
         cands.sort(key=lambda t: (
-            t.task_type == self.last_task_type,     # 与上次同类型 → 排后
+            _vehicle_rank(t),                        # P2-11：奖励小车的任务点优先
+            t.task_type == self.last_task_type,      # 与上次同类型 → 排后（交替保留为次级键）
             distance(pioneer.pos, t.pos),
             -t.score_reward,
         ))

@@ -19,7 +19,7 @@
    不完整则在 prompt 里提示 LLM 用更大 offset 继续取（修"只取第一页"→ `9 != 7` 根因）。
 
 阶段：EXPLORE_FILES →（ENGINEER_PROBE → ENGINEER_FIX?）→ LLM_LOOP
-      → WAIT_CMD_RESULT / WAIT_LLM → SUBMIT_ANSWER → COMPLETED
+      → WAIT_CMD_RESULT / WAIT_LLM → SUBMIT_ANSWER → SUBMIT_CONFIRM → COMPLETED
 """
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ ST_LLM = "LLM_LOOP"
 ST_WAIT_CMD = "WAIT_CMD_RESULT"
 ST_WAIT_LLM = "WAIT_LLM"
 ST_SUBMIT = "SUBMIT_ANSWER"
+ST_CONFIRM = "SUBMIT_CONFIRM"  # P1-8：提交后静默确认期（平台无"已接收"回执）
 ST_DONE = "COMPLETED"
 # 兼容旧名（外部引用）
 ST_FIND = ST_EXPLORE
@@ -49,6 +50,7 @@ MAX_NON_JSON = 3       # 连续非 JSON 上限 → 强制结束
 MAX_LLM_LOOPS = 8      # LLM 循环上限默认值（实际按任务 timeoutRounds 收紧，见 _task_timeout）
 FORCE_SUBMIT_CMDS = 8  # 命令预算默认值（实际按 timeout 动态，见 max_cmds）
 FORCE_ANSWER_MARGIN = 2  # 距任务超时 ≤ 此回合 → 强制"只给答案"模式
+SUBMIT_CONFIRM_ROUNDS = 2  # P1-8：提交后静默如此多回合且无 errorCode=2 → 视为成功
 EXPLORE_LIMIT = 20000  # 探索输出保留字符数（放开：需容纳 API_DOCS 全文/所有 md·txt/密钥）
 
 # transcript 长度控制（issue IKI8DZ §2.3）：单条结果保留末尾 16000；
@@ -188,11 +190,13 @@ class TaskSession:
     cmd_history: list = field(default_factory=list)      # [(cmd, result)]
     transcript: list = field(default_factory=list)       # ["COMMAND: ...\nRESULT: ..."]（LLM 上下文核心）
     llm_pending: bool = False
+    llm_resp_ok: bool = True          # P0-3：本回合 llmResp 通道是否归属任务（brain 侧设置）
     last_llm_raw: str = ""
     non_json: int = 0
     llm_loops: int = 0
     answer: Any = None
     submitted: bool = False
+    submitted_round: int = 0          # P1-8：提交发生回合（静默确认期起点）
     need_refine: bool = False
     max_loops: int = MAX_LLM_LOOPS                          # 本任务 LLM 循环上限（按 timeout 收紧）
     cmd_count: int = 0                                      # 已下发命令数
@@ -229,6 +233,10 @@ class TaskPlanner:
     def work(self, turn: Turn, session: TaskSession) -> PlannerOutput:
         out = PlannerOutput()
         if not turn.phase_task:
+            if session.stage == ST_CONFIRM and session.submitted:
+                # P1-8：提交后任务被平台撤下（验收通过/过期）→ 先确认完成再重置。
+                # 没有这一步，completed/SOP 会被上面的 reset 吞掉。
+                self._confirm_done(session)
             session.reset()
             return out
         if turn.phase_task != session.task_text:      # 新任务 → 重置
@@ -262,6 +270,13 @@ class TaskPlanner:
                 session.llm_pending = False
                 session.stage = ST_LLM
                 session.llm_loops = max(0, session.llm_loops - 1)
+            elif not session.llm_resp_ok:
+                # P0-3：本回合 llmResp 通道被宝藏/新闻占用（brain 冻结之外的双保险②）。
+                # 不消费外来内容、不计预算：退回 LLM_LOOP 下回合重新发起请求。
+                session.llm_pending = False
+                session.stage = ST_LLM
+                session.llm_loops = max(0, session.llm_loops - 1)
+                session.llm_resp_ok = True
             else:
                 self._on_llm_result(session, turn.llm_resp or "")
                 session.llm_pending = False
@@ -299,10 +314,19 @@ class TaskPlanner:
                     else json.dumps(session.answer, ensure_ascii=False)
                 )
                 session.submitted = True
-                session.stage = ST_DONE
-                self.completed += 1
-                self._maybe_extract_sop(session)
+                # P1-8：平台无"提交已接收"回执（实战 r287 成功后 r293 重复提交的根因）。
+                # 进入静默确认期；completed/SOP 延迟到确认成功再记，
+                # errorCode=2 重答路径不再虚报完成数/污染 SOP。
+                session.submitted_round = turn.round_no
+                session.stage = ST_CONFIRM
                 return out
+        # P1-8：提交确认期——绝不重复提交；2 回合内无 errorCode=2 即视为成功
+        if session.stage == ST_CONFIRM:
+            if not turn.phase_task:              # 任务已撤 → 直接完成
+                self._confirm_done(session)
+            elif turn.round_no - session.submitted_round >= SUBMIT_CONFIRM_ROUNDS:
+                self._confirm_done(session)
+            return out
         if session.stage == ST_DONE:
             return out
         # 等待中
@@ -372,6 +396,12 @@ class TaskPlanner:
             session.stage = ST_WAIT_LLM
             return out
         return out
+
+    def _confirm_done(self, session: TaskSession) -> None:
+        """P1-8：提交静默确认成功 → 此刻才计完成数并沉淀 SOP（原提交时刻后移）。"""
+        session.stage = ST_DONE
+        self.completed += 1
+        self._maybe_extract_sop(session)
 
     # ---- 命令构造 ----
     def _explore_cmd(self, session: TaskSession) -> str:
@@ -564,23 +594,33 @@ class TaskPlanner:
         return None
 
     def _answer_suspect(self, answer: Any) -> bool:
-        """答案安全校验（策略书 §6.4 + plausible_answer）：疑似查询失败/占位符 → 不提交。
+        """答案**结构校验**（P0-2 方案乙，2026-10-09 用户确认）。
 
-        - 空 dict / 空字符串
-        - 字符串含 401/403/error/traceback/占位符 xxx
-        - 全零 JSON（total_count/types 全空，通常是查询失败被吞成 0）
+        不做关键词子串否决——实战 F7：答案 key "errors" 含子串 "error" 被旧版
+        误杀 → l1/l2 永不提交死循环。代价不对称：误拦丢整个任务，错交只损失
+        1 次重试（errorCode=2 重答机制兜底），故只拦结构上明显不是答案的输入。
+
+        拦截：
+        - 空值（None/""/{}）
+        - 字面占位符（xxx/占位）
+        - 全零 JSON（数值全 0 且列表全空 → 查询失败被吞成 0）
+        - 整体是报错报文（键全部 ∈ {status,error,message,code} 且无答案键）
         """
         if answer in (None, "", {}):
             return True
         text = answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=False)
+        if not text.strip():
+            return True
         low = text.lower()
-        for bad in ("401", "403", "error", "traceback", "unauthorized", "forbidden"):
-            if bad in low:
-                return True
         if "xxx" in low or "占位" in text:
             return True
         obj = _parse_llm_json(text) if text.strip().startswith("{") else None
         if isinstance(obj, dict) and obj:
+            keys = {str(k).lower() for k in obj}
+            # 整体是报错报文而非答案：只有报错键、无任何答案键
+            # （{"error":"401 unauthorized"} 拦；{"errors":[...]} 放行——它是合法答案）
+            if keys and keys <= _ERROR_KEYS:
+                return True
             nums = [v for v in obj.values() if isinstance(v, (int, float))]
             lists = [v for v in obj.values() if isinstance(v, list)]
             # 所有数值均为 0 且列表均空 → 视为查询失败

@@ -96,7 +96,9 @@ class TestBigWaveNight1(unittest.TestCase):
             sim.advance()
         self.assertTrue(sim.base_alive)
         self.assertGreaterEqual(sim.role(10013)["health"], 1400)  # 几乎零伤
-        self.assertGreaterEqual(attacks, 40)  # 火力全开（实战仅 17 次的反面）
+        # P0-1 冷却账本节奏：火箭实际冷却 4 回合（间隔 ≥5 才可能成功），
+        # 3 炮 × 60 回合 ÷ 5 间隔 ≈ 36 次有效开火（旧字段判断是 40+ 次但大量被平台拒绝）。
+        self.assertGreaterEqual(attacks, 30)
 
 
 class TestWorkerRecall(unittest.TestCase):

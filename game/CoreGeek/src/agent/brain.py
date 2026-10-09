@@ -20,15 +20,16 @@ from .fsm_pioneer import (
     PioneerFSM,
 )
 from .fsm_worker import ROLE_MINER, ROLE_REPAIRER, STONE_BATCH, WorkerFSM
-from .path import next_step
+from .path import next_step, step_toward
 from .phases import PhaseManager
 from .planners.layout import BaseLayout, choose_front, compute_layout
 from .planners.news import NewsEconomy
-from .planners.task import TaskPlanner, TaskSession
+from .planners.task import ST_CONFIRM, TaskPlanner, TaskSession
 from .planners.treasure import TreasurePlanner, offerings_from_shop, zones_text
 from .planners.upgrade import WALL_MAX_HP, UpgradePlanner
 from .protocol import (
     IMP,
+    MINE_TYPES,
     Pos,
     ROCKET,
     ROUNDS_PER_DAY,
@@ -175,6 +176,7 @@ class Brain:
         self.news_economy = NewsEconomy()
         self.treasure = TreasurePlanner()
         self._llm_waiting: str = ""      # 非任务期 LLM 用途：news / treasure
+        self.llm_owner: str = ""         # P0-3：llmResp 通道归属（task/news/treasure），随 prompt 设置更新
         self._llm_round: int = 0
         self.wall_registry = WallRegistry()
         self.llm_day: int = 0
@@ -217,37 +219,47 @@ class Brain:
             return empty_response(), trace
 
         self._learn(turn, trace)
-        # 寻宝召唤结果处理（策略书 §8.4）：1/4 完成；2/3 失败→丢弃计划待重推
-        if turn.last_summon_result:
+        # 寻宝召唤结果处理（§8.4 + P1-6）：1/4 完成；2=地点错换点重推；3=祭品错保留地点；
+        # 0=召唤未真正执行 → 仅在"已发出 summon 待结账"时消费（结果码常态 0 = 未发 summon）
+        if turn.last_summon_result or self.treasure.take_await():
             self.treasure.on_summon_result(turn.last_summon_result)
             trace["summon_result"] = turn.last_summon_result
         # 非任务期 LLM 兜底：回收上回合响应（news / treasure），无响应 2 回合后放弃
         if self._llm_waiting and (
             turn.llm_resp or turn.round_no - self._llm_round >= 2
         ):
-            if turn.llm_resp:
-                if self._llm_waiting == "news":
-                    if self.news_economy.apply_llm(turn.llm_resp):
-                        trace["news_llm_applied"] = True
-                elif self._llm_waiting == "treasure":
-                    # 记录 LLM 原文（用户 2026-09-23：便于定位宝藏链为何没落地；2026-09-24 加长以容纳 reason）
-                    trace["treasure_llm_resp"] = str(turn.llm_resp)[:900]
-                    if self.treasure.apply_llm(
-                        turn.llm_resp, turn.day_index,
-                        offerings=offerings_from_shop(turn.shop_prices),
-                    ):
-                        trace["treasure_llm_applied"] = True
-                    else:
-                        trace["treasure_llm_reject"] = {
-                            "ready": self.treasure.plan.ready,
-                            "location": (
-                                self.treasure.plan.location.dump()
-                                if self.treasure.plan.location else None
-                            ),
-                            "items": list(self.treasure.plan.items),
-                            "day": self.treasure.plan.day,
-                        }
-            self._llm_waiting = ""
+            if turn.llm_resp and self.llm_owner != self._llm_waiting:
+                # P0-3 保险②：llmResp 通道归属与等待方不符（任务 prompt 抢占过通道），
+                # 该响应绝不喂给 news/treasure（F8：任务会话读到宝藏 JSON 的根因）；
+                # 本次提问作废，待下批线索重推。
+                trace["llm_owner_mismatch"] = {
+                    "waiting": self._llm_waiting, "owner": self.llm_owner,
+                }
+                self._llm_waiting = ""
+            else:
+                if turn.llm_resp:
+                    if self._llm_waiting == "news":
+                        if self.news_economy.apply_llm(turn.llm_resp):
+                            trace["news_llm_applied"] = True
+                    elif self._llm_waiting == "treasure":
+                        # 记录 LLM 原文（用户 2026-09-23：便于定位宝藏链为何没落地；2026-09-24 加长以容纳 reason）
+                        trace["treasure_llm_resp"] = str(turn.llm_resp)[:900]
+                        if self.treasure.apply_llm(
+                            turn.llm_resp, turn.day_index,
+                            offerings=offerings_from_shop(turn.shop_prices),
+                        ):
+                            trace["treasure_llm_applied"] = True
+                        else:
+                            trace["treasure_llm_reject"] = {
+                                "ready": self.treasure.plan.ready,
+                                "location": (
+                                    self.treasure.plan.location.dump()
+                                    if self.treasure.plan.location else None
+                                ),
+                                "items": list(self.treasure.plan.items),
+                                "day": self.treasure.plan.day,
+                            }
+                self._llm_waiting = ""
         if turn.station() is not None:
             if self.layout is None:
                 self.front = choose_front(turn)
@@ -557,14 +569,27 @@ class Brain:
             # 任务求解优先（IKHYU3 根因）：驻留任务点且任务进行中时先跑求解——
             # submit 占本回合角色动作；这样"入夜前归位"不会在答案就绪时抢走动作、导致任务被终止。
             if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
+                # P0-3 保险②：上回合 llmResp 若被 news/treasure 占用，任务不得消费
+                self.task_session.llm_resp_ok = self.llm_owner in ("", "task")
                 out = self.task_planner.work(turn, self.task_session)
                 if out.prompt:
                     ctx.prompt = out.prompt
+                    if self._llm_waiting:
+                        # P0-3 保险①：任务 prompt 抢占通道 → 撤销 news/treasure 孤儿提问
+                        ctx.trace["llm_preempt"] = self._llm_waiting
+                        self._llm_waiting = ""
+                    self.llm_owner = "task"
                     ctx.trace["llm_task"] = True
                 ctx.execute_cmd = out.execute_cmd
                 if out.submit is not None:
                     commands[pioneer.unit_id] = out.submit
                     ctx.trace.setdefault("task", {})["submit"] = True
+            elif self.task_session.stage == ST_CONFIRM:
+                # P1-8：提交后任务被平台撤下/FSM 已退出任务态 → 求解器门控不再命中，
+                # 但确认收尾（completed/SOP）必须补跑，否则成功提交被静默丢弃。
+                # out 不再产生 prompt/cmd/submit，仅完成 _confirm_done 并重置会话。
+                self.task_planner.work(turn, self.task_session)
+                ctx.trace["task_confirm"] = True
             # 本回合未提交，再让 FSM 决定走位/接任务/归位
             if pioneer.unit_id not in commands:
                 cmd = self.pioneer_fsm.day_cmd(turn, pioneer, layout.control_point, ctx)
@@ -657,13 +682,23 @@ class Brain:
                 prev = self.pioneer_fsm.state
                 # 任务求解优先：答案就绪先提交（同 _day，防走位抢动作）
                 if self.pioneer_fsm.state == STATE_TASK_WORK and turn.phase_task:
+                    # P0-3 保险②：同 _day——通道归属守卫
+                    self.task_session.llm_resp_ok = self.llm_owner in ("", "task")
                     out = self.task_planner.work(turn, self.task_session)
                     if out.prompt:
                         ctx.prompt = out.prompt
+                        if self._llm_waiting:
+                            ctx.trace["llm_preempt"] = self._llm_waiting
+                            self._llm_waiting = ""
+                        self.llm_owner = "task"
                         ctx.trace["llm_task"] = True
                     ctx.execute_cmd = out.execute_cmd
                     if out.submit is not None:
                         commands[pioneer.unit_id] = out.submit
+                elif self.task_session.stage == ST_CONFIRM:
+                    # P1-8：同 _day——提交后任务撤下也要补跑确认收尾
+                    self.task_planner.work(turn, self.task_session)
+                    ctx.trace["task_confirm"] = True
                 if pioneer.unit_id not in commands:
                     cmd = self.pioneer_fsm.day_cmd(turn, pioneer, cp, ctx)
                     if cmd:
@@ -702,14 +737,24 @@ class Brain:
         self._maybe_medicine(turn, commands)
 
     # ---- 32进16：捣乱鬼 + 反抓防御 ----
-    def _imp_and_catch_defense(self, turn: Turn, commands: dict[int, dict[str, Any]], ctx) -> None:
-        """捣乱鬼决策 + 全队抓捕防御。
+    # 追击派单参数（用户 2026-10-09 裁决，只采纳三点：邻接即抓 / 站桩中 2-4 步派单 / 不派开拓者）
+    HUNT_MIN_DIST = 2     # 站桩敌 imp 距我方工人 ≥2（=1 走上方邻接抓逻辑）
+    HUNT_MAX_DIST = 4     # ≤4 步：敌 imp 站桩 4 回合窗口内必能就位（>4 到达前它已打完）
+    HUNT_ROBOT_GUARD = 3  # 工人身边 ≤3 格有机器人 → 不派（夜间安全优先，追击不冒机器人风险）
 
-        抓捕策略：可见敌方 imp = 正在站桩破坏。
-        - 在**我方半区**破坏 → 邻接（距离1）的我方角色立即 catch（+20 金 + 除害），
-          可**覆盖**工人/捣乱鬼当前指令（1 回合损失 < 矿被破坏损失）；
-        - 在敌方半区 → 仅我方 imp 顺路抓（其他角色不远征）。
-        - 任务关键动作（submitAnswer/acceptTask/summonTreasure）永不被覆盖。
+    def _imp_and_catch_defense(self, turn: Turn, commands: dict[int, dict[str, Any]], ctx) -> None:
+        """捣乱鬼决策 + 全队抓捕防御（用户 2026-10-09 裁决版）。
+
+        防御三点：
+        1. **邻接即抓**：可见敌方 imp 与我方任一角色距离 1 → 立即 catch
+           （可覆盖工人/imp 指令；任务关键动作 submitAnswer/acceptTask/summonTreasure 永不覆盖）。
+        2. **站桩追击**：敌 imp 在我方半区、**贴着我方矿**（站桩破坏强信号）、
+           最近工人在 2~4 步内 → 派其前往抓捕（走到即触发邻接抓）。
+           即使敌 imp 弃桩逃跑，进度清零 + 威慑成立（见桩必反应 → 它只能挑远矿打）。
+        3. **永不派开拓者追击**（任务 80 分 > 抓捕 20 金+保矿；任务 deadline 仅 15 回合）。
+           开拓者仅保留第 1 条邻接即抓（顺路白捡）。
+
+        不追的情况（未采纳，即为不做）：>4 步不派、非矿旁不追、敌方半区不远征。
         """
         critical = {"submitAnswer", "acceptTask", "summonTreasure"}
         for foe in turn.enemy_imps():
@@ -728,6 +773,46 @@ class Brain:
                     {"role": role.unit_id, "foe": foe.pos.dump()}
                 )
                 break  # 一个敌人一个抓捕者
+        # ---- 2. 站桩追击派单（仅工人；每回合重判，敌 imp 弃桩即自动停派） ----
+        hunted: set[int] = set()  # 本回合已派出的工人（一人只追一个目标）
+        for foe in turn.enemy_imps():
+            if not turn.own_half(foe.pos):
+                continue
+            # 站桩强信号：贴着我方半区仍有余量的矿
+            if not any(
+                turn.zones.get(nb) in MINE_TYPES and turn.mine_remain.get(nb, 0) > 0
+                for nb in foe.pos.neighbours()
+            ):
+                continue
+            hunter = None
+            for w in sorted(
+                (w for w in turn.workers() if w.alive and w.unit_id not in hunted),
+                key=lambda w: (distance(w.pos, foe.pos), w.unit_id),
+            ):
+                d = distance(w.pos, foe.pos)
+                if not (self.HUNT_MIN_DIST <= d <= self.HUNT_MAX_DIST):
+                    continue
+                existing = commands.get(w.unit_id)
+                if existing is not None and existing.get("action") in critical:
+                    continue
+                # 机器人贴身 → 不派（工人安全 > 追击）
+                if any(
+                    distance(w.pos, rc) <= self.HUNT_ROBOT_GUARD
+                    for rc in ctx.robot_cells
+                ):
+                    continue
+                hunter = w
+                break
+            if hunter is None:
+                continue
+            step = step_toward(turn, hunter, foe.pos, ctx.reserved)
+            if step is None:
+                continue
+            commands[hunter.unit_id] = move_command(step)
+            hunted.add(hunter.unit_id)
+            ctx.trace.setdefault("catch_hunt", []).append(
+                {"role": hunter.unit_id, "foe": foe.pos.dump()}
+            )
         imp = turn.imp()
         if imp is None or imp.unit_id in commands:
             return
@@ -934,7 +1019,10 @@ class Brain:
         trace = ctx.trace
         official = (turn.official_news or "").strip()
         folk = (turn.folk_legends or "").strip()
-        in_task = self.pioneer_fsm.state == STATE_TASK_WORK
+        in_task = bool(turn.phase_task)
+        # P0-3（F8 真因）：原判据 `pioneer_fsm.state == STATE_TASK_WORK` 在任务执行
+        # 沙盒命令的间隙会被误判为空闲 → 宝藏/新闻 prompt 混进任务会话。
+        # turn.phase_task 才是任务会话活跃的可靠信号。
         if official:
             self.news_economy.update(official, turn.day_index)
             # 记录新闻解析结果（预测窗口/LLM 兜底），便于后续定位与调试
@@ -982,6 +1070,7 @@ class Brain:
         self.llm_calls_today += 1
         self._llm_waiting = kind
         self._llm_round = turn.round_no
+        self.llm_owner = kind      # P0-3：本 prompt 的响应归 news/treasure
         return True
 
     def _vacate_layout_cell(self, turn: Turn, worker, ctx: _Ctx) -> dict[str, Any] | None:

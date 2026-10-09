@@ -25,9 +25,15 @@ _KIND_CH = {
     "station": "S", "gatling": "G", "railgun": "Q", "rocket": "R", "wall": "W",
     "pioneer": "P", "worker": "w",
     "smallRobot": "s", "middleRobot": "m", "largeRobot": "L", "bossRobot": "B",
+    "imp": "I",   # 32进16（P0-4）：捣乱鬼此前映射为 "?" 的盲区
 }
 _ZONE_CH = {
     "stone": "s", "iron": "i", "copper": "c", "vendor": "V", "weaponShop": "S",
+    # 32进16（P0-4）：任务点/小车精确映射——原逻辑取 neutralType 首字母，
+    # challengerTaskPoint→"c" 与 copper 撞车、defenderVehicle→"d" 等 z 盲区根源
+    "challengerTaskPoint1": "T1", "challengerTaskPoint2": "T2",
+    "defenderTaskPoint1": "t1", "defenderTaskPoint2": "t2",
+    "challengerVehicle": "v1", "defenderVehicle": "v2",
 }
 
 
@@ -108,6 +114,16 @@ def compact_record(
         fails = [k for k, v in fb.items() if v is False]
         if fails:
             rec["fb_fail"] = fails
+        if fb:
+            rec["fb"] = dict(fb)          # P0-4：完整动作结果 map（F3：fb_fail 无原因码，需全貌对账）
+        # P0-4 六字段盲区（F9/F10）：召唤结果码 / 任务点全字段 / 敌方总分
+        if request.get("lastSummonTreasureResult"):
+            rec["ts"] = request["lastSummonTreasureResult"]
+        if team.get("playerTasks"):
+            rec["tasks"] = team["playerTasks"]
+        enemy = request.get("teamEnemy") or {}
+        if enemy.get("totalScore") is not None:
+            rec["esc"] = enemy["totalScore"]
         errs = request.get("errors") or []
         if errs:
             rec["err"] = [[e.get("errorCode"), str(e.get("description"))] for e in errs]

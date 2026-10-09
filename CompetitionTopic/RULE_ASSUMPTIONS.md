@@ -57,7 +57,7 @@
 | 围墙HP | 1000/1500/2000 | CONFIRMED |
 | **武器射程** | 静态表（用户文字确认）：加特林3/5/7、电磁6/8/10、火箭10/15/全图；request.txt 示例值不同（4/7/INT_MAX）→ **运行时 attackRange 字段优先**，静态表兜底 | **CONFIRMED + RUNTIME_OVERRIDE**（详见 §8 冲突2） |
 | 弹道算法 | 加特林/电磁攻击路径=两坐标中心连线经过的格子（Bresenham 直线），受阻挡；火箭无弹道指哪打哪（当前只用火箭，弹道未用） | CONFIRMED |
-| 火箭冷却 | 发射后3回合冷却（Role.cooldown 实时下发） | CONFIRMED |
+| 火箭冷却 | ~~发射后3回合冷却（Role.cooldown 实时下发）~~ → **v2.0 实测修正（§14 F1/F2）**：实际冷却 4 回合（间隔 ≥5 才稳定成功）；request cooldown 字段恒 0 不可信 → 代码改用自维护账本 | ~~CONFIRMED~~ → **已被实测推翻** |
 
 ## 5. 武器攻击机制
 
@@ -221,12 +221,13 @@
 | 复活规则 | 阵亡后**下一个游戏日白天第 1 回合**在基地复活（原"20 回合窗口"作废）；背包保留 | CONFIRMED |
 | 初始资源 | 角色×4（开拓者1/工人2/捣乱鬼1）、基地×1、金币 75 | CONFIRMED |
 | 武器数值 | 加特林 **25×等级** 伤/颗；电磁能量 **20×等级**（L1/L2/L3 = 20/40/60）；火箭不变（中心20/溅射半价/3回合冷却） | CONFIRMED |
-| 消耗品价格 | 围墙修复包 **15**、眩晕法宝 **50**、范围炸弹 **50**（原 10/100/100）；生命药剂 10 不变 | CONFIRMED |
+| 消耗品价格 | 围墙修复包 **15**、眩晕法宝 **50**、范围炸弹 **50**（原 10/100/100）；生命药剂 10 不变；**任务用品统一 10 金**（原 15，共 6 件：AcientTablet/StarSand/FlameBreath/FrostPotion/ThornAmulet/IronWhistle，列表随地图刷出不固定） | CONFIRMED |
+| 道具作用范围 | **眩晕法宝/范围炸弹仅对机器人有效**（对敌方建筑/角色无效）；两者无使用距离限制但 use 必须带 targetPos（缺失=指令错误异常）；围墙修复包需站在目标墙一格内；眩晕/炸弹结算优先级 > 机器人移动 | CONFIRMED |
 | 召唤令语义反转 | 由"给对方下夜 +N 机器人"改为"**召唤己方可控机器人**（位置 use 时指定）"；价格 **15/20/70/120**；"叠加对方浪潮"条款**删除** | CONFIRMED |
 | 召唤令约束 | 每天最多 10 张；use 必须带 targetPos：地图内、不在任一基地建造区、不在 NPC 处、不与己方待生成召唤位重叠 → 否则 use 非法并退券；目标格被占 → 旁移生成（合法不退券）；夜间首回合生成被占 → 不退券、环形搜近空位 | CONFIRMED |
 | 可控机器人 | 出生在指定位置、行为完全由召唤方指令驱动（无指令原地待命）；不受编队 AI 控制；roleCommandMap key 可为其 ID（30000/31000 段，move/attack）；attack 可打对方英雄/基地/建筑 | CONFIRMED |
 | 机器人归属隐蔽 | 夜晚 robot.roles **不含归属字段**（敌方无法分辨召唤机器人与浪潮机器人）；本方清单走 `teamOur.summonRobotList`（仅己方可见） | CONFIRMED |
-| 可驾驶小车 | 任务点2 完成时奖励（每队至多 1 辆）；仅白天存在（夜晚首回合消失）；驶入车格即驾驶（无需上下车指令，一人一车）；驾驶时单次 move 最多 2 格（第1格碰撞停原地/第2格碰撞停第2格）；车上可正常执行其他指令；敌车格不可驶入/不可建造；车无血量不可攻击；neutralType=`challengerVehicle`/`defenderVehicle` | CONFIRMED |
+| 可驾驶小车 | 任务点2 完成时奖励（每队至多 1 辆）；**夜间或当天最后一个白天回合完成 → 小车顺延至次日天亮刷出**；仅白天存在（夜晚首回合消失）；驶入车格即驾驶（无需上下车指令，一人一车）；驾驶时单次 move 最多 2 格（第1格碰撞停原地/第2格碰撞停第2格）；**移动 2 格车随人走、移动 1 格=步行离开车留原地**；车上可正常执行其他指令；敌车格不可驶入/不可建造；车无血量不可攻击；neutralType=`challengerVehicle`/`defenderVehicle` | CONFIRMED |
 | lastCmdResult 新格式 | 第一行状态头（`[exitCode:N]`/`[TIMEOUT]`/`[JUDGER_ERROR]`）+ 第二行固定 `[durationMs:N]` + 输出；超 64KB 尾加 `[TRUNCATED]` | CONFIRMED |
 | errorCode 语义 | 0未知 / 1任务超时 / 2答案错误 / **3网络错误（含LLM发送失败）** / **4指令错误** / 5LLM额度超限（每日3次，自进化任务期不计次不限额） | CONFIRMED |
 | 沙盒超时 | executeCmd 15 秒超时；沙盒故障与命令超时**不计**队伍异常 | CONFIRMED |
@@ -243,12 +244,37 @@
 
 | # | 未知项 | 验证方式 | 状态 |
 |---|---|---|---|
-| U12 | 捣乱鬼能否操控武器（attack"可用角色：全部" vs 4.7.1"控制3个角色"） | 首战夜间让 imp 发一条 attack 看合法性 | UNKNOWN |
-| U13 | 可控机器人 attack 是否限夜晚（按角色口径暂按仅夜晚守卫） | 白天发一条试探看是否判非法 | UNKNOWN |
-| U14 | 半区归属实测校准（对角线哪侧归 challenger；破坏"半区不补刷"的观察口径） | 记录对方 imp 出现区域与我方矿刷新 | UNKNOWN |
-| U15 | destroy 打断的判定时序（"任一回合未执行"按回合末还是回合初结算） | 日志核对连续 4 回合 destroy 的成功时点 | UNKNOWN |
-| U16 | catch 目标可见性边界（看不到的敌 imp 发 catch 是否计指令错误） | 保守：仅对可见敌 imp 发 catch；日志确认 | UNKNOWN |
-| U17 | 召唤令"每天10张"计数口径（自然日/游戏日；失败 use 是否计数） | 实测 | UNKNOWN |
-| U18 | errorCode=5（LLM 超限）是否计入异常 5 次 | 观察平台判罚；当前按"会计入"严格限额 | UNKNOWN |
-| U19 | 小车驾驶细节（驶入即驾驶的结算、移动 2 格的碰撞分支、驾驶回合能否 attack） | 实测 | UNKNOWN |
-| U20 | 敌方 imp 非站桩期间是否真的不可见（若可见，反抓策略可提前布防） | 日志观察 teamEnemy.roles 中 imp 出现频率 | UNKNOWN |
+| U12 | 捣乱鬼能否操控武器（attack"可用角色：全部" vs 4.7.1"控制3个角色"） | 首战夜间让 imp 发一条 attack 看合法性 | UNKNOWN（三场 imp 全程未发 attack，未验证） |
+| U13 | 可控机器人 attack 是否限夜晚（按角色口径暂按仅夜晚守卫） | 白天发一条试探看是否判非法 | UNKNOWN（召唤机器人未启用，未验证） |
+| U14 | 半区归属实测校准（对角线哪侧归 challenger；破坏"半区不补刷"的观察口径） | 记录对方 imp 出现区域与我方矿刷新 | UNKNOWN（imp destroy 均成功未遇非法拒绝，间接支持当前判定；无精确校准样本） |
+| U15 | destroy 打断的判定时序（"任一回合未执行"按回合末还是回合初结算） | 日志核对连续 4 回合 destroy 的成功时点 | UNKNOWN（本方 destroy 多为赶路中断，无完整 4 连击样本） |
+| U16 | catch 目标可见性边界（看不到的敌 imp 发 catch 是否计指令错误） | 保守：仅对可见敌 imp 发 catch；日志确认 | UNKNOWN（catch 全场 0：敌 imp 从未可见，未验证） |
+| U17 | 召唤令"每天10张"计数口径（自然日/游戏日；失败 use 是否计数） | 实测 | UNKNOWN（召唤令未使用） |
+| U18 | errorCode=5（LLM 超限）是否计入异常 5 次 | 观察平台判罚；当前按"会计入"严格限额 | UNKNOWN（三场无 LLM 超限事件） |
+| U19 | 小车驾驶细节（驶入即驾驶的结算、移动 2 格的碰撞分支、驾驶回合能否 attack） | 实测 | UNKNOWN（s1 于任务点2 完成、小车应到账，但 z 映射撞车无法确认——见 F12/F14） |
+| U20 | 敌方 imp 非站桩期间是否真的不可见（若可见，反抓策略可提前布防） | 日志观察 teamEnemy.roles 中 imp 出现频率 | STRONG_INFERENCE（三场 teamEnemy.roles 从未出现敌 imp → 不可见初步证实；前提=对手放了 imp） |
+| U21 | Day5+ 平台是否仍有任务可接（三场 D5 起 0 acceptTask 的三假设并存：平台任务耗尽 / 任务点冷却 / 黑名单误杀——playerTasks 未进遥测无法定案） | 遥测补 playerTasks（P0-4）后下一局定案 | UNKNOWN |
+| U22 | 宝藏 summon 结果码（lastSummonTreasureResult 0-4）与祭品需求闭环（疑似只带 1 祭品召唤） | 遥测补字段（P0-4）+ 结果码驱动重试（P1-6） | UNKNOWN |
+
+## 14. 实战验证记录·2026-10-08 三场（IKK7EF / IKK7EE / IKK7ED）
+
+> 数据源：gitee issue 加密遥测评论，解密 1244/1266/1245 条（95%+，缺失为评论截断）。
+> 详细复盘：`复盘_20261008_IKK7EF_EE_ED.md`；措施清单（待用户确认）：`STRATEGY_DECISIONS.md §十七`。
+
+| # | 实测事实 | 状态 |
+|---|---|---|
+| F1 | **火箭实际冷却 = 4 回合**：同炮距上次开火 ≤4 回合 → 0 成功/145 失败；≥5 回合 → 734 成功/45 失败（另查明全是匹配误差）。任务书"3 回合冷却"与实测不符（间隔 5 才稳定成功） | CONFIRMED（实测） |
+| F2 | **request 中武器 cooldown 字段全程恒 0，不可信**（接口文档"cooldown 仅火箭有"未兑现到数值）；fire.py 只信该字段 → 冷却期误判就绪反复无效开火 | CONFIRMED（实测） |
+| F3 | fb_fail（lastRoundRoleActionResults）只报 False 的角色 ID、无原因码；fire.py 未消费 → 同炮同目标硬打（IKK7EE r504-519 十六回合 0 伤害、station 640→40 被啃穿后 r520 团灭；IKK7EF 同期同样 16 回合全失败） | CONFIRMED（实测） |
+| F4 | defender 的 fb_fail 键为 200xx 段（challenger 为 100xx 段），日志分析必须按队伍分段 | CONFIRMED（实测） |
+| F5 | 3 炮轮转节拍（R1→R2→R3→R1）间隔 3 < 实际冷却 4 → **现行轮转不可能命中**；3 全火箭 → 冷却期整夜火力真空 | CONFIRMED（由 F1 推导） |
+| F6 | 加特林/电磁**冷却恒 0**（接口文档明示）→ 武器混编可填补火箭冷却真空 | CONFIRMED（文档） |
+| F7 | l1/l2 自进化任务答案格式含 key "errors" → `_answer_suspect` 的 "error" 子串误杀 → 永不提交、LLM 死循环至超时（三场 l1/l2 全灭、l3 无 "error" 所以成功——样本完美吻合） | CONFIRMED（实测） |
+| F8 | llmResp 单通道：任务执行中宝藏推断 LLM 触发 → 任务会话收到宝藏 JSON（`{"x":20,"y":17,"items":[...]}`）→ s3 空转超时（IKK7EF/IKK7EE 实锤；IKK7ED 时机错开幸免） | CONFIRMED（实测） |
+| F9 | lastSummonTreasureResult（0-4）**未进遥测** → summon 结果全盲；三场各仅 1 次 summon、IKK7EF 仅带 1 祭品（LLM 曾推断需 3） | CONFIRMED（遥测盲区） |
+| F10 | playerTasks 原始字段（isValid/coldDownRounds/taskType）未进遥测 → 三场 **Day5 起 0 acceptTask**（pioneer GUARD 蹲守 6 天）无法定案；时间预算与 accept 黑名单已排除 | CONFIRMED（遥测盲区） |
+| F11 | 敌方 imp 三场从未出现在 teamEnemy.roles（=U20 证据） | STRONG_INFERENCE |
+| F12 | 遥测映射缺陷：任务点/小车在 z 中与 copper 撞首字母；u 中 imp 显示 "?"（_KIND_CH 未映射） | CONFIRMED（遥测缺陷） |
+| F13 | 我方 imp destroy 100/34/89 次（多为赶路）、catch 全场 0；反抓防御代码未经实战检验 | CONFIRMED（实测） |
+| F14 | 任务点2（两格 (26,17)+(27,17)）完成 s1 → 按 v2.0 规则应奖励小车，是否到账无法确认（z 映射撞车） | UNKNOWN |
+| F15 | 火箭 attack 的 targetPos 数量必须=武器等级（接口文档 §2.2 原文"目标位置数与当前武器等级数相同"）。旧实现传 min(等级,凑到的目标数)——1 级炮恒合规；**炮升级后夜晚残局只剩 1-2 敌人时只传 1 坐标 → 判非法**。"夜晚残局攻击失败"的新解释（与 F1 冷却结论不矛盾，失败可双源叠加）。修复：落点不足等级时用 8 邻域空地补齐（2026-10-09） | CONFIRMED（文档实锤） |

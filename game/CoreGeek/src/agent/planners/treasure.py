@@ -95,7 +95,12 @@ class TreasurePlanner:
         self.plan = TreasurePlan()
         self.attempted = False
         self._last_infer_len = 0   # 上次推断时的线索条数（新线索到来才再问 LLM，用户 2026-09-23）
-        self.failed_sites: list[tuple[int, int]] = []   # 召唤失败过的坐标（结果 2/3，需换地点重推）
+        self.failed_sites: list[tuple[int, int]] = []   # 召唤失败过的坐标（结果 2，需换地点重推）
+        # P1-6（实战 F11/F12）：结果码 0=召唤未真正执行——旧版把 attempted 置 True 后
+        # 遇 0 永不复位 → 宝藏链卡死；结果码 3=祭品错，地点可能正确——旧版误拉黑地点
+        self.summon_tries: int = 0                    # 连续"结果 0"计数（上限 3 次后放弃重推）
+        self.tried_items: list[tuple[int, int, tuple[str, ...]]] = []   # 结果 3 的（地点, 祭品组合）
+        self._await_result: bool = False              # summon 已发出、待本回合结果码结账
 
     # ---- 线索累积 ----
     def observe(self, folk: str, day: int = 0) -> bool:
@@ -148,6 +153,16 @@ class TreasurePlanner:
             parts.append(
                 f"=== 失败反馈 ===\n以下坐标已尝试召唤但**失败**：{bad}。"
                 "请结合传闻**重新推断**，不要重复给出这些坐标。"
+            )
+        if self.tried_items:
+            # P1-6/P1-7：结果码 3=祭品错、地点可能正确——反馈已试组合，只换祭品不换地
+            lines = ["(%d,%d) 祭品=%s" % (x, y, "+".join(items))
+                     for x, y, items in self.tried_items[-5:]]
+            parts.append(
+                "=== 祭品已试组合（召唤结果 3：地点可能正确、**祭品组合错误**） ===\n"
+                + "\n".join(lines)
+                + "\n这些地点**可以保留**，但必须更换祭品组合："
+                "核对祭品**数量**（『三道封印/门需三钥』= 3 个）与**种类拼写**（必须用本图任务用品英文名）。"
             )
         parts.append(
             "\n请据线索推断宝藏：祭坛坐标(x,y)、需献祭的任务用品(英文名)、开启天数。"
@@ -217,16 +232,49 @@ class TreasurePlanner:
         self.plan = TreasurePlan(Pos(x, y), items, day, ready, (response or "")[:200])
         return True
 
+    def mark_summon_sent(self) -> None:
+        """summon 指令已发出 → 本回合结果码必须结账（P1-6：0 也是有效结果）。"""
+        self._await_result = True
+
+    def take_await(self) -> bool:
+        """取走并清零"待结账"标志：brain 据此决定 0 结果码是否需要消费。"""
+        awaiting = self._await_result
+        self._await_result = False
+        return awaiting
+
     def on_summon_result(self, code: int) -> None:
-        """召唤结果（策略书 §8.4）：1/4=完成不再尝试；2/3=失败→记录失败点并**立即用全部传闻重推**。"""
+        """召唤结果（策略书 §8.4 + P1-6 修订）：
+        1/4=完成不再尝试；2=地点错→记失败点换地重推；
+        3=祭品错→**保留地点**记失败组合重推；0=召唤未真正执行→保留计划重试（≤3 次）。"""
         if code in (1, 4):
+            self.summon_tries = 0
             self.attempted = True
+        elif code == 0:
+            # 召唤没真正执行（指令被顶替/动作非法）：计划未被检验，原样保留重试；
+            # 连续 3 次仍 0 → 视为死链，放弃本次计划并触发重推
+            self.summon_tries += 1
+            if self.summon_tries >= 3:
+                self.plan = TreasurePlan()
+                self.summon_tries = 0
+                self._last_infer_len = 0
         elif code in (2, 3):
-            if self.plan.location is not None:
-                site = (self.plan.location.x, self.plan.location.y)
-                if site not in self.failed_sites:
-                    self.failed_sites.append(site)
-            self.plan = TreasurePlan()
+            self.summon_tries = 0
+            if code == 2:
+                # 地点错：记失败地点，整计划作废重推
+                if self.plan.location is not None:
+                    site = (self.plan.location.x, self.plan.location.y)
+                    if site not in self.failed_sites:
+                        self.failed_sites.append(site)
+                self.plan = TreasurePlan()
+            else:
+                # 祭品错：地点可能正确（文档 §1.1 结果码语义）→ 保留地点，
+                # 记失败祭品组合，重推时反馈 tried-items 让 LLM 换组合
+                if self.plan.location is not None:
+                    combo = (self.plan.location.x, self.plan.location.y,
+                             tuple(self.plan.items))
+                    if combo not in self.tried_items:
+                        self.tried_items.append(combo)
+                self.plan = TreasurePlan(location=self.plan.location)
             self.attempted = False
             # **立即重推**（不等新传闻）：把累计传闻 + 失败反馈一起再问 LLM
             self._last_infer_len = 0
@@ -262,7 +310,9 @@ class TreasurePlanner:
         if distance(pioneer.pos, loc) <= 1:
             if self.plan.day and turn.day_index < self.plan.day:
                 return None      # 已到祭坛旁但未到开启日 → 原地待命（回防交给 FSM）
-            self.attempted = True
+            # P1-6：不再提前置 attempted=True（结果码 0 时会永久卡死）；
+            # 改记"待结账"，由下回合结果码决定：0→重试，1/4→完成，2/3→重推
+            self.mark_summon_sent()
             return summon_treasure_command(loc, list(self.plan.items))
         step = step_toward(turn, pioneer, loc, ctx.reserved)
         return move_command(step) if step is not None else None
