@@ -735,7 +735,13 @@
 > 回归：407/407 OK（新增 test_ikkj2_fixes_20261009.py 7 测，更新 8 处旧测试）。
 > **待办：重打包 + 冒烟 + 推 gitee（下次上平台必做）。**
 
-## 打包提醒（进平台前必查）
+## 实施记录·策略审查落地 A1/A3/B1/B2/B3+/C + 自进化 T1-T8（2026-10-10 上午，407/407）
+
+> 裁决对照：`STRATEGY_DECISIONS.md §23`；兵潮数据：`RULE_ASSUMPTIONS.md §20`（F51-F53/U27）。
+> A2 小车 / B4 夜修理工外出：暂不做（用户裁决）。武器结论：维持纯三门火箭，混编不划算（多派操控者代价 > 火力增益，F47 实锤）。
+> **待办：重打包 + 冒烟 + 推 gitee + github（用户要求双平台）。**
+
+## 打包提醒（进平台前必查)
 - [x] `python tools/build_package.py` → dist/CoreGeek.tar.gz 顶层含 `CoreGeek/`（初赛封号教训）✅ 2026-10-09 下午再打：95448B/24 files（含顺手项三改：价格修订/errorCode=5 封禁/rules 死代码清理）
 - [x] 解包冒烟测试（.workbuddy/tmp/smoke_v2_deploy.py）：tarfile 解包→仅用解包产物 import→v2.0 payload decide→SMOKE OK
 - [x] 首战遥测确认（2026-10-08 三场）：加密遥测正常落 stdout，解密 95%+；发现 6 字段盲区（P0-4：lastSummonTreasureResult / playerTasks / z 撞车 / imp "?" / fb_fail 原始 map / 敌方 sc）

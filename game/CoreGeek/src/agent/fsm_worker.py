@@ -328,6 +328,16 @@ class WorkerFSM:
         cmd = self._evade_cmd(turn, unit, ctx)
         if cmd is not None or self._evading:
             return cmd
+        # A3（2026-10-10 用户裁决）：day1 单人按产能建不完 14 面墙（或入夜前紧急兜底）
+        # → 挖矿工**转采石并接受建墙派单**。旧门槛 stone>20 形同虚设（石矿每座仅
+        # 10 次），且 brain 的 day1_helper 判据此前是死代码 → day1 只建成 13/14。
+        if turn.is_day and ctx.walls_left > 0 and (
+            getattr(ctx, "day1_helper", False) or getattr(ctx, "urgent_build", False)
+        ):
+            if unit.backpack.count("stone"):
+                self.state = STATE_BUILD
+                return None          # 有石头 → 等 brain 派建墙单
+            return self._mine_flow(turn, unit, ctx, prefer="stone")
         # 决策 D（用户 2026-09-23）：矿工整夜"安全"外采（仅第 9 夜起考虑回防）。
         # 旧"D6 原地待命"会在机器人在基地 6 格内时把矿工钉在基地旁整夜不采矿 → 已移除。
         # 返程 deadline（用户 2026-09-23）：**前 3 天不回防**（激进挖矿，只躲机器人）；
@@ -384,10 +394,12 @@ class WorkerFSM:
             # 矿锁与当前偏好不符（issue#26：修理工 Day1 建墙锁了石矿，入夜该采钱却仍走远石矿）
             # prefer=money 且锁的是石矿 → 释放（改采铜/铁）；prefer=stone 且锁的是铜/铁 → 释放。
             locked_kind = turn.zones.get(self.mine)
-            # 锁矿不跳变（IKHYD3）：矿工选定后整个外出周期不变；仅修理工做 prefer 释放
+            # 锁矿不跳变（IKHYD3）：矿工选定后整个外出周期不变；仅修理工做 prefer 释放。
+            # C4（2026-10-10）：**矿工也释放**——锁的是石矿但当前偏好是钱（如 A3 帮建
+            # 结束/行情变化），或偏好石矿却锁着铜铁矿，都会让矿工背着错矿空跑一整趟。
+            # 保留"周期不跳变"的本意：只在**偏好类别真的不符**时才释放（不是价格波动）。
             if (
                 locked_kind is not None
-                and self.role == ROLE_REPAIRER
                 and (
                     (prefer == "money" and locked_kind == "stone")
                     or (prefer == "stone" and locked_kind != "stone")

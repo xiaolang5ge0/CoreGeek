@@ -46,7 +46,10 @@ class TestWeaponUpgrade(unittest.TestCase):
 
 class TestUpgradePriority(unittest.TestCase):
     def test_front_wall_hard_constraint(self):
-        """用户确认：D5 入夜前目标正面墙 L3 未达标 → 正面墙升级优先级最高(1)。"""
+        """用户确认：D5 入夜前目标正面墙 L3 未达标 → 正面墙升级优先级最高(1)。
+
+        B1（2026-10-10 用户裁决：武器优先，前提修复券备足）→ 新增门控：
+        **仍有武器未到 L2 时正面墙让位武器 L2**；武器全 L2 后恢复 priority 1。"""
         sim = SimWorld(station_pos=(10, 24), mines={(6, 22): "stone", (8, 20): "copper"})
         brain = Brain()
         build_day1(brain, sim)
@@ -55,7 +58,17 @@ class TestUpgradePriority(unittest.TestCase):
             Turn.load(sim.payload()), cp=Pos(9, 23), front="W"
         )
         front = [m for m in missions if m.kind == "wall" and m.priority == 1]
-        self.assertTrue(front, "正面墙应产生最高优先(1)升级任务")
+        self.assertFalse(front, "武器未全 L2 时正面墙应让位（不抢 priority 1）")
+        self.assertTrue(any(m.kind == "weapon" and m.priority == 2 for m in missions),
+                        "武器 L2 应优先(2)")
+        # 武器全 L2 → 正面墙硬约束恢复最高优先
+        for w in sim.weapons():
+            w["level"] = 2
+        missions2 = UpgradePlanner().plan(
+            Turn.load(sim.payload()), cp=Pos(9, 23), front="W"
+        )
+        front2 = [m for m in missions2 if m.kind == "wall" and m.priority == 1]
+        self.assertTrue(front2, "武器全 L2 后正面墙应恢复最高优先(1)")
 
     def test_reserve_kept(self):
         """预算保留：金 100（保留 30）买不起武器券 100 → 无武器任务（廉价墙任务允许）。"""

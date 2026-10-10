@@ -41,6 +41,8 @@ WEAPON_L1_COST = 100
 WEAPON_L2_COST = 150
 SHOP_TRIP_LIMIT = 8      # （保留备用）距商店硬上限
 UPGRADE_TRIP_CAP = 40    # P0-B：买券远征硬上限（往返+归家，防跨天远征；IKKJ2E 实锤远征 46 轮被拦）
+PIONEER_GOLD_RESERVE = 100  # C5：开拓者买券时为修理工升级计划预留的金币（首张券才预留）
+PIONEER_GOLD_RICH = 400     # C5：金币 ≥ 此值视为富裕，不再为同伴预留
 
 
 class PioneerFSM:
@@ -106,7 +108,12 @@ class PioneerFSM:
         if turn.round_in_day == 0:
             self.returning = False       # 新的一天重置归位粘性
         margin = RETURN_MARGIN_TASK if in_task else DUSK_MARGIN
-        must_return = turn.rounds_until_night <= travel + margin
+        # A1（2026-10-10 用户裁决）：夜间 rounds_until_night 恒为 0 → must_return
+        # 恒真 → pioneer 夜间一律被"归位"打断，`_task_flow` 整段跳过，与
+        # brain._night「兵潮清空 + 距天亮 >30 才外出行动」的意图直接冲突。
+        # **must_return 只在白天生效**；夜间是否回防由 brain._night 统一控制
+        # （用户裁决：夜间有兵潮必须回 CP 控炮，直到兵潮死光才出去）。
+        must_return = turn.is_day and turn.rounds_until_night <= travel + margin
         if self.returning or must_return:
             if not self.returning:
                 self.return_since = turn.round_no
@@ -249,7 +256,16 @@ class PioneerFSM:
         if want <= 0:
             return 0
         room = (pioneer.capacity or 40) - len(pioneer.backpack)
-        afford = turn.gold // cost if cost > 0 else 1
+        # C5（2026-10-10）：给修理工的升级/备货计划预留金币——同回合两人各自下单时，
+        # 常有一人被 gold_not_enough 拒、整回合作废（upgrade.plan 的 budget 与此处
+        # 各算各的，无全局预留）。**但若预留后连一张都买不起，则放弃预留**（不能
+        # 因为给同伴留钱而让自己什么都买不了）。
+        usable = turn.gold
+        if held == 0 and turn.gold < PIONEER_GOLD_RICH:
+            reserved = turn.gold - PIONEER_GOLD_RESERVE
+            if reserved >= cost:
+                usable = reserved
+        afford = usable // cost if cost > 0 else 1
         return max(0, min(want, room, afford))
 
     def _nearest_shop(self, turn: Turn, pioneer: Unit) -> Pos | None:

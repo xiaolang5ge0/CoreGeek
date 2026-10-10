@@ -139,16 +139,19 @@ class TestLoopLimitByTimeout(unittest.TestCase):
         self.assertEqual(session.timeout_rounds, 15)
 
     def test_deadline_forces_answer(self):
-        """距任务超时 ≤2 回合 → 强制只给答案。"""
-        from agent.planners.task import TaskPlanner, TaskSession
+        """距任务超时 ≤FORCE_ANSWER_MARGIN 回合 → 强制只给答案。
+
+        T6（2026-10-10）：余量 2 → **4**。提交是"发 prompt → 收 llmResp → 提交"
+        2 回合/次交换，margin=2 触发时往往已来不及完成最后一问+提交。"""
+        from agent.planners.task import FORCE_ANSWER_MARGIN, TaskPlanner, TaskSession
         planner = TaskPlanner()
         s = TaskSession()
         turn = Turn.load(make_sim().payload())   # round_no = 1
         s.accept_round = 1
-        s.timeout_rounds = 3
-        self.assertFalse(planner._at_deadline(turn, s))   # remaining = 3
-        s.timeout_rounds = 2
-        self.assertTrue(planner._at_deadline(turn, s))    # remaining = 2
+        s.timeout_rounds = FORCE_ANSWER_MARGIN + 1
+        self.assertFalse(planner._at_deadline(turn, s))   # remaining > margin
+        s.timeout_rounds = FORCE_ANSWER_MARGIN
+        self.assertTrue(planner._at_deadline(turn, s))    # remaining == margin
         s.timeout_rounds = 0
         self.assertFalse(planner._at_deadline(turn, s))   # 未知 timeout 不触发
 

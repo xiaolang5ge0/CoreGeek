@@ -142,6 +142,10 @@ class TestUpgradeOrder(unittest.TestCase):
         )
 
     def test_l2_wall_before_l3_weapon(self):
+        """B1（2026-10-10 用户裁决）：武器升级优先于墙升级（前提修复券备足）。
+
+        旧口径"L2 围墙优先于 L3 炮台"已反转：火箭 L3 = 三弹头/**全图**，是清潮与
+        击杀分的质变；墙 L3(2000 血) 仍会被大机器人啃穿。故 L3 炮台(8) < L2 围墙(15)。"""
         sim = self._sim(900, weapons_level=2, wall_level=1)
         turn = Turn.load(sim.payload())
         ms = UpgradePlanner().plan(turn, cp=Pos(9, 23), front="W")
@@ -150,8 +154,8 @@ class TestUpgradeOrder(unittest.TestCase):
         self.assertTrue(wall, "应有 L2 围墙任务")
         self.assertTrue(w2, "应有 L3 炮台任务")
         self.assertLess(
-            min(m.priority for m in wall), min(m.priority for m in w2),
-            "L2 围墙应优先于 L3 炮台",
+            min(m.priority for m in w2), min(m.priority for m in wall),
+            "B1 裁决后：L3 炮台应优先于 L2 围墙",
         )
 
     def test_wall_target_level(self):

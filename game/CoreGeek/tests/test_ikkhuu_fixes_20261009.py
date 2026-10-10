@@ -228,7 +228,8 @@ class TestFWeaponReserveL3(unittest.TestCase):
         ms = up.UpgradePlanner().plan(turn, cp=Pos(9, 23), front="W")
         wall_missions = [m for m in ms if m.kind == "wall"]
         self.assertFalse(wall_missions, "gold 不足 L3 预留时应暂停墙升级（保护 L3 券钱）")
-        self.assertTrue(any(m.kind == "weapon" and m.priority == 20 for m in ms),
+        # B1（2026-10-10）：L3 炮台优先级 20 → 8（武器优先于墙升级）
+        self.assertTrue(any(m.kind == "weapon" and m.priority == 8 for m in ms),
                         "L3 炮台任务不受预留影响")
 
 

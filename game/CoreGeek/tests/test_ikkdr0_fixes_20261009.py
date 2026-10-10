@@ -198,8 +198,10 @@ class TestQ3VoucherBatch(unittest.TestCase):
         # V2 = 正面 L1×2 + L2×2（目标L3）= 4（侧墙目标 L2 不需 V2）
         self.assertEqual(v1[0].qty, 4)
         self.assertEqual(v2[0].qty, 4)
-        self.assertEqual(v1[0].priority, -1, "死线未达标应插队 WallFixer 之前")
-        self.assertEqual(v2[0].priority, -1)
+        # B2（2026-10-10）：死线优先级 -1 → **3**（不再压过 WallFixer 备货(0)；
+        # 修复包是夜间防御前提，压过它会让 fire._defense_safe 恒 False、火力锁死威胁模式）
+        self.assertEqual(v1[0].priority, 3, "死线未达标应紧随 WallFixer(0) 之后")
+        self.assertEqual(v2[0].priority, 3)
 
     def test_deadline_met_normal_batch(self):
         payload = self._payload()

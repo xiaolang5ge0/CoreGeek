@@ -48,8 +48,13 @@ ST_READ = ST_EXPLORE
 
 MAX_NON_JSON = 3       # 连续非 JSON 上限 → 强制结束
 MAX_LLM_LOOPS = 8      # LLM 循环上限默认值（实际按任务 timeoutRounds 收紧，见 _task_timeout）
+SKIP_EXPLORE_TIMEOUT = 16  # T6：timeout ≤ 此值跳过首轮探索（旧值 10 覆盖不到 timeout=15）
+FORCE_ANSWER_MARGIN_LATE = 4  # T6：距死线 ≤ 此回合数即强制答案（旧值 2 触发太晚，来不及提交）
 FORCE_SUBMIT_CMDS = 8  # 命令预算默认值（实际按 timeout 动态，见 max_cmds）
 FORCE_ANSWER_MARGIN = 2  # 距任务超时 ≤ 此回合 → 强制"只给答案"模式
+# T6：提交是 2 回合/次交换（发 prompt → 收 llmResp → 提交），margin=2 触发时
+# 常常已经来不及完成"最后一问+提交" → 兜底提交（T3）与强制答案统一用更宽的余量。
+FORCE_ANSWER_MARGIN = max(FORCE_ANSWER_MARGIN, FORCE_ANSWER_MARGIN_LATE)
 SUBMIT_CONFIRM_ROUNDS = 2  # P1-8：提交后静默如此多回合且无 errorCode=2 → 视为成功
 EXPLORE_LIMIT = 20000  # 探索输出保留字符数（放开：需容纳 API_DOCS 全文/所有 md·txt/密钥）
 
@@ -147,6 +152,46 @@ def _parse_llm_json(text: str) -> dict | None:
         except (ValueError, SyntaxError):
             continue
     return None
+
+
+def _cmd_failed(result: str) -> bool:
+    """T5：命令结果是否算失败（exitCode≠0 / 空输出 / 没定位到任何文件）。"""
+    r = result or ""
+    m = re.search(r"\[exitCode:(-?\d+)\]", r)
+    if m and m.group(1) != "0":
+        return True
+    body = r.split("\n", 1)[-1].strip() if "\n" in r else r
+    if not body:
+        return True
+    return not _FILE.search(r) and "=== TASK ===" not in r and "__DIR:" not in r
+
+
+def _assistant_turn_text(text: str, limit: int = 2000) -> str:
+    """T1：把 LLM 上一轮回复整理成 transcript 的 assistant turn。
+
+    结构 = 提取结论（命令/答案/isFinished）+ 原始回复（截断），
+    让 LLM 下一轮能看见"我上次到底说了什么"，避免同源复读。"""
+    obj = _parse_llm_json(text)
+    head = "ASSISTANT（你上一轮的回复）:"
+    if obj is None:
+        return f"{head}（非 JSON）{text[:limit]}"
+    parts = [head]
+    cmd = str(obj.get("cmd") or "").strip()
+    ans = obj.get("answer")
+    if cmd:
+        parts.append(f"\n  你要求执行的命令: {cmd[:800]}")
+    if ans not in (None, "", {}):
+        try:
+            ans_txt = json.dumps(ans, ensure_ascii=False)
+        except (TypeError, ValueError):
+            ans_txt = str(ans)
+        parts.append(f"\n  你给出的答案: {ans_txt[:800]}")
+    else:
+        parts.append("\n  你给出的答案: （空 —— 这就是任务卡住的原因，"
+                     "下一步要么给出答案，要么用命令拿到能定答案的数据）")
+    parts.append(f"\n  isFinished: {bool(obj.get('isFinished'))}")
+    parts.append(f"\n  原始回复: {text[:limit]}")
+    return "".join(parts)
 
 
 def _answer_key(answer: Any) -> str:
@@ -266,6 +311,8 @@ class TaskSession:
     force_sent: bool = False                                # 是否已发过"强制答案"prompt
     last_submitted: str = ""                                # IKKIA9-Q8：上次已提交答案的归一化键（复读拦截）
     skip_explore: bool = False                              # IKKHUU-Q2-A：紧任务跳过健壮探索
+    explore_fallback_sent: bool = False                     # T5：探索失败降级探测已补发（只补一次）
+    tight_task: bool = False                                # T2：紧任务 → 探索与首轮提问并行下发
     force_answer: bool = False                              # 强制只给答案模式（拒绝新命令）
     local_done: bool = False                                # local_answer 已判定（零 LLM 直答）
 
@@ -315,8 +362,15 @@ class TaskPlanner:
                 # IKKHUU-Q2-A（实测：接任务→首 prompt 恒 3-5 回合死时间 + 2 回合/次交换，
                 # timeout=10 仅够 3 次交换）：**紧任务跳过健壮探索**（省 2 回合 = 多 1 次
                 # 交换机会），由 LLM 首条命令自行探索任务点名文件。
+                # T6/T2（2026-10-10）：timeout 分档——
+                #   ≤10：**跳过探索**（省 2 回合换 1 次交换，原 IKKHUU-Q2-A 口径保留）；
+                #   ≤16：**探索与首轮提问并行**（T2：同回合下发 executeCmd + prompt，
+                #        省 1 回合等结果的时间，同时保留探索拿到的任务文件内容——
+                #        比"直接跳过探索"信息更全；IKKJ2K 的 timeout=15 属此档）。
                 if session.timeout_rounds <= 10:
                     session.skip_explore = True
+                elif session.timeout_rounds <= SKIP_EXPLORE_TIMEOUT:
+                    session.tight_task = True
             session.stage = ST_EXPLORE
 
         # 1. 回收异步结果
@@ -328,6 +382,16 @@ class TaskPlanner:
             session.cmd_history.append((session.pending_cmd, result))
             self._on_cmd_result(session, session.pending_cmd, result)
             session.pending_cmd = None
+        # T5：探索/探测失败的自适应降级命令（work() 回收后立刻补发一次）
+        retry = getattr(session, "_pending_retry_cmd", None)
+        if retry:
+            session._pending_retry_cmd = None  # type: ignore[attr-defined]
+            out.execute_cmd = retry
+            session.pending_cmd = retry
+            session.cmd_count += 1
+            session._pending_kind = "explore"  # type: ignore[attr-defined]
+            session.stage = ST_WAIT_CMD
+            return out
         if session.llm_pending:
             # LLM 服务端故障（errorCode=3：503/502/超时）→ **不计入循环/非 JSON 预算**，
             # 直接重试（IKI8HA r29/r30：连续 502 被当成"答非 JSON"提前放弃任务）
@@ -423,6 +487,13 @@ class TaskPlanner:
                 session.pending_cmd = cmd
                 session._pending_kind = "explore"  # type: ignore[attr-defined]
                 session.stage = ST_WAIT_CMD
+                # T2（2026-10-10）：紧任务**同回合并行提问**——Response 的 prompt 与
+                # executeCmd 是两个独立字段，可同时下发。等探索结果的那 1 回合被复用
+                # 为"首轮提问"，等价省一次交换的时间（不额外消耗 LLM 次数）。
+                if getattr(session, "tight_task", False) and not session.llm_pending:
+                    out.prompt = self._build_prompt(session)
+                    session.llm_pending = True
+                    session.llm_loops += 1
                 return out
             session.stage = ST_LLM
             return self._advance(turn, session, out)
@@ -457,9 +528,24 @@ class TaskPlanner:
                 or self._at_deadline(turn, session)
             )
             if force:
+                # T3（2026-10-10）：**提交兜底**——答案常常已经躺在沙盒输出里
+                # （IKKJ2K r14/16/18/22 输出的裸 JSON 就是答案），但只有 FINAL_ANSWER:
+                # 标记才会自动提交 → 本可拿到的"部分分"（奖励×通过率）变成 0 分。
+                # 死线/强制模式下先从 transcript 抽最后一个像答案的 JSON 提交。
+                if session.answer is None and (self._at_deadline(turn, session)
+                                               or session.force_sent):
+                    salvaged = self._salvage_answer(session)
+                    if salvaged is not None:
+                        session.answer = salvaged
+                        session.stage = ST_SUBMIT
+                        session.transcript.append(
+                            "RESULT: 兜底提交——已从沙盒输出中提取到候选答案并提交（争取部分分）。"
+                        )
+                        return self._advance(turn, session, out)
                 # 仅当"已发过强制答案" **且已到截止回合** 才放弃（IKI8HA：服务端 502 后一次空响应
                 # 就 ST_DONE → 任务干等到超时）。未到截止则继续给 LLM 机会（force 模式只准给答案）。
                 if session.force_sent and self._at_deadline(turn, session):
+                    self._record_failure(session, "截止回合仍无答案（LLM 交换耗尽）")
                     session.stage = ST_DONE
                     return out
                 session.force_sent = True
@@ -470,6 +556,31 @@ class TaskPlanner:
             session.stage = ST_WAIT_LLM
             return out
         return out
+
+    def _salvage_answer(self, session: TaskSession) -> Any:
+        """T3：从 transcript 里抢救一个"像答案"的 JSON（倒序扫描，取最后一个）。
+
+        判据：能解析成 dict、非空、不含明显报错字段、且已被 `_answer_suspect` 放行。
+        任务书：部分完成也按**通过率**给分 → 有候选就提交，胜过空手。"""
+        for entry in reversed(session.transcript or []):
+            if not isinstance(entry, str) or entry.startswith("ASSISTANT"):
+                # assistant turn 里的 answer 是 LLM 未提交的草稿（可能自认不可用）→ 仍尝试
+                pass
+            for cand in _JSON_BLOCK.findall(entry or ""):
+                try:
+                    obj = json.loads(cand)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(obj, dict) or not obj:
+                    continue
+                if any(k in obj for k in ("error", "errors", "exception", "traceback")):
+                    # 带错误字段的可能是日志统计结果（IKKJ2K 的 {"errors": {...}} 就是答案）
+                    # → 不因含 error 字样直接丢弃，交给 _answer_suspect 判定
+                    pass
+                if self._answer_suspect(obj):
+                    continue
+                return obj
+        return None
 
     def _confirm_done(self, session: TaskSession) -> None:
         """P1-8：提交静默确认成功 → 此刻才计完成数并沉淀 SOP（原提交时刻后移）。"""
@@ -490,6 +601,18 @@ class TaskPlanner:
             'echo "=== FILE:$p ==="; cat "$p"; done; '
             'echo "=== LIST ==="; find "$d" -maxdepth 3 -type f -printf \'%p %m\\n\' 2>/dev/null; '
             'echo "__DIR:$d"'
+        )
+
+    def _fallback_explore_cmd(self, session: TaskSession) -> str:
+        """T5：探索失败后的降级探测——列沙盒根目录与常见任务目录，找任务文件。"""
+        name = session.target_name or "task_*.md"
+        return (
+            'echo "__PWD:$(pwd)"; echo "=== ROOT ==="; ls -la / 2>/dev/null | head -40; '
+            'echo "=== TMP ==="; ls -la /tmp 2>/dev/null | head -40; '
+            'echo "=== FIND ==="; '
+            f'find /tmp /root /home /opt /workspace -maxdepth 6 -type f '
+            f'\\( -iname "{name}" -o -iname "*.md" -o -iname "*.txt" -o -iname "*.json" \\) '
+            '-print 2>/dev/null | head -40'
         )
 
     def _probe_cmd(self, session: TaskSession) -> str:
@@ -550,6 +673,15 @@ class TaskPlanner:
 
     def _on_explore(self, session: TaskSession, result: str) -> None:
         session.explore_output = (result or "")[:EXPLORE_LIMIT]
+        # T5（2026-10-10）：探索失败自适应——没定位到任务文件 / exitCode≠0 / 空输出
+        # → 下发一条**降级探测**（列根目录与候选目录），而不是两手空空交给 LLM
+        # 盲猜（IKKJ2J 实锤：probe 返回 exitCode:127、__WS:. 后只能靠 LLM 多轮救回）。
+        if not session.explore_fallback_sent and _cmd_failed(result):
+            session.explore_fallback_sent = True
+            # 用重试字段（work() 回收后会立即下发）：直接写 pending_cmd 会被清空
+            session._pending_retry_cmd = self._fallback_explore_cmd(session)  # type: ignore[attr-defined]
+            session.stage = ST_WAIT_CMD
+            return
         file_m = _FILE.search(result or "")
         dir_m = _DIR.search(result or "")
         path = (file_m.group(1) if file_m else "").strip()
@@ -729,6 +861,22 @@ class TaskPlanner:
         return True
 
     # ---- 家族经验学习（learn_family_notes）----
+    def _record_failure(self, session: TaskSession, reason: str) -> None:
+        """T8（2026-10-10）：失败任务也沉淀教训到家族笔记——未来同族任务 prompt
+        自动注入（_notes_block），避免重蹈覆辙（IKKJ2K 复读死循环若早有此条，
+        同族后续任务首轮就会被告知"必须逐步推进、不得重复整段脚本"）。"""
+        key = session.task_type or session.task_key or "general"
+        notes = self.notes.setdefault(key, [])
+        msg = (
+            f"失败教训: {reason}"
+            f"（交换 {session.llm_loops} 次/命令 {session.cmd_count} 条/"
+            f"timeout={session.timeout_rounds}）——下次同族任务应更早提交兜底答案"
+        )
+        if msg not in notes:
+            notes.append(msg)
+            if len(notes) > 20:
+                del notes[0]
+
     def _learn_notes(self, session: TaskSession, result: str) -> None:
         """从命令结果提取可复用事实，按 task_type 跨任务持久化（issue IKI8DZ §5.2）。"""
         text = result or ""
@@ -747,10 +895,17 @@ class TaskPlanner:
     # ---- LLM 结果 ----
     def _on_llm_result(self, session: TaskSession, text: str) -> None:
         session.last_llm_raw = text or ""
+        # T1（2026-10-10 用户点名项）：transcript 增加 **assistant turn**。
+        # 旧实现只写 COMMAND:/RESULT:（"我跑过什么命令"），LLM 看不到"我上次得出
+        # 什么结论/为什么没提交" → IKKJ2K 实锤同源复读（7 次 prompt 反复回同一脚本、
+        # answer 恒空 → 15 回合全废）。这里把 LLM 自己的回复与提取结论回灌上下文。
+        if text:
+            session.transcript.append(_assistant_turn_text(text))
         obj = _parse_llm_json(text)
         if obj is None:                                  # 非 JSON
             session.non_json += 1
             if session.non_json >= MAX_NON_JSON:
+                self._record_failure(session, f"LLM 连续 {MAX_NON_JSON} 次返回非 JSON")
                 session.stage = ST_DONE                  # 强制结束（不提交）
             else:
                 session.stage = ST_LLM
@@ -765,6 +920,7 @@ class TaskPlanner:
                 session.non_json += 1
                 session.need_refine = True
                 if session.non_json >= MAX_NON_JSON:
+                    self._record_failure(session, "答案反复未通过安全校验（占位/全零/查询失败）")
                     session.stage = ST_DONE
                 else:
                     session.stage = ST_LLM
@@ -788,6 +944,21 @@ class TaskPlanner:
             session.stage = ST_SUBMIT
             return
         if cmd:
+            # T4（2026-10-10）：**复用命令拦截**——与上一条已执行过的命令完全相同
+            # → 拒收并要求换命令。IKKJ2K 实锤 r17/r19/r21/r23 反复回同一脚本
+            # （prompt_len 一路涨到 18650 后 r22/r23 完全相同），烧尽 15 回合。
+            if session.cmd_history and cmd.strip() == str(
+                session.cmd_history[-1][0]
+            ).strip():
+                session.transcript.append(
+                    "COMMAND REJECTED（复读命令）: 这条命令与你上一次执行的命令完全相同，"
+                    "重复执行不会带来任何新信息，只会继续消耗回合。**必须换一条不同的命令**"
+                    "（换目录 / 换参数 / 换工具 / 换读取的文件），"
+                    "或依据已有输出直接给出答案（isFinished=true）。"
+                )
+                session.stage = ST_LLM
+                session.need_refine = True
+                return
             # 强制答案模式 或 命令预算用尽 → 拒绝新命令，只准给答案
             if session.force_answer or session.cmd_count >= session.max_cmds:
                 session.force_answer = True

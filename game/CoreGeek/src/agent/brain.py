@@ -517,13 +517,17 @@ class Brain:
         # 单工人建墙产能：每墙约 WALL_ROUNDS_PER 回合（采集+建造+挪位）；不共享矿 → 各采各的更快
         capacity = max(0.0, turn.rounds_until_night - BUILD_TRAVEL_BUFFER) / WALL_ROUNDS_PER
         stone_finishable = walls_left <= capacity
+        # A3：需 **≥2 座石矿** 才让第二人帮建——只有一座时两人抢同一矿，
+        # 石头总量不变、反而少了挖矿工的铜/铁收入（净亏），帮建无意义。
         day1_helper = (
             turn.day_index == 1
             and walls_missing
             and not stone_finishable
             and turn.round_in_day < DAY1_RUSH_DEADLINE
-            and bool(stone_mines)
+            and len(stone_mines) >= 2
         )
+        # A3：把产能判据透传给工人 FSM（挖矿工据此转采石、接受建墙派单）
+        ctx.day1_helper = day1_helper
         ctx.share_mines = False  # 不共享矿：双工人各选各的（共享=互相抢同一矿，更慢）
         # 角色固化：worker[0]=修理工，worker[1]=挖矿工（按 ID 升序）
         sorted_workers = sorted(workers, key=lambda w: w.unit_id)
@@ -585,6 +589,7 @@ class Brain:
         walls_left = len(walls_missing)
         # 预留回合：入夜前剩余 ≤ 待建墙数 + 回程缓冲 → 必须立刻开建
         urgent = 0 < turn.rounds_until_night <= walls_left + BUILD_TRAVEL_BUFFER
+        ctx.urgent_build = urgent   # A3：透传给挖矿工（入夜前抢建，双工人一起上）
         for worker in workers:
             if worker.unit_id in busy:
                 continue
@@ -593,12 +598,16 @@ class Brain:
                 continue
             stones = worker.backpack.count("stone")
             # 只有修理工负责建墙（若修理工阵亡，则由其余工人接手）；
-            # 挖矿工仅在"第一天石头>20 且 墙<14"时紧急建墙
+            # A3（2026-10-10 用户裁决）：day1 墙环闭环是生存前提——旧判据
+            # "day1 且 石头>20"（石矿每座仅 10 次，day1 几乎达不到）形同虚设，
+            # 而 `day1_helper` 变量此前**定义后从未使用**（死代码）→ 双工人帮建失效
+            # → day1 只建成 13/14，缺口过夜（IKKJ2x 被推平的帮凶）。
+            # 新判据：**按产能算**——单人按 WALL_ROUNDS_PER 建不完剩余墙时，第二人帮建。
             repairer_alive = any(
                 self._worker_fsm(w).role == ROLE_REPAIRER for w in workers
             )
             if fsm.role != ROLE_REPAIRER and repairer_alive:
-                if not (turn.day_index == 1 and stones > 20 and walls_missing):
+                if not (walls_missing and (day1_helper or urgent)):
                     continue
             # 批量建造：采够一批进入 build_phase 后连续建完该批（不采一个建一个）。
             # Day1 首冲（issue#26）：目标一次采 12-14 块再连续建（减少往返）。
@@ -825,10 +834,19 @@ class Brain:
         )
         # IKKIBC-Q5：建造仅白天合法（§4.5.1）——夜间清掉在途建造任务，
         # 防止修理工为"未建成的背墙"整夜站桩墙外（次日清晨 _day 会重新派单）。
+        # C7（2026-10-10）：岗位固化保险——role 只在 _day 按存活集合赋值，
+        # 夜间/首帧若未赋值，FSM 默认 ROLE_MINER → 可能退化成"两个矿工、零修理工"
+        # （无人建墙/修墙/备券）。此处按 ID 升序幂等固化，保证至少一名修理工。
+        _sorted = sorted(turn.workers(), key=lambda w: w.unit_id)
+        for _idx, _w in enumerate(_sorted):
+            self._worker_fsm(_w).role = ROLE_REPAIRER if _idx == 0 else ROLE_MINER
         for _w in turn.workers():
             _fsm = self._worker_fsm(_w)
             if _fsm.build is not None:
                 _fsm.build = None
+                # A3：一并清"批量建墙"标记——否则白天转入建墙模式的工人夜里会卡在
+                # "有石头 + build_phase → 等 brain 派单"分支（夜里不派单）→ 整夜站桩不采矿。
+                _fsm.build_phase = False
         pioneer = turn.pioneer()
         if pioneer is not None and self.layout is not None:
             cp = self.layout.control_point
@@ -887,15 +905,21 @@ class Brain:
                 if pioneer.unit_id in commands:
                     ctx.reserve_from(commands[pioneer.unit_id])
             else:
-                # IKKIBC-Q4（实锤：敌 BOSS 站炮位旁 → CP 危险 → 躲内圈 → 全夜零开火）：
-                # 改为选"邻接最多武器"的**安全**控制格——保持控炮能力优先于绝对安全。
-                goal = self._night_control_goal(
-                    turn, ctx, pioneer, avoid=ctx.repair_anchor
-                )
-                cmd = self.pioneer_fsm.move_to_guard(turn, pioneer, goal, ctx)
-                if cmd:
-                    commands[pioneer.unit_id] = cmd
-                    ctx.reserve_from(cmd)
+                # B3（2026-10-10 用户裁决）：① pioneer **已在能控炮且安全的格 → 粘住
+                # 不移动**（移动占动作 → 本回合开不了火；此前每回合重算控制格导致
+                # 目标抖动、来回走、整夜零开火）；② 否则换到"能控炮"的控制格。
+                if self._can_fire_here(turn, pioneer):
+                    ctx.trace["night_hold"] = pioneer.pos.dump()
+                else:
+                    # IKKIBC-Q4（实锤：敌 BOSS 站炮位旁 → CP 危险 → 躲内圈 → 全夜零开火）：
+                    # 改为选"邻接最多武器"的**安全且可达**控制格——保持控炮能力优先于绝对安全。
+                    goal = self._night_control_goal(
+                        turn, ctx, pioneer, avoid=ctx.repair_anchor
+                    )
+                    cmd = self.pioneer_fsm.move_to_guard(turn, pioneer, goal, ctx)
+                    if cmd:
+                        commands[pioneer.unit_id] = cmd
+                        ctx.reserve_from(cmd)
         # 应急道具（Day6+，用户）：城墙危险时用炸弹/眩晕清群（占用开拓者动作，优先于开火）
         if (
             pioneer is not None and pioneer.unit_id not in commands
@@ -922,6 +946,18 @@ class Brain:
             ctx.reserve_from(cmd)
         self._maybe_medicine(turn, commands)
 
+    # ---- B3（2026-10-10）：夜间控炮"粘住 + 换位置" ----
+    def _can_fire_here(self, turn: Turn, controller) -> bool:
+        """当前格能否安全控炮：邻接 ≥1 座武器 且 无机器人贴脸。
+
+        B3：pioneer 到位后在此粘住不再移动——移动占用动作 → 本回合无法开火。"""
+        if not any(distance(controller.pos, w.pos) <= 1 for w in turn.weapons()):
+            return False
+        return not any(
+            distance(controller.pos, r.pos) <= PIONEER_FLEE_DIST
+            for r in turn.hostile_robots
+        )
+
     # ---- IKKIBC-Q4：夜间控制格选择 ----
     def _night_control_goal(
         self, turn: Turn, ctx: "_Ctx", controller, avoid=None
@@ -939,7 +975,10 @@ class Brain:
         cands = {cp}
         for w in weapons:
             cands.update(w.pos.neighbours())
-        best, best_key = None, None
+        # B3：最优控炮格（能控最多武器的格）被机器人/单位占用 或 **走不到**
+        # → 必须换到次优的可控炮格，不能原地等死（IKKIBC 实锤：BOSS 占 (32,9)
+        # 达 30 回合，我方整夜零开火、基地被推平）。
+        scored: list[tuple[tuple, "Pos"]] = []
         for c in cands:
             if not (0 <= c.x < turn.width and 0 <= c.y < turn.height):
                 continue
@@ -953,13 +992,25 @@ class Brain:
             rmin = min((distance(c, r.pos) for r in robots), default=99)
             unsafe = 1 if rmin <= PIONEER_FLEE_DIST else 0
             key = (unsafe, -adj, -rmin, distance(c, cp), c.x, c.y)
-            if best_key is None or key < best_key:
-                best, best_key = c, key
-        if best is None:
+            scored.append((key, c))
+        if not scored:
             return ctx.safe_anchor or cp
-        if best_key[0] == 1 and ctx.safe_anchor is not None:
-            return ctx.safe_anchor   # 全部控制格都贴脸 → 保命优先
-        return best
+        scored.sort(key=lambda t: t[0])
+        # 可达性验证（只对最优的前若干个做 A*，控制开销）：被墙/单位封死、
+        # 规划不出路径的格直接放弃，换下一个候选。
+        for key, c in scored[:8]:
+            if c == controller.pos:
+                return c
+            if next_step(turn, controller, c, ctx.reserved) is not None \
+                    or next_step(turn, controller, c) is not None:
+                return c
+        # 邻域全被占/不可达 → 退而求其次：内圈任意"能控 ≥1 座武器"的可达格
+        if ctx.safe_anchor is not None:
+            reachable = ctx.safe_anchor
+            if self._can_fire_here(turn, controller):
+                reachable = controller.pos
+            return reachable
+        return cp
 
     # ---- IKKIBC-Q6：BOSS 召唤位 / 夜间驱动 ----
     def _boss_summon_pos(self, turn: Turn, es) -> Pos | None:
@@ -1149,7 +1200,21 @@ class Brain:
                 break
             if hunter is None:
                 continue
-            step = step_toward(turn, hunter, foe.pos, ctx.reserved)
+            step = step_toward(turn, hunter, foe.pos, ctx.reserved) \
+                or step_toward(turn, hunter, foe.pos)
+            # A3 连带：工人本回合可能已有采石/建墙指令 → ctx.reserved 含它自己的目标格，
+            # step_toward 会绕开 → "等距横移"（追击原地打转，永远抓不到）。
+            # 兜底：直接挑一个**确实更接近敌 imp** 的可通行邻格。
+            if step is not None and distance(step, foe.pos) >= distance(hunter.pos, foe.pos):
+                blocked = turn.blocked(hunter)
+                alt = min(
+                    (c for c in hunter.pos.neighbours()
+                     if turn.land(c) and c not in blocked),
+                    key=lambda c: (distance(c, foe.pos), c.x, c.y),
+                    default=None,
+                )
+                if alt is not None and distance(alt, foe.pos) < distance(hunter.pos, foe.pos):
+                    step = alt
             if step is None:
                 continue
             commands[hunter.unit_id] = move_command(step)
